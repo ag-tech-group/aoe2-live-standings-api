@@ -7,9 +7,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from app.auth import current_active_user
-from app.models.user import User
-
 router = APIRouter(tags=["features"])
 
 # Prefix used to discover feature flags from the environment.
@@ -50,8 +47,7 @@ def get_feature_flags() -> FeatureFlags:
 
 @router.get("/flags")
 async def list_flags(
-    user: User = Depends(current_active_user),
     flags: FeatureFlags = Depends(get_feature_flags),
 ) -> dict[str, bool]:
-    """Return enabled feature flags for the current user."""
+    """Return all feature flags."""
     return flags.all_flags()
