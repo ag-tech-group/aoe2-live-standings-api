@@ -9,8 +9,8 @@ from alembic import context
 from app.config import settings
 from app.database import Base
 
-# Import all models so Alembic can detect them
-from app.models import Note, RefreshToken, User  # noqa: F401
+# Models must be imported here (with a noqa suppression for the unused import)
+# so Alembic autogenerate can detect them via Base.metadata.
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
