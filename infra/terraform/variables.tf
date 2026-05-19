@@ -41,7 +41,7 @@ variable "tracked_profile_ids" {
 }
 
 variable "cors_origins" {
-  description = "Comma-separated CORS allowlist. The consumer's deployed domain goes here. Leave blank in dev and the app falls back to localhost:5100-5199."
+  description = "Comma-separated CORS allowlist for the deployed (production) service. Consumer dev origins live here so a developer running `hera-streamer-invitational-2026-web` locally can call the live preview API from their browser. The deployed consumer URL gets added once that service ships."
   type        = string
-  default     = ""
+  default     = "http://localhost:5173"
 }
