@@ -14,6 +14,12 @@ from slowapi.util import get_remote_address
 from app.config import API_V1_PREFIX, settings
 from app.features import router as features_router
 from app.logging import setup_logging
+from app.routers import (
+    leaderboards_router,
+    live_router,
+    matches_router,
+    players_router,
+)
 from app.telemetry import setup_telemetry
 
 setup_logging()
@@ -86,9 +92,19 @@ async def request_id_middleware(request: Request, call_next) -> Response:
 
 @app.middleware("http")
 async def cache_control_middleware(request: Request, call_next) -> Response:
-    """Set Cache-Control: public caching for successful GETs."""
+    """Stamp a default Cache-Control on successful GETs that didn't set one.
+
+    Per-route handlers can override by setting ``response.headers["Cache-Control"]``
+    themselves (e.g. ``max-age=10`` on the live feed, ``no-store`` while a match
+    is in progress). This middleware only fills in the conservative 1-hour
+    default when the route stayed silent.
+    """
     response = await call_next(request)
-    if request.method == "GET" and response.status_code == 200:
+    if (
+        request.method == "GET"
+        and response.status_code == 200
+        and "cache-control" not in response.headers
+    ):
         response.headers["Cache-Control"] = "public, max-age=3600"
     return response
 
@@ -116,7 +132,13 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
 # Application routers, all mounted under /v1 so the whole API surface is
 # versioned together. Add new resource routers to this tuple — they're loop-
 # mounted with the /v1 prefix automatically.
-ROUTERS = (features_router,)
+ROUTERS = (
+    features_router,
+    players_router,
+    leaderboards_router,
+    matches_router,
+    live_router,
+)
 for router in ROUTERS:
     app.include_router(router, prefix=API_V1_PREFIX)
 
