@@ -14,6 +14,7 @@ from slowapi.util import get_remote_address
 from app.config import API_V1_PREFIX, settings
 from app.features import router as features_router
 from app.logging import setup_logging
+from app.poller.lifespan import lifespan
 from app.routers import (
     leaderboards_router,
     live_router,
@@ -30,6 +31,7 @@ app = FastAPI(
     description="Open-source live-standings API for AoE2: DE tournaments.",
     version="0.0.1",
     docs_url=None,
+    lifespan=lifespan,
 )
 
 setup_telemetry(app)

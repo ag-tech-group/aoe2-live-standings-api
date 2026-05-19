@@ -20,6 +20,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.40.0",
     "opentelemetry-instrumentation-fastapi>=0.61b0",
     "scalar-fastapi>=1.0.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
@@ -30,6 +31,7 @@ dev = [
     "aiosqlite>=0.22.0",
     "ruff>=0.15.0",
     "pre-commit>=4.5.0",
+    "respx>=0.23.1",
 ]
 
 [tool.pytest.ini_options]
