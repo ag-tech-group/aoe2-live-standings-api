@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Terraform / OpenTofu — provider downloads and local state files.
+# `.terraform.lock.hcl` IS committed (locks provider versions); everything
+# else is local-only or sensitive.
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
