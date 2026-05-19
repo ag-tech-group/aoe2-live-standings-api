@@ -43,6 +43,15 @@ resource "google_cloud_run_v2_service" "api" {
         cpu_idle = false # min-instance always-on CPU so the poller runs between requests
       }
 
+      # Cloud Run auto-creates this mount when a `cloud_sql_instance` volume
+      # is declared at the template level, but Terraform's idempotency
+      # check wants it declared explicitly here — otherwise every plan
+      # tries to delete the auto-created mount.
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
+      }
+
       env {
         name = "DATABASE_URL"
         value_source {
