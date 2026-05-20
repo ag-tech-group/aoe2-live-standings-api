@@ -20,8 +20,12 @@ resource "google_sql_database_instance" "main" {
     disk_type         = "PD_HDD"
 
     backup_configuration {
-      enabled                        = true
-      point_in_time_recovery_enabled = false # WAL archiving is overkill for preview
+      enabled = true
+      # WAL archiving — lets us recover to any point inside the retention
+      # window (after a bad migration or an accidental DELETE), not just to
+      # the last nightly snapshot. Enabling it triggers a one-time instance
+      # restart.
+      point_in_time_recovery_enabled = true
     }
 
     ip_configuration {
@@ -35,8 +39,15 @@ resource "google_sql_database_instance" "main" {
     }
   }
 
-  # Preview env — flip to true before any production traffic.
-  deletion_protection = false
+  # GCP-side guard: the Cloud SQL API rejects an instance delete while this
+  # is true. Pairs with the Terraform-side prevent_destroy below — the two
+  # block deletion at different layers (the cloud API vs. `tofu` planning a
+  # destroy in the first place).
+  deletion_protection = true
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_sql_database" "app" {
