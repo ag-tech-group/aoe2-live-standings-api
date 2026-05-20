@@ -16,6 +16,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.events import EventType, hub
 from app.poller.parsers import parse_live_advertisements
 from app.poller.upserts import upsert_match_from_live
 
@@ -43,6 +44,7 @@ async def tick_live_matches(
             await upsert_match_from_live(session, match)
         await session.commit()
     logger.info("poll_live_matches_ok", matches=len(matches))
+    hub.publish(EventType.LIVE)
 
 
 async def run_live_matches_poller(

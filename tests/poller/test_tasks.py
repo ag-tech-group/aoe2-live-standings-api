@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import leaderboards_cache
+from app.events import EventType, hub
 from app.models import Match, MatchPlayer, MatchState, Player, PlayerRating
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
@@ -74,6 +75,7 @@ class TestTickPlayerStats:
             ],
         }
 
+        nudges = hub.subscribe()
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/GetPersonalStat").respond(json=payload)
             await tick_player_stats(upstream_client, [199325], session_maker_for_tasks)
@@ -85,6 +87,9 @@ class TestTickPlayerStats:
         rating = (await session.execute(select(PlayerRating))).scalar_one()
         assert rating.current_rating == 2788
         assert rating.rank == 1
+
+        # A successful tick nudges SSE subscribers.
+        assert nudges.get_nowait().event == EventType.STANDINGS
 
     async def test_skips_upstream_when_no_tracked_profiles(
         self, upstream_client: httpx.AsyncClient
@@ -123,6 +128,7 @@ class TestTickRecentMatches:
             ]
         }
 
+        nudges = hub.subscribe()
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/getRecentMatchHistory").respond(json=payload)
             await tick_recent_matches(
@@ -139,6 +145,8 @@ class TestTickRecentMatches:
         mp = (await session.execute(select(MatchPlayer))).scalar_one()
         assert mp.profile_id == 199325
         assert mp.new_rating == 1510
+
+        assert nudges.get_nowait().event == EventType.MATCHES
 
     async def test_one_failing_profile_does_not_kill_the_batch(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession
@@ -199,6 +207,7 @@ class TestTickLiveMatches:
             ]
         }
 
+        nudges = hub.subscribe()
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/advertisement/findAdvertisements").respond(json=payload)
             await tick_live_matches(upstream_client, [199325], session_maker_for_tasks)
@@ -206,6 +215,8 @@ class TestTickLiveMatches:
         matches = (await session.execute(select(Match))).scalars().all()
         assert [m.match_id for m in matches] == [1]
         assert matches[0].state == MatchState.STAGING
+
+        assert nudges.get_nowait().event == EventType.LIVE
 
     async def test_does_not_overwrite_completed_match(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession

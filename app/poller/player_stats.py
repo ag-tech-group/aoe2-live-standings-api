@@ -14,6 +14,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.events import EventType, hub
 from app.poller.parsers import parse_player_stats
 from app.poller.upserts import upsert_player, upsert_player_rating
 
@@ -55,6 +56,8 @@ async def tick_player_stats(
             await upsert_player_rating(session, row)
         await session.commit()
     logger.info("poll_player_stats_ok", players=len(players), ratings=len(ratings))
+    # Player ratings drive the standings — nudge SSE subscribers to refetch.
+    hub.publish(EventType.STANDINGS)
 
 
 async def run_player_stats_poller(

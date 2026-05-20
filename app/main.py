@@ -20,6 +20,7 @@ from app.routers import (
     live_router,
     matches_router,
     players_router,
+    stream_router,
 )
 from app.telemetry import setup_telemetry
 
@@ -140,6 +141,7 @@ ROUTERS = (
     leaderboards_router,
     matches_router,
     live_router,
+    stream_router,
 )
 for router in ROUTERS:
     app.include_router(router, prefix=API_V1_PREFIX)

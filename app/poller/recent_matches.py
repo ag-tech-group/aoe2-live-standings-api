@@ -19,6 +19,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.events import EventType, hub
 from app.poller.parsers import parse_recent_matches
 from app.poller.upserts import upsert_match_from_recent, upsert_match_player
 
@@ -89,6 +90,7 @@ async def tick_recent_matches(
         matches=total_matches,
         players=total_players,
     )
+    hub.publish(EventType.MATCHES)
 
 
 async def run_recent_matches_poller(
