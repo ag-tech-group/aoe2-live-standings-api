@@ -17,3 +17,13 @@ output "service_account_email" {
   description = "Email of the SA the Cloud Run service runs as."
   value       = google_service_account.cloud_run.email
 }
+
+output "cd_workload_identity_provider" {
+  description = "Full resource name of the WIF provider — the `workload_identity_provider` input for the google-github-actions/auth step."
+  value       = google_iam_workload_identity_pool_provider.github.name
+}
+
+output "cd_deployer_service_account" {
+  description = "Email of the GitHub Actions CD deployer SA — the `service_account` input for the google-github-actions/auth step."
+  value       = google_service_account.deployer.email
+}
