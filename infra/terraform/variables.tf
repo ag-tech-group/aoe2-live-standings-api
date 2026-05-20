@@ -45,3 +45,9 @@ variable "cors_origins" {
   type        = string
   default     = "http://localhost:5173"
 }
+
+variable "github_repository" {
+  description = "The `owner/repo` GitHub Actions CD runs from. Scopes the Workload Identity provider's attribute_condition so only this repo's OIDC tokens can deploy."
+  type        = string
+  default     = "ag-tech-group/aoe2-live-standings-api"
+}

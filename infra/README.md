@@ -62,7 +62,9 @@ docker push $REPO/api:latest
 
 ## Deploy to Cloud Run
 
-Cloud Run's image attribute is intentionally outside Terraform (`lifecycle.ignore_changes` in `run.tf`). Roll new images via `gcloud`:
+**Deploys are automated.** Every push to `main` runs `.github/workflows/ci.yml`, whose `deploy` job — gated on `lint` and `test` passing — builds the image, pushes it to Artifact Registry, and rolls a new Cloud Run revision. Auth is keyless via Workload Identity Federation (`infra/terraform/cicd.tf`); there is no service-account key in repo secrets.
+
+The build + push steps above are only needed for a **manual deploy** (CD outage, or deploying an un-merged branch). Cloud Run's image attribute is intentionally outside Terraform (`lifecycle.ignore_changes` in `run.tf`), so a manual roll is just:
 
 ```sh
 gcloud run deploy aoe2-live-standings-api \
@@ -72,7 +74,7 @@ gcloud run deploy aoe2-live-standings-api \
   --project=$PROJECT
 ```
 
-The container's `start.sh` runs `alembic upgrade head` before starting `uvicorn`, so migrations land automatically on each deploy. If a migration fails the container won't start and the new revision won't take traffic — Cloud Run keeps the old revision alive.
+The container's `start.sh` runs `alembic upgrade head` before starting `uvicorn`, so migrations land automatically on each deploy (CD or manual). If a migration fails the container won't start and the new revision won't take traffic — Cloud Run keeps the old revision alive.
 
 ## Smoke test
 
