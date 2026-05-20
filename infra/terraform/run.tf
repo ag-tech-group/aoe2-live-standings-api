@@ -20,6 +20,18 @@ resource "google_cloud_run_v2_service" "api" {
   template {
     service_account = google_service_account.cloud_run.email
 
+    # SSE connections (`GET /v1/stream`) are long-lived. The timeout is the
+    # hard ceiling before Cloud Run recycles a request; at the cap (3600s)
+    # an idle stream lives ~1h, then EventSource reconnects transparently.
+    # Normal REST handlers finish in ms — the high ceiling never bites them.
+    timeout = "3600s"
+
+    # Each open SSE connection holds a request slot for its whole lifetime.
+    # The default concurrency of 80 would cap concurrent viewers at 80;
+    # 800 buys headroom on a single instance. True horizontal scale (a
+    # separate read/SSE tier) is tracked in issue #14.
+    max_instance_request_concurrency = 800
+
     scaling {
       min_instance_count = 1
       max_instance_count = 1

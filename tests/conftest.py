@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app import leaderboards_cache
 from app.database import Base, get_async_session
+from app.events import hub
 from app.main import app, limiter
 from app.models import Match, MatchOutcome, MatchPlayer, MatchState, Player, PlayerRating
 
@@ -40,6 +41,13 @@ def reset_leaderboards_cache():
     """Drop any leaderboard metadata a test wrote into the module-level cache."""
     yield
     leaderboards_cache.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def reset_event_hub():
+    """Drop any SSE subscribers a test left registered on the module-level hub."""
+    yield
+    hub._subscribers.clear()
 
 
 async def override_get_async_session() -> AsyncGenerator[AsyncSession, None]:
