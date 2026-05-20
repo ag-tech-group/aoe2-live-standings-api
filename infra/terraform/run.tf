@@ -84,13 +84,19 @@ resource "google_cloud_run_v2_service" "api" {
     }
   }
 
-  # Image is updated out-of-band via `gcloud run deploy` after each push.
-  # See the file-level comment above.
   lifecycle {
     ignore_changes = [
+      # Image is updated out-of-band via `gcloud run deploy` after each
+      # push (see the file-level comment above).
       template[0].containers[0].image,
       client,
       client_version,
+      # GCP populates a top-level (service-level) `scaling` block as a
+      # representation default. We manage scaling via `template.scaling`
+      # (min = max = 1); ignoring the service-level block stops a spurious
+      # "remove scaling" diff on every plan. The live service is unaffected
+      # — this only stops Terraform from trying to delete the block.
+      scaling,
     ]
   }
 
