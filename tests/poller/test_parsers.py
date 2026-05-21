@@ -272,8 +272,31 @@ class TestParseLiveAdvertisements:
                 },
             ]
         }
-        matches = parse_live_advertisements(payload, tracked_profile_ids={199325})
+        matches, live_players = parse_live_advertisements(payload, tracked_profile_ids={199325})
         assert [m["match_id"] for m in matches] == [1]
+        # Only the tracked member of the kept lobby is linked.
+        assert live_players == [{"match_id": 1, "profile_id": 199325}]
+
+    def test_live_player_row_per_tracked_member(self):
+        payload = {
+            "advertisements": [
+                {
+                    "match_id": 1,
+                    "mapname": "x.rms",
+                    "matchtype_id": 0,
+                    "creation_time": 1,
+                    "state": 0,
+                    "matchmembers": [
+                        {"profile_id": 1},
+                        {"profile_id": 2},
+                        {"profile_id": 99},
+                    ],
+                }
+            ]
+        }
+        _, live_players = parse_live_advertisements(payload, tracked_profile_ids={1, 2})
+        assert sorted(p["profile_id"] for p in live_players) == [1, 2]
+        assert all(p["match_id"] == 1 for p in live_players)
 
     def test_state_zero_maps_to_staging(self):
         payload = {
@@ -288,7 +311,7 @@ class TestParseLiveAdvertisements:
                 }
             ]
         }
-        matches = parse_live_advertisements(payload, tracked_profile_ids={1})
+        matches, _ = parse_live_advertisements(payload, tracked_profile_ids={1})
         assert matches[0]["state"] == MatchState.STAGING
 
     def test_state_nonzero_maps_to_in_progress(self):
@@ -304,7 +327,7 @@ class TestParseLiveAdvertisements:
                 }
             ]
         }
-        matches = parse_live_advertisements(payload, tracked_profile_ids={1})
+        matches, _ = parse_live_advertisements(payload, tracked_profile_ids={1})
         assert matches[0]["state"] == MatchState.IN_PROGRESS
 
     def test_empty_tracked_set_returns_empty(self):
@@ -320,7 +343,7 @@ class TestParseLiveAdvertisements:
                 }
             ]
         }
-        assert parse_live_advertisements(payload, tracked_profile_ids=set()) == []
+        assert parse_live_advertisements(payload, tracked_profile_ids=set()) == ([], [])
 
 
 class TestParseAvailableLeaderboards:

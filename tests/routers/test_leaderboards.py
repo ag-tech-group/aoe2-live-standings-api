@@ -6,7 +6,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import leaderboards_cache
-from app.models import MatchOutcome, MatchState
+from app.models import LiveMatchPlayer, MatchOutcome, MatchState
 from app.routers.leaderboards import _RECENT_RESULTS_LIMIT
 from app.schemas.leaderboard import LeaderboardRead
 from tests.conftest import make_match, make_match_player, make_player, make_player_rating
@@ -233,3 +233,73 @@ class TestStandingsRecentResults:
         items = (await client.get("/v1/leaderboards/3/standings")).json()["items"]
         results_by_profile = {row["profile_id"]: row["recent_results"] for row in items}
         assert results_by_profile == {1: ["win", "loss"], 2: ["win"]}
+
+
+class TestStandingsInMatch:
+    """in_match / live_match_id: live-match status on the standings row."""
+
+    async def test_in_match_true_with_live_match_id(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_match(501, state=MatchState.IN_PROGRESS, completed_at=None))
+        session.add(LiveMatchPlayer(match_id=501, profile_id=1))
+        await session.commit()
+
+        row = (await client.get("/v1/leaderboards/3/standings")).json()["items"][0]
+        assert row["in_match"] is True
+        assert row["live_match_id"] == 501
+
+    async def test_not_in_match_when_no_live_row(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        await session.commit()
+
+        row = (await client.get("/v1/leaderboards/3/standings")).json()["items"][0]
+        assert row["in_match"] is False
+        assert row["live_match_id"] is None
+
+    async def test_staging_match_counts_as_in_match(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_match(502, state=MatchState.STAGING, completed_at=None))
+        session.add(LiveMatchPlayer(match_id=502, profile_id=1))
+        await session.commit()
+
+        row = (await client.get("/v1/leaderboards/3/standings")).json()["items"][0]
+        assert row["in_match"] is True
+        assert row["live_match_id"] == 502
+
+    async def test_completed_match_does_not_count(self, client: AsyncClient, session: AsyncSession):
+        # A stale live_match_players row pointing at a match the recent feed
+        # has already flipped to completed must not show in_match.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_match(503, state=MatchState.COMPLETED))
+        session.add(LiveMatchPlayer(match_id=503, profile_id=1))
+        await session.commit()
+
+        row = (await client.get("/v1/leaderboards/3/standings")).json()["items"][0]
+        assert row["in_match"] is False
+        assert row["live_match_id"] is None
+
+    async def test_in_match_is_per_player(self, client: AsyncClient, session: AsyncSession):
+        one = make_player(1, alias="one")
+        one.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2200))
+        two = make_player(2, alias="two")
+        two.ratings.append(make_player_rating(2, leaderboard_id=3, current_rating=2100))
+        session.add_all([one, two])
+        session.add(make_match(504, state=MatchState.IN_PROGRESS, completed_at=None))
+        session.add(LiveMatchPlayer(match_id=504, profile_id=1))
+        await session.commit()
+
+        items = (await client.get("/v1/leaderboards/3/standings")).json()["items"]
+        status = {r["profile_id"]: (r["in_match"], r["live_match_id"]) for r in items}
+        assert status == {1: (True, 504), 2: (False, None)}

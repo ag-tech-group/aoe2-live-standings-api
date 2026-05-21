@@ -29,10 +29,12 @@ class StandingRow(BaseModel):
 
     Denormalized join of ``Player`` and ``PlayerRating`` so consumers get
     everything they need to render a standings table in one row, without
-    an extra ``ratings[]`` indirection. ``recent_results`` additionally
-    folds in completed-match history (``Match`` / ``MatchPlayer``) so a
-    "recent form" column needs no per-player fetch. Sorted by
-    ``current_rating`` desc on the endpoint.
+    an extra ``ratings[]`` indirection. ``recent_results`` folds in
+    completed-match history (``Match`` / ``MatchPlayer``); ``in_match`` /
+    ``live_match_id`` fold in current live-match status
+    (``LiveMatchPlayer``) — so "recent form" and "in match now" columns
+    need no per-player fetch. Sorted by ``current_rating`` desc on the
+    endpoint.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -51,5 +53,10 @@ class StandingRow(BaseModel):
     recent_results: list[MatchOutcome]
     rank: int | None
     rank_total: int | None
+    # True while the player is in a live (staging / in-progress) match, as
+    # of the last live poll (~15s cadence). `live_match_id` is that match's
+    # id when `in_match` is true, else null — for linking through to it.
+    in_match: bool
+    live_match_id: int | None
     last_match_at: datetime | None
     updated_at: datetime

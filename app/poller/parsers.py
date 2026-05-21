@@ -196,22 +196,33 @@ def _parse_outcome(resulttype: int | None) -> MatchOutcome | None:
 def parse_live_advertisements(
     payload: dict[str, Any],
     tracked_profile_ids: set[int],
-) -> list[dict[str, Any]]:
-    """Filter ``findAdvertisements`` to lobbies involving a tracked profile.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split ``findAdvertisements`` into (match_rows, live_player_rows).
 
-    Returns Match-shaped rows suitable for ``upsert_match_from_live``. We
-    don't write MatchPlayer rows here — match members in advertisements
-    are mid-game data and final values (Elo deltas, outcome) only land in
-    ``getRecentMatchHistory`` after the match ends.
+    Keeps only lobbies that include a tracked profile. ``match_rows`` are
+    Match-shaped, suitable for ``upsert_match_from_live``. ``live_player_rows``
+    link each *tracked* member to that match (``{match_id, profile_id}``) and
+    feed ``replace_live_match_players`` — they back the ``in_match`` flag on
+    the standings rows.
+
+    No ``MatchPlayer`` rows are written from here: advertisement members are
+    mid-game data, and final per-player values (Elo deltas, outcome) only
+    land in ``getRecentMatchHistory`` once the match ends. The live-player
+    rows deliberately carry no such data — they are a bare presence link.
     """
-    out: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
+    live_players: list[dict[str, Any]] = []
     for ad in payload.get("advertisements", []):
         members = ad.get("matchmembers") or []
-        if not any(m.get("profile_id") in tracked_profile_ids for m in members):
+        tracked_members = [
+            m["profile_id"] for m in members if m.get("profile_id") in tracked_profile_ids
+        ]
+        if not tracked_members:
             continue
-        out.append(
+        match_id = ad["match_id"]
+        matches.append(
             {
-                "match_id": ad["match_id"],
+                "match_id": match_id,
                 "map_name": ad.get("mapname", ""),
                 "matchtype_id": ad.get("matchtype_id", 0),
                 # Live data doesn't carry the leaderboard mapping — the
@@ -231,7 +242,10 @@ def parse_live_advertisements(
                 ),
             }
         )
-    return out
+        live_players.extend(
+            {"match_id": match_id, "profile_id": profile_id} for profile_id in tracked_members
+        )
+    return matches, live_players
 
 
 def parse_available_leaderboards(payload: dict[str, Any]) -> list[LeaderboardRead]:
