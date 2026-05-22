@@ -21,6 +21,7 @@ from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
 from app.poller.player_stats import tick_player_stats
 from app.poller.recent_matches import tick_recent_matches
+from tests.conftest import make_tournament
 
 # We point the poller's httpx client at an obvious dummy URL so respx
 # routes are unambiguous. The poller code uses whatever base_url the
@@ -262,6 +263,10 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
         live_advertisements=_live_payload(),
     )
 
+    async with patched_session_maker() as seed:
+        seed.add(make_tournament("hera-cup", profile_ids=_TRACKED_PROFILES, leaderboard_id=3))
+        await seed.commit()
+
     # 1. Leaderboards — cache loaded from the upstream snapshot.
     r = await pg_client.get("/v1/leaderboards")
     assert r.status_code == 200
@@ -289,8 +294,8 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     # Hera appears in both completed matches (1001 and 1002).
     assert {m["match_id"] for m in detail["recent_matches"]} == {1001, 1002}
 
-    # 4. Standings — sorted by current_rating desc on leaderboard 3.
-    r = await pg_client.get("/v1/leaderboards/3/standings")
+    # 4. Standings — the tournament's roster, sorted by current rating desc.
+    r = await pg_client.get("/v1/tournaments/hera-cup/standings")
     assert r.status_code == 200
     rows = r.json()["items"]
     assert [row["profile_id"] for row in rows] == [_HERA, _ACCM]
@@ -384,7 +389,11 @@ async def test_upstream_failure_isolated_to_one_poller(
     assert r.status_code == 200
     assert len(r.json()["items"]) == 3
 
-    # Standings on a leaderboard with no ratings yet — empty envelope.
-    r = await pg_client.get("/v1/leaderboards/3/standings")
+    # Standings for a tournament whose roster has no ratings yet (the
+    # player-stats poller failed) — empty envelope.
+    async with patched_session_maker() as seed:
+        seed.add(make_tournament("hera-cup", profile_ids=_TRACKED_PROFILES, leaderboard_id=3))
+        await seed.commit()
+    r = await pg_client.get("/v1/tournaments/hera-cup/standings")
     assert r.status_code == 200
     assert r.json() == {"last_polled_at": None, "items": []}
