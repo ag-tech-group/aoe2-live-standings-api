@@ -1,8 +1,10 @@
 """FastAPI ``lifespan`` integration for the polling worker.
 
 On startup: build one shared ``httpx.AsyncClient``, load leaderboard
-metadata into the in-memory cache, and start three long-running
-``asyncio.Task``s — one per polling cadence (30s / 60s / 15s).
+metadata into the in-memory cache, seed a tournament if the database has
+none, resolve the tracked roster from the tournament tables, and start
+three long-running ``asyncio.Task``s — one per polling cadence
+(30s / 60s / 15s).
 
 On shutdown: cancel the tasks, await their unwinding, then close the
 shared client. Cancellation surfaces as ``CancelledError`` inside each
@@ -33,6 +35,7 @@ from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import run_live_matches_poller
 from app.poller.player_stats import run_player_stats_poller
 from app.poller.recent_matches import run_recent_matches_poller
+from app.poller.roster import ensure_seed_tournament, get_tracked_profile_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -45,11 +48,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
         return
 
-    profile_ids = settings.tracked_profile_id_list
-    logger.info("polling_starting", tracked_profile_count=len(profile_ids))
-
     client = build_upstream_client()
     matchtype_map = await load_leaderboards(client)
+
+    async with async_session_maker() as session:
+        await ensure_seed_tournament(session)
+        profile_ids = await get_tracked_profile_ids(session)
+    logger.info("polling_starting", tracked_profile_count=len(profile_ids))
 
     tasks = [
         asyncio.create_task(

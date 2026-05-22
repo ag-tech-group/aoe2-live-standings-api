@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,14 +32,21 @@ class Settings(BaseSettings):
     otel_service_name: str = "aoe2-live-standings-api"
     otel_exporter_endpoint: str = "http://localhost:4317"
 
-    # Upstream polling configuration. The tracked-player set is a static list
-    # per deployment (design decision documented in docs/api-design.md);
-    # changing it requires a redeploy. Empty list means "no tracked players"
-    # — the player-stats and recent-matches pollers idle. The live poller
-    # still runs (its upstream call doesn't depend on profile_ids).
-    tracked_profile_ids: str = ""
+    # Upstream polling configuration.
     upstream_base_url: str = "https://aoe-api.worldsedgelink.com"
     polling_enabled: bool = True
+
+    # Seed-tournament bootstrap. On startup, when the `tournaments` table is
+    # empty, a tournament is created from these values with the
+    # `tracked_profile_ids` roster — the migration path off the old
+    # single-deployment config and the zero-touch seed for a fresh deploy.
+    # Once any tournament exists the bootstrap is a no-op.
+    tracked_profile_ids: str = ""
+    tournament_slug: str = "default"
+    tournament_name: str = "Default Tournament"
+    tournament_leaderboard_id: int = 3
+    tournament_start_date: datetime | None = None
+    tournament_end_date: datetime | None = None
 
     @property
     def is_development(self) -> bool:
