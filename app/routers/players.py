@@ -1,4 +1,4 @@
-"""Player endpoints: list and detail."""
+"""Player endpoints, scoped to a tournament: list and detail."""
 
 from __future__ import annotations
 
@@ -10,32 +10,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_async_session
-from app.models import Match, MatchPlayer, Player
-from app.schemas import (
-    ListEnvelope,
-    MatchRead,
-    PlayerDetail,
-    PlayerRead,
-    compute_last_polled_at,
-)
+from app.models import Match, MatchPlayer, Player, Tournament, TournamentPlayer
+from app.routers.tournaments import get_tournament
+from app.schemas import ListEnvelope, MatchRead, PlayerDetail, PlayerRead, compute_last_polled_at
 
-router = APIRouter(prefix="/players", tags=["players"])
+router = APIRouter(prefix="/tournaments/{tournament_slug}/players", tags=["players"])
 
 # Polling cadence for player stats is 30s; cache for 15s so a shared cache
-# (CDN, browser) never serves data more than ~45s stale in the worst case.
+# never serves data more than ~45s stale in the worst case.
 _PLAYERS_CACHE_CONTROL = "public, max-age=15"
 
 
 @router.get("")
 async def list_players(
     response: Response,
+    tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
     leaderboard_id: int | None = Query(
         default=None,
         description="If set, each player's ratings are filtered to this leaderboard only.",
     ),
 ) -> ListEnvelope[PlayerRead]:
-    """Tracked players with embedded ratings, alphabetical by alias.
+    """The tournament's roster, with embedded ratings, alphabetical by alias.
 
     Players are returned regardless of whether they have a rating on the
     requested leaderboard (their ``ratings`` list may be empty). That keeps
@@ -44,7 +40,15 @@ async def list_players(
     """
     response.headers["Cache-Control"] = _PLAYERS_CACHE_CONTROL
 
-    stmt = select(Player).options(selectinload(Player.ratings)).order_by(Player.alias)
+    roster = select(TournamentPlayer.profile_id).where(
+        TournamentPlayer.tournament_id == tournament.id
+    )
+    stmt = (
+        select(Player)
+        .where(Player.profile_id.in_(roster))
+        .options(selectinload(Player.ratings))
+        .order_by(Player.alias)
+    )
     players = (await session.execute(stmt)).scalars().all()
 
     items: list[PlayerRead] = []
@@ -69,6 +73,7 @@ async def list_players(
 async def get_player(
     profile_id: int,
     response: Response,
+    tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
     match_limit: int = Query(
         default=20,
@@ -77,13 +82,23 @@ async def get_player(
         description="Max recent matches to include (1-100, default 20).",
     ),
 ) -> PlayerDetail:
-    """A single player's profile + ratings + most recent matches.
+    """A roster player's profile + ratings + most recent matches.
 
-    Matches are joined via ``MatchPlayer.profile_id``; ``MatchPlayer`` has no
-    foreign key back to ``Player`` (opponents needn't be tracked), so the
-    join is explicit rather than a SQLAlchemy relationship.
+    404 if the profile isn't on this tournament's roster. Matches are
+    joined via ``MatchPlayer.profile_id`` (no FK back to ``Player``).
     """
     response.headers["Cache-Control"] = _PLAYERS_CACHE_CONTROL
+
+    in_roster = (
+        await session.execute(
+            select(TournamentPlayer.profile_id).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.profile_id == profile_id,
+            )
+        )
+    ).first()
+    if in_roster is None:
+        raise HTTPException(status_code=404, detail="Player not found in this tournament")
 
     player_stmt = (
         select(Player).where(Player.profile_id == profile_id).options(selectinload(Player.ratings))
