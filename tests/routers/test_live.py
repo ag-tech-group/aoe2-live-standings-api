@@ -1,46 +1,50 @@
-"""GET /v1/live."""
+"""GET /v1/tournaments/{slug}/live."""
 
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import MatchState
-from tests.conftest import make_match, make_match_player
+from app.models import LiveMatchPlayer, MatchState
+from tests.conftest import make_match, make_tournament
 
 
-class TestGetLive:
-    async def test_empty_db_returns_empty_envelope(self, client: AsyncClient):
-        response = await client.get("/v1/live")
+class TestTournamentLive:
+    async def test_unknown_tournament_returns_404(self, client: AsyncClient):
+        assert (await client.get("/v1/tournaments/nope/live")).status_code == 404
+
+    async def test_empty_returns_empty_envelope(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/live")
         assert response.status_code == 200
         assert response.json() == {"last_polled_at": None, "items": []}
 
-    async def test_returns_only_staging_and_in_progress(
+    async def test_returns_only_roster_live_matches(
         self, client: AsyncClient, session: AsyncSession
     ):
-        for match_id, state in (
-            (1, MatchState.COMPLETED),
-            (2, MatchState.IN_PROGRESS),
-            (3, MatchState.STAGING),
-            (4, MatchState.COMPLETED),
-        ):
-            completed_at = None if state != MatchState.COMPLETED else make_match(0).completed_at
-            match = make_match(match_id, state=state, completed_at=completed_at)
-            match.players.append(make_match_player(match_id, profile_id=99))
-            session.add(match)
+        # A roster member's live match shows; a live match with no roster
+        # member does not.
+        session.add(make_match(1, state=MatchState.IN_PROGRESS, completed_at=None))
+        session.add(make_match(2, state=MatchState.IN_PROGRESS, completed_at=None))
+        session.add(LiveMatchPlayer(match_id=1, profile_id=10))
+        session.add(LiveMatchPlayer(match_id=2, profile_id=999))
+        session.add(make_tournament("cup", profile_ids=[10]))
         await session.commit()
 
-        ids = sorted(m["match_id"] for m in (await client.get("/v1/live")).json()["items"])
-        assert ids == [2, 3]
+        items = (await client.get("/v1/tournaments/cup/live")).json()["items"]
+        assert [m["match_id"] for m in items] == [1]
 
-    async def test_each_item_includes_players(self, client: AsyncClient, session: AsyncSession):
-        match = make_match(1, state=MatchState.IN_PROGRESS, completed_at=None)
-        match.players.append(make_match_player(1, profile_id=10))
-        match.players.append(make_match_player(1, profile_id=11))
-        session.add(match)
+    async def test_excludes_completed_matches(self, client: AsyncClient, session: AsyncSession):
+        # Even with a live_match_players row, a completed match is not live.
+        session.add(make_match(1, state=MatchState.COMPLETED))
+        session.add(LiveMatchPlayer(match_id=1, profile_id=10))
+        session.add(make_tournament("cup", profile_ids=[10]))
         await session.commit()
 
-        item = (await client.get("/v1/live")).json()["items"][0]
-        assert sorted(p["profile_id"] for p in item["players"]) == [10, 11]
+        items = (await client.get("/v1/tournaments/cup/live")).json()["items"]
+        assert items == []
 
-    async def test_cache_control_header(self, client: AsyncClient):
-        response = await client.get("/v1/live")
+    async def test_cache_control_header(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/live")
         assert response.headers["Cache-Control"] == "public, max-age=10"

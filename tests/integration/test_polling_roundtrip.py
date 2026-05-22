@@ -274,8 +274,8 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert {lb["leaderboard_id"] for lb in payload["items"]} == {1, 3, 4}
     assert payload["last_polled_at"] is not None
 
-    # 2. Players — both tracked profiles with embedded ratings.
-    r = await pg_client.get("/v1/players")
+    # 2. Players — the tournament roster with embedded ratings.
+    r = await pg_client.get("/v1/tournaments/hera-cup/players")
     assert r.status_code == 200
     items = r.json()["items"]
     # ASCII sort: "VIT | Hera" (V=86) < "wR.ACCM" (w=119) — Postgres default collation.
@@ -286,7 +286,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert {r["leaderboard_id"] for r in hera["ratings"]} == {3, 4}
 
     # 3. Player detail — ratings + recent matches.
-    r = await pg_client.get(f"/v1/players/{_HERA}")
+    r = await pg_client.get(f"/v1/tournaments/hera-cup/players/{_HERA}")
     assert r.status_code == 200
     detail = r.json()
     assert detail["alias"] == "VIT | Hera"
@@ -308,7 +308,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
 
     # 5. Matches — completed list. Match 1001 only exists once even though both
     # profile queries returned it — confirms ON CONFLICT dedupe.
-    r = await pg_client.get("/v1/matches")
+    r = await pg_client.get("/v1/tournaments/hera-cup/matches")
     assert r.status_code == 200
     matches = r.json()["items"]
     assert {m["match_id"] for m in matches} >= {1001, 1002}
@@ -317,7 +317,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert {p["profile_id"] for p in m1001["players"]} == {_HERA, _ACCM}
 
     # 6. Match detail.
-    r = await pg_client.get("/v1/matches/1001")
+    r = await pg_client.get("/v1/tournaments/hera-cup/matches/1001")
     assert r.status_code == 200
     detail = r.json()
     assert detail["map_name"] == "Arabia.rms"
@@ -327,7 +327,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert winner["new_rating"] == 2788
 
     # 7. Live — only the lobby with Hera, not the untracked one (9002).
-    r = await pg_client.get("/v1/live")
+    r = await pg_client.get("/v1/tournaments/hera-cup/live")
     assert r.status_code == 200
     live = r.json()["items"]
     assert [m["match_id"] for m in live] == [9001]
@@ -369,18 +369,22 @@ async def test_upstream_failure_isolated_to_one_poller(
             )
             await tick_live_matches(client, _TRACKED_PROFILES, patched_session_maker)
 
-    # Player table is empty because that poller failed.
-    r = await pg_client.get("/v1/players")
+    async with patched_session_maker() as seed:
+        seed.add(make_tournament("hera-cup", profile_ids=_TRACKED_PROFILES, leaderboard_id=3))
+        await seed.commit()
+
+    # Roster players have no rows yet because that poller failed.
+    r = await pg_client.get("/v1/tournaments/hera-cup/players")
     assert r.status_code == 200
     assert r.json()["items"] == []
 
     # Matches landed despite the player_stats failure.
-    r = await pg_client.get("/v1/matches")
+    r = await pg_client.get("/v1/tournaments/hera-cup/matches")
     assert r.status_code == 200
     assert len(r.json()["items"]) > 0
 
     # Live lobby still picked up.
-    r = await pg_client.get("/v1/live")
+    r = await pg_client.get("/v1/tournaments/hera-cup/live")
     assert r.status_code == 200
     assert [m["match_id"] for m in r.json()["items"]] == [9001]
 
@@ -389,11 +393,7 @@ async def test_upstream_failure_isolated_to_one_poller(
     assert r.status_code == 200
     assert len(r.json()["items"]) == 3
 
-    # Standings for a tournament whose roster has no ratings yet (the
-    # player-stats poller failed) — empty envelope.
-    async with patched_session_maker() as seed:
-        seed.add(make_tournament("hera-cup", profile_ids=_TRACKED_PROFILES, leaderboard_id=3))
-        await seed.commit()
+    # Standings — the roster has no ratings yet, so an empty envelope.
     r = await pg_client.get("/v1/tournaments/hera-cup/standings")
     assert r.status_code == 200
     assert r.json() == {"last_polled_at": None, "items": []}
