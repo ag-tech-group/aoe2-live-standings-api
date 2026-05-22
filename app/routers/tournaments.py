@@ -26,7 +26,13 @@ from app.models import (
     Tournament,
     TournamentPlayer,
 )
-from app.schemas import ListEnvelope, StandingRow, TournamentRead, compute_last_polled_at
+from app.schemas import (
+    ListEnvelope,
+    StandingRow,
+    TournamentRead,
+    TournamentRecord,
+    compute_last_polled_at,
+)
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
@@ -142,6 +148,62 @@ async def _live_match_by_profile(
     return dict(result.all())
 
 
+async def _tournament_record_by_profile(
+    session: AsyncSession,
+    tournament: Tournament,
+    profile_ids: list[int],
+) -> dict[int, TournamentRecord]:
+    """Map each profile to its win/loss record within the tournament window.
+
+    Counts completed matches on the tournament's leaderboard whose
+    ``started_at`` falls inside ``[start_date, end_date]`` — a null bound
+    is treated as open. Every profile gets an entry; those with no matches
+    in the window get a zero record.
+    """
+    records = {
+        profile_id: TournamentRecord(games_played=0, wins=0, losses=0, streak=0)
+        for profile_id in profile_ids
+    }
+    if not profile_ids:
+        return records
+
+    stmt = (
+        select(MatchPlayer.profile_id, MatchPlayer.outcome)
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Match.leaderboard_id == tournament.leaderboard_id,
+            MatchPlayer.profile_id.in_(profile_ids),
+            MatchPlayer.outcome.is_not(None),
+        )
+        .order_by(Match.started_at.desc())
+    )
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.end_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.end_date)
+
+    outcomes: dict[int, list[MatchOutcome]] = {}
+    for profile_id, outcome in (await session.execute(stmt)).all():
+        outcomes.setdefault(profile_id, []).append(outcome)
+
+    for profile_id, outs in outcomes.items():
+        wins = sum(1 for o in outs if o == MatchOutcome.WIN)
+        # `outs` is newest-first; the streak is the leading run of one outcome.
+        lead = outs[0]
+        run = 0
+        for outcome in outs:
+            if outcome != lead:
+                break
+            run += 1
+        records[profile_id] = TournamentRecord(
+            games_played=len(outs),
+            wins=wins,
+            losses=len(outs) - wins,
+            streak=run if lead == MatchOutcome.WIN else -run,
+        )
+    return records
+
+
 @router.get("/{tournament_slug}/standings")
 async def get_standings(
     response: Response,
@@ -175,6 +237,7 @@ async def get_standings(
         session, tournament.leaderboard_id, profile_ids
     )
     live_match_ids = await _live_match_by_profile(session, profile_ids)
+    tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
@@ -190,6 +253,7 @@ async def get_standings(
                 losses=rating.losses,
                 streak=rating.streak,
                 recent_results=recent_results.get(player.profile_id, []),
+                tournament_record=tournament_records[player.profile_id],
                 rank=rating.rank,
                 rank_total=rating.rank_total,
                 in_match=player.profile_id in live_match_ids,

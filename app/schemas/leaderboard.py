@@ -24,17 +24,31 @@ class LeaderboardRead(BaseModel):
     is_ranked: bool
 
 
-class StandingRow(BaseModel):
-    """One row in the standings list for a given leaderboard.
+class TournamentRecord(BaseModel):
+    """A player's win/loss record within a tournament's date window.
 
-    Denormalized join of ``Player`` and ``PlayerRating`` so consumers get
-    everything they need to render a standings table in one row, without
-    an extra ``ratings[]`` indirection. ``recent_results`` folds in
-    completed-match history (``Match`` / ``MatchPlayer``); ``in_match`` /
-    ``live_match_id`` fold in current live-match status
-    (``LiveMatchPlayer``) — so "recent form" and "in match now" columns
-    need no per-player fetch. Sorted by ``current_rating`` desc on the
-    endpoint.
+    Counts only completed matches on the tournament's leaderboard between
+    its ``start_date`` and ``end_date`` (a null bound is treated as open).
+    Distinct from the lifetime-ladder ``wins`` / ``losses`` / ``streak``
+    on ``StandingRow``.
+    """
+
+    games_played: int
+    wins: int
+    losses: int
+    # Positive = current win streak, negative = loss streak, 0 = no games.
+    streak: int
+
+
+class StandingRow(BaseModel):
+    """One row in a tournament's standings list.
+
+    A denormalized read model: a join of ``Player`` and ``PlayerRating``
+    plus folded-in derived fields, so a consumer renders a full standings
+    table from one response with no per-player fan-out. ``recent_results``
+    is completed-match form; ``tournament_record`` is the player's record
+    within the tournament's date window; ``in_match`` / ``live_match_id``
+    are current live-match status. Sorted by ``current_rating`` desc.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -51,6 +65,9 @@ class StandingRow(BaseModel):
     # this leaderboard, most-recent-first, capped server-side. Empty when
     # the player has no completed matches on this leaderboard yet.
     recent_results: list[MatchOutcome]
+    # The player's record within this tournament's date window. The
+    # sibling wins/losses/streak above are lifetime-ladder figures.
+    tournament_record: TournamentRecord
     rank: int | None
     rank_total: int | None
     # True while the player is in a live (staging / in-progress) match, as

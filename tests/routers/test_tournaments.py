@@ -347,3 +347,134 @@ class TestStandingsInMatch:
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
         status = {r["profile_id"]: (r["in_match"], r["live_match_id"]) for r in items}
         assert status == {1: (True, 504), 2: (False, None)}
+
+
+class TestStandingsTournamentRecord:
+    """tournament_record: games / wins / losses / streak within the window."""
+
+    async def test_counts_wins_losses_and_games(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, outcome in (
+            (1, MatchOutcome.WIN),
+            (2, MatchOutcome.WIN),
+            (3, MatchOutcome.LOSS),
+        ):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["games_played"] == 3
+        assert row["tournament_record"]["wins"] == 2
+        assert row["tournament_record"]["losses"] == 1
+
+    async def test_win_streak_is_positive(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        # Oldest -> newest: LOSS, WIN, WIN — current streak is +2.
+        for match_id, day, outcome in (
+            (1, 1, MatchOutcome.LOSS),
+            (2, 2, MatchOutcome.WIN),
+            (3, 3, MatchOutcome.WIN),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["streak"] == 2
+
+    async def test_loss_streak_is_negative(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        # Oldest -> newest: WIN, LOSS, LOSS — current streak is -2.
+        for match_id, day, outcome in (
+            (1, 1, MatchOutcome.WIN),
+            (2, 2, MatchOutcome.LOSS),
+            (3, 3, MatchOutcome.LOSS),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["streak"] == -2
+
+    async def test_excludes_matches_outside_the_window(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, day in ((1, 3), (2, 7), (3, 12)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                end_date=datetime(2026, 5, 10, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["games_played"] == 1
+
+    async def test_null_window_counts_all_matches(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id in (1, 2):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN)
+            )
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["games_played"] == 2
+
+    async def test_zero_record_when_no_matches(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"] == {
+            "games_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "streak": 0,
+        }
