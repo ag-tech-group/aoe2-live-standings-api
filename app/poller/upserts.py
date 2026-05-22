@@ -1,7 +1,7 @@
 """Dialect-aware ``INSERT ... ON CONFLICT`` helpers for the polling worker.
 
-The poller writes to four tables (``players``, ``player_ratings``, ``matches``,
-``match_players``) with three semantic flavors:
+The poller writes to five tables (``players``, ``player_ratings``, ``matches``,
+``match_players``, ``live_match_players``) with four semantic flavors:
 
 - **Full overwrite on conflict** (``upsert_player``, ``upsert_player_rating``,
   ``upsert_match_from_recent``) — incoming row is authoritative.
@@ -11,6 +11,9 @@ The poller writes to four tables (``players``, ``player_ratings``, ``matches``,
   ``completed_at`` value set).
 - **Insert-or-skip** (``upsert_match_player``) — per-player match outcomes
   are final once written; later polls of the same match are no-ops.
+- **Snapshot replace** (``replace_live_match_players``) — the live poller
+  knows the complete live set each cycle, so the table is cleared and
+  rewritten wholesale.
 
 PostgreSQL is the production target; SQLite (3.24+) is used by the test
 suite. Both speak the same ``ON CONFLICT`` SQL, but SQLAlchemy needs the
@@ -22,12 +25,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Match, MatchPlayer, Player, PlayerRating
+from app.models import LiveMatchPlayer, Match, MatchPlayer, Player, PlayerRating
 
 
 def dialect_insert(session: AsyncSession):
@@ -130,5 +133,26 @@ async def upsert_match_player(session: AsyncSession, data: dict[str, Any]) -> No
     """
     insert = dialect_insert(session)
     stmt = insert(MatchPlayer).values(**data)
+    stmt = stmt.on_conflict_do_nothing(index_elements=["match_id", "profile_id"])
+    await session.execute(stmt)
+
+
+async def replace_live_match_players(session: AsyncSession, rows: list[dict[str, Any]]) -> None:
+    """Clear ``live_match_players`` and rewrite it from the current snapshot.
+
+    The live poller derives the complete set of live ``(match, tracked-player)``
+    links every cycle, so a delete-all plus bulk insert keeps the table exactly
+    in sync — a match that ends simply stops being re-inserted. Empty ``rows``
+    just clears the table (nothing is live right now).
+
+    ``on_conflict_do_nothing`` absorbs any duplicate ``(match_id, profile_id)``
+    pair a malformed upstream payload might contain, so one bad cycle can't
+    abort the write.
+    """
+    await session.execute(delete(LiveMatchPlayer))
+    if not rows:
+        return
+    insert = dialect_insert(session)
+    stmt = insert(LiveMatchPlayer).values(rows)
     stmt = stmt.on_conflict_do_nothing(index_elements=["match_id", "profile_id"])
     await session.execute(stmt)

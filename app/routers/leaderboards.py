@@ -10,7 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import leaderboards_cache
 from app.database import get_async_session
-from app.models import Match, MatchOutcome, MatchPlayer, Player, PlayerRating
+from app.models import (
+    LiveMatchPlayer,
+    Match,
+    MatchOutcome,
+    MatchPlayer,
+    MatchState,
+    Player,
+    PlayerRating,
+)
 from app.schemas import LeaderboardRead, ListEnvelope, StandingRow, compute_last_polled_at
 
 router = APIRouter(prefix="/leaderboards", tags=["leaderboards"])
@@ -23,6 +31,10 @@ _LEADERBOARDS_CACHE_CONTROL = "public, max-age=15"
 # recent-first; the consumer renders a compact form strip and can show
 # fewer client-side.
 _RECENT_RESULTS_LIMIT = 10
+
+# A player counts as "in a match" while their live match sits in one of
+# these states — mirrors the GET /v1/live filter.
+_LIVE_MATCH_STATES = (MatchState.STAGING, MatchState.IN_PROGRESS)
 
 
 @router.get("")
@@ -76,6 +88,34 @@ async def _recent_results_by_profile(
     return results
 
 
+async def _live_match_by_profile(
+    session: AsyncSession,
+    profile_ids: list[int],
+) -> dict[int, int]:
+    """Map each profile currently in a live match to that match's id.
+
+    Reads the ``live_match_players`` snapshot the live poller fully
+    rewrites every cycle, joined to ``matches`` to confirm the match is
+    still in a live state — a just-finished match can briefly linger in an
+    advertisement before the recent-matches feed flips it to ``completed``.
+    Profiles absent from the result are not in a live match.
+    """
+    if not profile_ids:
+        return {}
+
+    stmt = (
+        select(LiveMatchPlayer.profile_id, LiveMatchPlayer.match_id)
+        .join(Match, Match.match_id == LiveMatchPlayer.match_id)
+        .where(
+            LiveMatchPlayer.profile_id.in_(profile_ids),
+            Match.state.in_(_LIVE_MATCH_STATES),
+        )
+        .order_by(LiveMatchPlayer.match_id)
+    )
+    result = await session.execute(stmt)
+    return dict(result.all())
+
+
 @router.get("/{leaderboard_id}/standings")
 async def get_standings(
     leaderboard_id: int,
@@ -87,8 +127,8 @@ async def get_standings(
     Joins ``PlayerRating`` with ``Player`` so each row contains both the
     rating numbers and the player identity (alias, country). The
     ``(leaderboard_id, current_rating)`` composite index on
-    ``player_ratings`` covers this query. ``recent_results`` is folded in
-    by a second query over the same standing set.
+    ``player_ratings`` covers this query. ``recent_results`` and live-match
+    status are folded in by two further queries over the same standing set.
     """
     response.headers["Cache-Control"] = _LEADERBOARDS_CACHE_CONTROL
 
@@ -100,9 +140,9 @@ async def get_standings(
     )
     rows = (await session.execute(stmt)).all()
 
-    recent_results = await _recent_results_by_profile(
-        session, leaderboard_id, [player.profile_id for player, _ in rows]
-    )
+    profile_ids = [player.profile_id for player, _ in rows]
+    recent_results = await _recent_results_by_profile(session, leaderboard_id, profile_ids)
+    live_match_ids = await _live_match_by_profile(session, profile_ids)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
@@ -120,6 +160,8 @@ async def get_standings(
                 recent_results=recent_results.get(player.profile_id, []),
                 rank=rating.rank,
                 rank_total=rating.rank_total,
+                in_match=player.profile_id in live_match_ids,
+                live_match_id=live_match_ids.get(player.profile_id),
                 last_match_at=rating.last_match_at,
                 updated_at=rating.updated_at,
             )

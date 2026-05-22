@@ -90,3 +90,34 @@ class MatchPlayer(Base):
         # Find all matches for a given player profile.
         Index("ix_match_players_profile_id", "profile_id"),
     )
+
+
+class LiveMatchPlayer(Base):
+    """A tracked player currently in a live (staging / in-progress) match.
+
+    A transient mirror of who is in a match *right now*, used to fold an
+    ``in_match`` flag onto each standings row. The live-matches poller
+    fully replaces this table every cycle from the current
+    ``findAdvertisements`` snapshot — so a row's mere presence means the
+    player was in a live lobby as of the last 15s poll.
+
+    Distinct from ``MatchPlayer``, the authoritative immutable record of a
+    *finished* match: ``findAdvertisements`` exposes no per-player final
+    data (civ, outcome, Elo delta settle only on completion), so this
+    stays a bare ``(match_id, profile_id)`` link.
+    """
+
+    __tablename__ = "live_match_players"
+
+    match_id: Mapped[int] = mapped_column(
+        ForeignKey("matches.match_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # No FK to `players`: a tracked profile can be in a live match before
+    # `poll_player_stats` has written its Player row. Mirrors MatchPlayer.
+    profile_id: Mapped[int] = mapped_column(primary_key=True)
+
+    __table_args__ = (
+        # The standings endpoint looks up live status by profile_id.
+        Index("ix_live_match_players_profile_id", "profile_id"),
+    )

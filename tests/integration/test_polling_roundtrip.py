@@ -296,6 +296,10 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert [row["profile_id"] for row in rows] == [_HERA, _ACCM]
     assert rows[0]["current_rating"] == 2788
     assert rows[1]["current_rating"] == 2718
+    # Hera is in live lobby 9001 (staging) → in_match flips on the row;
+    # ACCM is in no live lobby.
+    assert (rows[0]["in_match"], rows[0]["live_match_id"]) == (True, 9001)
+    assert (rows[1]["in_match"], rows[1]["live_match_id"]) == (False, None)
 
     # 5. Matches — completed list. Match 1001 only exists once even though both
     # profile queries returned it — confirms ON CONFLICT dedupe.

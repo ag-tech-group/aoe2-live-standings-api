@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import leaderboards_cache
 from app.events import EventType, hub
-from app.models import Match, MatchPlayer, MatchState, Player, PlayerRating
+from app.models import LiveMatchPlayer, Match, MatchPlayer, MatchState, Player, PlayerRating
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
 from app.poller.player_stats import tick_player_stats
@@ -217,6 +217,29 @@ class TestTickLiveMatches:
         assert matches[0].state == MatchState.STAGING
 
         assert nudges.get_nowait().event == EventType.LIVE
+
+    async def test_writes_live_match_players_for_tracked_profiles(
+        self, upstream_client: httpx.AsyncClient, session: AsyncSession
+    ):
+        payload = {
+            "advertisements": [
+                {
+                    "match_id": 1,
+                    "mapname": "Arabia.rms",
+                    "matchtype_id": 0,
+                    "creation_time": 1779000000,
+                    "state": 0,
+                    "matchmembers": [{"profile_id": 199325}, {"profile_id": 409748}],
+                }
+            ]
+        }
+        with respx.mock(base_url=_TEST_BASE_URL) as mock:
+            mock.get("/community/advertisement/findAdvertisements").respond(json=payload)
+            await tick_live_matches(upstream_client, [199325], session_maker_for_tasks)
+
+        live = (await session.execute(select(LiveMatchPlayer))).scalars().all()
+        # Only the tracked member is linked; the untracked opponent is not.
+        assert [(r.match_id, r.profile_id) for r in live] == [(1, 199325)]
 
     async def test_does_not_overwrite_completed_match(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession

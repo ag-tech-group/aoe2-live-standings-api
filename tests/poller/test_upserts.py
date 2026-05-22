@@ -11,8 +11,9 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Match, MatchPlayer, MatchState, Player, PlayerRating
+from app.models import LiveMatchPlayer, Match, MatchPlayer, MatchState, Player, PlayerRating
 from app.poller.upserts import (
+    replace_live_match_players,
     upsert_match_from_live,
     upsert_match_from_recent,
     upsert_match_player,
@@ -240,3 +241,53 @@ class TestUpsertMatchPlayer:
         # First write wins.
         assert loaded.civilization_id == 16
         assert loaded.new_rating == 1510
+
+
+class TestReplaceLiveMatchPlayers:
+    async def test_inserts_rows(self, session: AsyncSession):
+        session.add(Match(**_match_data(match_id=1)))
+        await session.commit()
+
+        await replace_live_match_players(session, [{"match_id": 1, "profile_id": 7}])
+        await session.commit()
+
+        rows = (await session.execute(select(LiveMatchPlayer))).scalars().all()
+        assert [(r.match_id, r.profile_id) for r in rows] == [(1, 7)]
+
+    async def test_empty_rows_clears_table(self, session: AsyncSession):
+        session.add(Match(**_match_data(match_id=1)))
+        await session.commit()
+
+        await replace_live_match_players(session, [{"match_id": 1, "profile_id": 7}])
+        await session.commit()
+        await replace_live_match_players(session, [])
+        await session.commit()
+
+        rows = (await session.execute(select(LiveMatchPlayer))).scalars().all()
+        assert rows == []
+
+    async def test_replaces_previous_snapshot(self, session: AsyncSession):
+        session.add(Match(**_match_data(match_id=1)))
+        session.add(Match(**_match_data(match_id=2)))
+        await session.commit()
+
+        await replace_live_match_players(session, [{"match_id": 1, "profile_id": 7}])
+        await session.commit()
+        await replace_live_match_players(session, [{"match_id": 2, "profile_id": 8}])
+        await session.commit()
+
+        rows = (await session.execute(select(LiveMatchPlayer))).scalars().all()
+        assert [(r.match_id, r.profile_id) for r in rows] == [(2, 8)]
+
+    async def test_duplicate_pairs_are_absorbed(self, session: AsyncSession):
+        session.add(Match(**_match_data(match_id=1)))
+        await session.commit()
+
+        await replace_live_match_players(
+            session,
+            [{"match_id": 1, "profile_id": 7}, {"match_id": 1, "profile_id": 7}],
+        )
+        await session.commit()
+
+        rows = (await session.execute(select(LiveMatchPlayer))).scalars().all()
+        assert [(r.match_id, r.profile_id) for r in rows] == [(1, 7)]
