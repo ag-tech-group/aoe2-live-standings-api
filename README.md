@@ -4,12 +4,13 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](https://www.python.org/)
 
-Open-source live-standings API for AoE2: DE tournaments. Given a list of player profile IDs, the API tracks current ratings, max ratings, recent match history, win/loss streaks, and live-match detection. The tournament concept itself (brackets, dates, branding) lives in consumers, not here — pass any list of profile IDs and the API tracks them.
+Open-source live-standings API for AoE2: DE tournaments. One deployment serves multiple tournaments — each a named roster of players on a leaderboard — tracking current ratings, max ratings, recent match history, win/loss streaks, and live-match detection. Brackets and branding stay in consumers; rosters, dates, and teams live here, so every consumer reads consistent, denormalized standings.
 
 The upstream data layer is documented in [`docs/data-sources.md`](docs/data-sources.md).
 
 ## Table of Contents
 
+- [Architecture](#architecture)
 - [Tech Stack](#tech-stack)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -24,6 +25,24 @@ The upstream data layer is documented in [`docs/data-sources.md`](docs/data-sour
 - [Project Structure](#project-structure)
 - [Environment Variables](#environment-variables)
 - [License](#license)
+
+## Architecture
+
+A single FastAPI process runs two things side by side: an HTTP service that serves snapshots from a Postgres database, and an asyncio background worker that polls the upstream Relic backend (`aoe-api.worldsedgelink.com/community/*`, see [`docs/data-sources.md`](docs/data-sources.md)) and writes the results to that database. Consumers read from the HTTP service only; they never touch upstream. The database is the source of truth for what consumers see; the upstream is the source of truth that we mirror on a cadence.
+
+```
+┌────────────────┐  poll   ┌──────────────┐  read   ┌──────────────┐
+│ Relic backend  │ ──────▶ │  Postgres    │ ──────▶ │  REST API    │
+│ (upstream)     │         │  (snapshot)  │         │  /v1/*       │
+└────────────────┘         └──────────────┘         └──────────────┘
+                              ▲                        │
+                              │                        ▼
+                          asyncio worker        consumer
+                          inside the API        (web client)
+                          process
+```
+
+Reads are denormalized: each response row carries everything a consumer needs to render it, so consumers never fan out or join across endpoints.
 
 ## Tech Stack
 
@@ -89,15 +108,19 @@ The OpenAPI spec is consumed by the companion consumer projects (see e.g. [`hera
 
 ## API Endpoints
 
-All application routes are served under the `/v1` prefix so the API surface can be versioned as a whole — when a breaking change is needed, mount the new routers under `/v2` alongside `/v1`. Infrastructure routes (`/`, `/health`, `/docs`, `/openapi.json`, `/.well-known/security.txt`) stay unversioned. Routers are registered in the `ROUTERS` tuple in `app/main.py`, which loop-mounts each one with the `/v1` prefix.
+All application routes are served under the `/v1` prefix so the API surface can be versioned as a whole. Infrastructure routes (`/`, `/health`, `/docs`, `/openapi.json`, `/.well-known/security.txt`) stay unversioned. Routers are registered in the `ROUTERS` tuple in `app/main.py`, which loop-mounts each one with the `/v1` prefix.
 
-| Method | Endpoint    | Description                       |
-| ------ | ----------- | --------------------------------- |
-| GET    | `/v1/flags` | All feature flags as a JSON object |
-| GET    | `/health`   | Liveness probe                    |
-| GET    | `/`         | Service info                      |
+Most of the API is scoped to a tournament:
 
-Domain endpoints (players, matches, leaderboards) will land in subsequent PRs.
+- `GET /v1/tournaments` — list tournaments; `GET /v1/tournaments/{slug}` — one tournament
+- `GET /v1/tournaments/{slug}/standings` — the tournament's standings
+- `GET /v1/tournaments/{slug}/matches`, `.../matches/{match_id}` — match feed and detail
+- `GET /v1/tournaments/{slug}/live` — the roster's live matches
+- `GET /v1/tournaments/{slug}/players`, `.../players/{profile_id}` — roster and player detail
+
+Unscoped: `GET /v1/leaderboards` (leaderboard metadata), `GET /v1/stream` (SSE refresh nudges), `GET /v1/flags` (feature flags).
+
+See `/docs` or `/openapi.json` for the full, authoritative spec.
 
 ## Logging, Telemetry & Feature Flags
 
@@ -254,6 +277,10 @@ aoe2-live-standings-api/
 | `OTEL_SERVICE_NAME`      | Optional | Service name for traces                           | `aoe2-live-standings-api`                                                   |
 | `OTEL_EXPORTER_ENDPOINT` | Optional | OTLP gRPC collector endpoint                      | `http://localhost:4317`                                                     |
 | `FEATURE_*`              | Optional | Feature flags (e.g. `FEATURE_NEW_DASHBOARD=true`) | (none)                                                                      |
+| `POLLING_ENABLED`        | Optional | Run the background polling worker                 | `true`                                                                      |
+| `UPSTREAM_BASE_URL`      | Optional | Relic upstream base URL                           | `https://aoe-api.worldsedgelink.com`                                        |
+| `TRACKED_PROFILE_IDS`    | Optional | Comma-separated profile IDs for the seed tournament's roster — used only to bootstrap a tournament when the database has none | (empty) |
+| `TOURNAMENT_*`           | Optional | Seed tournament's `SLUG` / `NAME` / `LEADERBOARD_ID` / `START_DATE` / `END_DATE` (see `app/config.py`) | (see config) |
 
 Before deploying to production, replace the placeholder `Contact:` in the `SECURITY_TXT` constant (`app/main.py`) with a real security-disclosure address and bump `Expires:` if it's close.
 
