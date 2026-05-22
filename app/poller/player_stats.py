@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, hub
 from app.poller.parsers import parse_player_stats
+from app.poller.roster import get_tracked_profile_ids
 from app.poller.upserts import upsert_player, upsert_player_rating
 
 logger = structlog.get_logger(__name__)
@@ -62,13 +63,19 @@ async def tick_player_stats(
 
 async def run_player_stats_poller(
     client: httpx.AsyncClient,
-    profile_ids: list[int],
     session_maker: async_sessionmaker,
     interval_seconds: int = _DEFAULT_INTERVAL_SECONDS,
 ) -> None:
-    """Long-running task — ticks forever, swallows per-cycle errors."""
+    """Long-running task — ticks forever, swallows per-cycle errors.
+
+    The tracked roster is re-resolved from the database at the start of
+    every cycle, so a roster edited through the management API takes
+    effect on the next tick — no redeploy needed.
+    """
     while True:
         try:
+            async with session_maker() as session:
+                profile_ids = await get_tracked_profile_ids(session)
             await tick_player_stats(client, profile_ids, session_maker)
         except asyncio.CancelledError:
             raise

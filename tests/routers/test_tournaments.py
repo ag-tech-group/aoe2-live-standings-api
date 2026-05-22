@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import LiveMatchPlayer, MatchOutcome, MatchState
 from app.routers.tournaments import _RECENT_RESULTS_LIMIT
 from tests.conftest import (
+    DEFAULT_TEST_USER_ID,
     make_match,
     make_match_player,
     make_player,
@@ -478,3 +479,87 @@ class TestStandingsTournamentRecord:
             "losses": 0,
             "streak": 0,
         }
+
+
+class TestUpdateTournament:
+    """PATCH /v1/tournaments/{slug} — owner-gated metadata edits."""
+
+    async def test_owner_updates_name(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", name="Old Name", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"name": "New Name"})
+        assert response.status_code == 200
+        assert response.json()["name"] == "New Name"
+        # The change is persisted, not just echoed back.
+        assert (await client.get("/v1/tournaments/cup")).json()["name"] == "New Name"
+
+    async def test_partial_update_leaves_other_fields_untouched(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup", name="Keep Me", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]
+            )
+        )
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 4})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["leaderboard_id"] == 4
+        assert body["name"] == "Keep Me"
+
+    async def test_can_clear_a_date_with_null(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"start_date": None})
+        assert response.status_code == 200
+        assert response.json()["start_date"] is None
+
+    async def test_empty_body_is_a_noop(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", name="Unchanged", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={})
+        assert response.status_code == 200
+        assert response.json()["name"] == "Unchanged"
+
+    async def test_start_after_end_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={
+                "start_date": "2026-07-01T00:00:00Z",
+                "end_date": "2026-06-01T00:00:00Z",
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_explicit_null_name_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"name": None})
+        assert response.status_code == 422

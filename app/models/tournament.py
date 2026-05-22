@@ -42,6 +42,10 @@ class Tournament(Base):
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
+    owners: Mapped[list["TournamentOwner"]] = relationship(
+        back_populates="tournament",
+        cascade="all, delete-orphan",
+    )
 
 
 class TournamentPlayer(Base):
@@ -65,6 +69,41 @@ class TournamentPlayer(Base):
     __table_args__ = (
         # Find every tournament a profile belongs to.
         Index("ix_tournament_players_profile_id", "profile_id"),
+    )
+
+
+class TournamentOwner(Base):
+    """A criticalbit user authorized to manage a tournament.
+
+    The authorization layer this service owns itself. Authentication
+    (criticalbit-auth-api) only answers *who* a request is; this table
+    answers *what they may edit* — a row grants its ``user_id`` write
+    access to one tournament's metadata, roster, and teams.
+
+    No FK to any user table: identity lives in criticalbit-auth-api, so
+    ``user_id`` is the opaque UUID from the access token's ``sub`` claim.
+    Rows are inserted out-of-band for now; an API to manage them is
+    deferred to a follow-up issue.
+    """
+
+    __tablename__ = "tournament_owners"
+
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # The criticalbit user UUID, exactly as it appears in the token `sub`.
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    tournament: Mapped[Tournament] = relationship(back_populates="owners")
+
+    __table_args__ = (
+        # Find every tournament a user owns.
+        Index("ix_tournament_owners_user_id", "user_id"),
     )
 
 

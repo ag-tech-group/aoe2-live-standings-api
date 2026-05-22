@@ -1,12 +1,15 @@
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import leaderboards_cache
+from app.auth import get_current_user_id, jwks
 from app.database import Base, get_async_session
 from app.events import hub
 from app.main import app, limiter
@@ -20,6 +23,7 @@ from app.models import (
     Team,
     TeamMember,
     Tournament,
+    TournamentOwner,
     TournamentPlayer,
 )
 
@@ -61,6 +65,24 @@ def reset_event_hub():
     hub._subscribers.clear()
 
 
+@pytest.fixture(autouse=True)
+def stub_jwks(monkeypatch: pytest.MonkeyPatch):
+    """Resolve JWKS to the test public key offline, for every test.
+
+    Patches the key loader so both the first fetch and the force-refresh
+    retry return the in-process test key — no test reaches the network for
+    JWKS, and tokens minted by ``make_access_token`` verify.
+    """
+
+    async def _load_test_key():
+        return _test_public_key
+
+    monkeypatch.setattr(jwks, "_load_public_key", _load_test_key)
+    jwks.reset_cache()
+    yield
+    jwks.reset_cache()
+
+
 async def override_get_async_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_maker() as session:
         yield session
@@ -84,6 +106,23 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
     """Direct database session for test setup."""
     async with async_session_maker() as session:
         yield session
+
+
+@pytest.fixture
+def auth_as():
+    """Authenticate the test client as a given criticalbit user id.
+
+    Returns a function: call ``auth_as(user_id)`` in a test to act as that
+    user. It overrides ``get_current_user_id`` so write-endpoint tests
+    needn't mint a JWT; the override is cleared afterwards. Tests that
+    exercise the real token path (``test_auth.py``) simply don't use it.
+    """
+
+    def _auth_as(user_id: str) -> None:
+        app.dependency_overrides[get_current_user_id] = lambda: user_id
+
+    yield _auth_as
+    app.dependency_overrides.pop(get_current_user_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +205,17 @@ def make_match_player(match_id: int, profile_id: int, **overrides: Any) -> Match
 
 
 def make_tournament(
-    slug: str, profile_ids: list[int] | None = None, **overrides: Any
+    slug: str,
+    profile_ids: list[int] | None = None,
+    owner_ids: list[str] | None = None,
+    **overrides: Any,
 ) -> Tournament:
-    """Build a Tournament with reasonable defaults and an optional roster."""
+    """Build a Tournament with reasonable defaults, an optional roster, and owners.
+
+    ``profile_ids`` seeds the tracked roster (``TournamentPlayer``);
+    ``owner_ids`` seeds the criticalbit user ids authorized to manage the
+    tournament (``TournamentOwner``).
+    """
     defaults: dict[str, Any] = {
         "slug": slug,
         "name": f"Tournament {slug}",
@@ -179,6 +226,7 @@ def make_tournament(
     defaults.update(overrides)
     tournament = Tournament(**defaults)
     tournament.tracked_players = [TournamentPlayer(profile_id=pid) for pid in (profile_ids or [])]
+    tournament.owners = [TournamentOwner(user_id=uid) for uid in (owner_ids or [])]
     return tournament
 
 
@@ -196,3 +244,39 @@ def make_team(name: str, profile_ids: list[int] | None = None, **overrides: Any)
     team = Team(**defaults)
     team.members = [TeamMember(profile_id=pid) for pid in (profile_ids or [])]
     return team
+
+
+# ---------------------------------------------------------------------------
+# Auth test helpers.
+#
+# A throwaway RSA keypair stands in for criticalbit-auth-api's signing key:
+# `make_access_token` mints tokens with the private half, and the autouse
+# `stub_jwks` fixture serves the public half so verification runs offline.
+# ---------------------------------------------------------------------------
+
+_test_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_test_public_key = _test_private_key.public_key()
+
+# A default criticalbit user UUID for tests that don't care about identity.
+DEFAULT_TEST_USER_ID = "00000000-0000-0000-0000-0000000000aa"
+
+
+def make_access_token(user_id: str = DEFAULT_TEST_USER_ID, **claim_overrides: Any) -> str:
+    """Mint an RS256 access token signed with the test key.
+
+    Defaults to a valid 15-minute token for ``user_id`` carrying the
+    audience criticalbit-auth-api uses. Pass overrides to forge the
+    rejection cases — e.g. ``exp=<past datetime>``, ``aud="urn:wrong"``,
+    or ``sub=None`` to drop the subject claim entirely.
+    """
+    now = datetime.now(tz=UTC)
+    claims: dict[str, Any] = {
+        "sub": user_id,
+        "aud": ["fastapi-users:auth"],
+        "iat": now,
+        "exp": now + timedelta(minutes=15),
+    }
+    claims.update(claim_overrides)
+    # An override of None means "omit this claim" (used to drop `sub`).
+    claims = {key: value for key, value in claims.items() if value is not None}
+    return jwt.encode(claims, _test_private_key, algorithm="RS256")

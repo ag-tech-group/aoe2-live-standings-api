@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, hub
 from app.poller.parsers import parse_live_advertisements
+from app.poller.roster import get_tracked_profile_ids
 from app.poller.upserts import replace_live_match_players, upsert_match_from_live
 
 logger = structlog.get_logger(__name__)
@@ -57,13 +58,19 @@ async def tick_live_matches(
 
 async def run_live_matches_poller(
     client: httpx.AsyncClient,
-    profile_ids: list[int],
     session_maker: async_sessionmaker,
     interval_seconds: int = _DEFAULT_INTERVAL_SECONDS,
 ) -> None:
-    """Long-running task — polls every ``interval_seconds``."""
+    """Long-running task — polls every ``interval_seconds``.
+
+    The tracked roster is re-resolved from the database each cycle, so
+    roster edits made through the management API are picked up without a
+    redeploy.
+    """
     while True:
         try:
+            async with session_maker() as session:
+                profile_ids = await get_tracked_profile_ids(session)
             await tick_live_matches(client, profile_ids, session_maker)
         except asyncio.CancelledError:
             raise

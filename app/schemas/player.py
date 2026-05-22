@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.match import MatchRead
 
@@ -58,3 +58,9 @@ class PlayerDetail(PlayerRead):
 
     last_polled_at: datetime | None = None
     recent_matches: list[MatchRead] = []
+
+
+class RosterPlayerCreate(BaseModel):
+    """Request body for adding a profile to a tournament's roster."""
+
+    profile_id: int = Field(gt=0)

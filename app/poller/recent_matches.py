@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, hub
 from app.poller.parsers import parse_recent_matches
+from app.poller.roster import get_tracked_profile_ids
 from app.poller.upserts import upsert_match_from_recent, upsert_match_player
 
 logger = structlog.get_logger(__name__)
@@ -95,15 +96,21 @@ async def tick_recent_matches(
 
 async def run_recent_matches_poller(
     client: httpx.AsyncClient,
-    profile_ids: list[int],
     session_maker: async_sessionmaker,
     matchtype_to_leaderboard: dict[int, int],
     interval_seconds: int = _DEFAULT_INTERVAL_SECONDS,
     concurrency: int = _DEFAULT_CONCURRENCY,
 ) -> None:
-    """Long-running task — fans out every ``interval_seconds``."""
+    """Long-running task — fans out every ``interval_seconds``.
+
+    The tracked roster is re-resolved from the database each cycle, so
+    roster edits made through the management API are picked up without a
+    redeploy.
+    """
     while True:
         try:
+            async with session_maker() as session:
+                profile_ids = await get_tracked_profile_ids(session)
             await tick_recent_matches(
                 client,
                 profile_ids,

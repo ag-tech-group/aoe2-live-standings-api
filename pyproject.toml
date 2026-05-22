@@ -21,6 +21,8 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.61b0",
     "scalar-fastapi>=1.0.0",
     "httpx>=0.28.1",
+    "pyjwt>=2.12.1",
+    "cryptography>=46.0.5",
 ]
 
 [dependency-groups]

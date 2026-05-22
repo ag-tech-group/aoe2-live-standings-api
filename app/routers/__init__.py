@@ -3,6 +3,7 @@ from app.routers.live import router as live_router
 from app.routers.matches import router as matches_router
 from app.routers.players import router as players_router
 from app.routers.stream import router as stream_router
+from app.routers.teams import router as teams_router
 from app.routers.tournaments import router as tournaments_router
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "matches_router",
     "players_router",
     "stream_router",
+    "teams_router",
     "tournaments_router",
 ]
