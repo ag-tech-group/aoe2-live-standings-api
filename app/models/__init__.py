@@ -1,6 +1,12 @@
 from app.models.match import LiveMatchPlayer, Match, MatchOutcome, MatchPlayer, MatchState
 from app.models.player import Player, PlayerRating
-from app.models.tournament import Team, TeamMember, Tournament, TournamentPlayer
+from app.models.tournament import (
+    Team,
+    TeamMember,
+    Tournament,
+    TournamentOwner,
+    TournamentPlayer,
+)
 
 __all__ = [
     "LiveMatchPlayer",
@@ -13,5 +19,6 @@ __all__ = [
     "Team",
     "TeamMember",
     "Tournament",
+    "TournamentOwner",
     "TournamentPlayer",
 ]

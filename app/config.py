@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     tournament_start_date: datetime | None = None
     tournament_end_date: datetime | None = None
 
+    # Authentication for the write/management API. The read surface stays
+    # unauthenticated; write routes verify the `criticalbit_access` cookie's
+    # RS256 JWT against criticalbit-auth-api's public JWKS. `auth_token_issuer`
+    # is enforced as the expected `iss` claim only when set (empty = skip).
+    auth_jwks_url: str = "https://auth-api.criticalbit.gg/auth/jwks"
+    auth_token_issuer: str = ""
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"
@@ -57,6 +64,20 @@ class Settings(BaseSettings):
         if self.is_development:
             return [f"http://localhost:{p}" for p in range(5100, 5200)]
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        """Allowed-origin regex, layered on top of ``cors_origin_list``.
+
+        In production every ``*.criticalbit.gg`` subdomain is allowed so
+        the companion management app — which calls the write API with the
+        ``criticalbit_access`` cookie — is accepted without enumerating
+        each tool's origin. ``None`` in development, where the localhost
+        port range in ``cors_origin_list`` already covers local apps.
+        """
+        if self.is_development:
+            return None
+        return r"https://([a-z0-9-]+\.)?criticalbit\.gg"
 
     @property
     def tracked_profile_id_list(self) -> list[int]:

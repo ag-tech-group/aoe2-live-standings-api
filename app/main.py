@@ -21,6 +21,7 @@ from app.routers import (
     matches_router,
     players_router,
     stream_router,
+    teams_router,
     tournaments_router,
 )
 from app.telemetry import setup_telemetry
@@ -38,10 +39,15 @@ app = FastAPI(
 
 setup_telemetry(app)
 
+# `allow_credentials=True` so the browser sends the `criticalbit_access`
+# cookie on write requests; paired with an explicit origin list + regex
+# (never `*`, which credentialed CORS forbids). Reads stay usable without
+# credentials — the setting is a superset of the old behaviour.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
-    allow_credentials=False,
+    allow_origin_regex=settings.cors_origin_regex,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
@@ -141,6 +147,7 @@ ROUTERS = (
     players_router,
     leaderboards_router,
     tournaments_router,
+    teams_router,
     matches_router,
     live_router,
     stream_router,

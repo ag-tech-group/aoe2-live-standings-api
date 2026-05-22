@@ -1,9 +1,13 @@
-"""GET /v1/tournaments/{slug}/players and /{slug}/players/{profile_id}."""
+"""Player + roster endpoints under /v1/tournaments/{slug}/players."""
 
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import TournamentPlayer
+from app.poller.roster import get_tracked_profile_ids
 from tests.conftest import (
+    DEFAULT_TEST_USER_ID,
     make_match,
     make_match_player,
     make_player,
@@ -144,3 +148,73 @@ class TestGetPlayer:
         await session.commit()
         response = await client.get("/v1/tournaments/cup/players/1", params={"match_limit": 999})
         assert response.status_code == 422
+
+
+class TestAddRosterPlayer:
+    """POST /v1/tournaments/{slug}/players — owner-gated roster add."""
+
+    async def test_owner_adds_player(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 199325})
+        assert response.status_code == 204
+
+        roster = (await session.execute(select(TournamentPlayer.profile_id))).scalars().all()
+        assert roster == [199325]
+
+    async def test_added_player_is_visible_to_the_poller(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The poller re-resolves the roster every cycle, so a player added
+        # over HTTP is tracked without a redeploy.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        await client.post("/v1/tournaments/cup/players", json={"profile_id": 555})
+        assert 555 in await get_tracked_profile_ids(session)
+
+    async def test_adding_a_duplicate_is_409(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 199325})
+        assert response.status_code == 409
+
+    async def test_non_positive_profile_id_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 0})
+        assert response.status_code == 422
+
+
+class TestRemoveRosterPlayer:
+    """DELETE /v1/tournaments/{slug}/players/{profile_id} — owner-gated."""
+
+    async def test_owner_removes_player(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.delete("/v1/tournaments/cup/players/199325")
+        assert response.status_code == 204
+        assert (await session.execute(select(TournamentPlayer))).scalars().all() == []
+
+    async def test_removing_a_player_not_on_the_roster_is_404(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.delete("/v1/tournaments/cup/players/199325")
+        assert response.status_code == 404

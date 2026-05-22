@@ -1,9 +1,17 @@
-"""GET /v1/tournaments/{slug}/teams/standings."""
+"""Team standings + team management under /v1/tournaments/{slug}/teams."""
 
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.conftest import make_player, make_player_rating, make_team, make_tournament
+from app.models import Team, TeamMember
+from tests.conftest import (
+    DEFAULT_TEST_USER_ID,
+    make_player,
+    make_player_rating,
+    make_team,
+    make_tournament,
+)
 
 
 class TestTeamStandings:
@@ -97,3 +105,160 @@ class TestTeamStandings:
         await session.commit()
         response = await client.get("/v1/tournaments/cup/teams/standings")
         assert response.headers["Cache-Control"] == "public, max-age=15"
+
+
+class TestCreateTeam:
+    """POST /v1/tournaments/{slug}/teams — owner-gated team creation."""
+
+    async def test_owner_creates_team(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post(
+            "/v1/tournaments/cup/teams", json={"name": "Red", "initials": "RED"}
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["name"] == "Red"
+        assert body["initials"] == "RED"
+        assert isinstance(body["id"], int)
+
+    async def test_overlong_initials_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        # initials is capped at 8 characters.
+        response = await client.post(
+            "/v1/tournaments/cup/teams", json={"name": "Red", "initials": "TOOLONGXX"}
+        )
+        assert response.status_code == 422
+
+
+class TestUpdateTeam:
+    """PATCH /v1/tournaments/{slug}/teams/{team_id} — owner-gated."""
+
+    async def test_owner_updates_team_name(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red")]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.patch(f"/v1/tournaments/cup/teams/{team_id}", json={"name": "Blue"})
+        assert response.status_code == 200
+        assert response.json()["name"] == "Blue"
+
+    async def test_unknown_team_is_404(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup/teams/999", json={"name": "X"})
+        assert response.status_code == 404
+
+    async def test_team_from_another_tournament_is_404(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # An owner of `cup` cannot reach a team that belongs to `other`.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        other = make_tournament("other")
+        other.teams = [make_team("Foreign")]
+        session.add(other)
+        await session.commit()
+        foreign_team_id = other.teams[0].id
+
+        response = await client.patch(
+            f"/v1/tournaments/cup/teams/{foreign_team_id}", json={"name": "X"}
+        )
+        assert response.status_code == 404
+
+
+class TestDeleteTeam:
+    """DELETE /v1/tournaments/{slug}/teams/{team_id} — owner-gated."""
+
+    async def test_owner_deletes_team_and_its_members(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}")
+        assert response.status_code == 204
+        assert (await session.execute(select(Team))).scalars().all() == []
+        # The team's membership rows cascade with it.
+        assert (await session.execute(select(TeamMember))).scalars().all() == []
+
+
+class TestAddTeamMember:
+    """POST /v1/tournaments/{slug}/teams/{team_id}/members — owner-gated."""
+
+    async def test_owner_adds_member(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red")]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.post(
+            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
+        )
+        assert response.status_code == 204
+        members = (await session.execute(select(TeamMember.profile_id))).scalars().all()
+        assert members == [199325]
+
+    async def test_adding_a_duplicate_member_is_409(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[199325])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.post(
+            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
+        )
+        assert response.status_code == 409
+
+
+class TestRemoveTeamMember:
+    """DELETE /v1/tournaments/{slug}/teams/{team_id}/members/{profile_id}."""
+
+    async def test_owner_removes_member(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[199325])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/199325")
+        assert response.status_code == 204
+        assert (await session.execute(select(TeamMember))).scalars().all() == []
+
+    async def test_removing_a_non_member_is_404(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red")]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/199325")
+        assert response.status_code == 404

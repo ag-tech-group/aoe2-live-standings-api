@@ -1,9 +1,9 @@
-"""Tournament endpoints: list, detail, and per-tournament standings.
+"""Tournament endpoints: list, detail, per-tournament standings, and edits.
 
 A tournament scopes the read surface — its roster (``TournamentPlayer``)
 and its ``leaderboard_id`` select which players and ratings a standings
-request sees. Matches and live state move under the same prefix in a
-later stage.
+request sees. ``PATCH /{slug}`` edits a tournament's metadata and is
+owner-gated; every other route in this router is public.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import require_tournament_owner
 from app.database import get_async_session
 from app.models import (
     LiveMatchPlayer,
@@ -35,6 +36,7 @@ from app.schemas import (
     TeamStandingRow,
     TournamentRead,
     TournamentRecord,
+    TournamentUpdate,
     compute_last_polled_at,
 )
 
@@ -86,6 +88,33 @@ async def get_tournament_detail(
     tournament: Tournament = Depends(get_tournament),
 ) -> TournamentRead:
     """A single tournament's metadata."""
+    return TournamentRead.model_validate(tournament)
+
+
+@router.patch("/{tournament_slug}")
+async def update_tournament(
+    payload: TournamentUpdate,
+    tournament: Tournament = Depends(require_tournament_owner),
+    session: AsyncSession = Depends(get_async_session),
+) -> TournamentRead:
+    """Edit a tournament's metadata — owner-gated.
+
+    PATCH semantics: only the fields present in the request body change.
+    ``start_date`` / ``end_date`` accept ``null`` to clear a bound; a
+    competition window whose start falls after its end is rejected with
+    422. ``slug`` is immutable — it is the key consumer URLs are built on.
+    """
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(tournament, field, value)
+
+    if (
+        tournament.start_date is not None
+        and tournament.end_date is not None
+        and tournament.start_date > tournament.end_date
+    ):
+        raise HTTPException(status_code=422, detail="start_date must not be after end_date")
+
+    await session.commit()
     return TournamentRead.model_validate(tournament)
 
 

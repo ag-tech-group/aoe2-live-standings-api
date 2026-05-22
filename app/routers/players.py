@@ -1,4 +1,4 @@
-"""Player endpoints, scoped to a tournament: list and detail."""
+"""Player endpoints, scoped to a tournament: list, detail, and roster edits."""
 
 from __future__ import annotations
 
@@ -9,10 +9,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.auth import require_tournament_owner
 from app.database import get_async_session
 from app.models import Match, MatchPlayer, Player, Tournament, TournamentPlayer
 from app.routers.tournaments import get_tournament
-from app.schemas import ListEnvelope, MatchRead, PlayerDetail, PlayerRead, compute_last_polled_at
+from app.schemas import (
+    ListEnvelope,
+    MatchRead,
+    PlayerDetail,
+    PlayerRead,
+    RosterPlayerCreate,
+    compute_last_polled_at,
+)
 
 router = APIRouter(prefix="/tournaments/{tournament_slug}/players", tags=["players"])
 
@@ -129,3 +137,57 @@ async def get_player(
             "recent_matches": recent_matches,
         }
     )
+
+
+@router.post("", status_code=204)
+async def add_roster_player(
+    payload: RosterPlayerCreate,
+    tournament: Tournament = Depends(require_tournament_owner),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Add a profile to the tournament's roster — owner-gated.
+
+    409 if the profile is already on the roster. The polling worker picks
+    the new profile up on its next cycle, so the edit takes effect without
+    a redeploy.
+    """
+    existing = (
+        await session.execute(
+            select(TournamentPlayer).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.profile_id == payload.profile_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Player already on the roster")
+
+    session.add(TournamentPlayer(tournament_id=tournament.id, profile_id=payload.profile_id))
+    await session.commit()
+
+
+@router.delete("/{profile_id}", status_code=204)
+async def remove_roster_player(
+    profile_id: int,
+    tournament: Tournament = Depends(require_tournament_owner),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Remove a profile from the tournament's roster — owner-gated.
+
+    404 if the profile isn't on the roster. The polled ``Player`` and
+    rating rows are left untouched: the profile may still belong to
+    another tournament's roster.
+    """
+    entry = (
+        await session.execute(
+            select(TournamentPlayer).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.profile_id == profile_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Player not found in this tournament")
+
+    await session.delete(entry)
+    await session.commit()

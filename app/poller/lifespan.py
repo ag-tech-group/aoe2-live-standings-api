@@ -2,9 +2,10 @@
 
 On startup: build one shared ``httpx.AsyncClient``, load leaderboard
 metadata into the in-memory cache, seed a tournament if the database has
-none, resolve the tracked roster from the tournament tables, and start
-three long-running ``asyncio.Task``s — one per polling cadence
-(30s / 60s / 15s).
+none, and start three long-running ``asyncio.Task``s — one per polling
+cadence (30s / 60s / 15s). Each poller re-resolves the tracked roster
+from the tournament tables every cycle, so roster edits made through the
+management API take effect without a restart.
 
 On shutdown: cancel the tasks, await their unwinding, then close the
 shared client. Cancellation surfaces as ``CancelledError`` inside each
@@ -35,7 +36,7 @@ from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import run_live_matches_poller
 from app.poller.player_stats import run_player_stats_poller
 from app.poller.recent_matches import run_recent_matches_poller
-from app.poller.roster import ensure_seed_tournament, get_tracked_profile_ids
+from app.poller.roster import ensure_seed_tournament
 
 logger = structlog.get_logger(__name__)
 
@@ -53,20 +54,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async with async_session_maker() as session:
         await ensure_seed_tournament(session)
-        profile_ids = await get_tracked_profile_ids(session)
-    logger.info("polling_starting", tracked_profile_count=len(profile_ids))
+    logger.info("polling_starting")
 
     tasks = [
         asyncio.create_task(
-            run_player_stats_poller(client, profile_ids, async_session_maker),
+            run_player_stats_poller(client, async_session_maker),
             name="poll_player_stats",
         ),
         asyncio.create_task(
-            run_recent_matches_poller(client, profile_ids, async_session_maker, matchtype_map),
+            run_recent_matches_poller(client, async_session_maker, matchtype_map),
             name="poll_recent_matches",
         ),
         asyncio.create_task(
-            run_live_matches_poller(client, profile_ids, async_session_maker),
+            run_live_matches_poller(client, async_session_maker),
             name="poll_live_matches",
         ),
     ]
