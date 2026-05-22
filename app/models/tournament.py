@@ -38,6 +38,10 @@ class Tournament(Base):
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
+    teams: Mapped[list["Team"]] = relationship(
+        back_populates="tournament",
+        cascade="all, delete-orphan",
+    )
 
 
 class TournamentPlayer(Base):
@@ -61,4 +65,57 @@ class TournamentPlayer(Base):
     __table_args__ = (
         # Find every tournament a profile belongs to.
         Index("ix_tournament_players_profile_id", "profile_id"),
+    )
+
+
+class Team(Base):
+    """A team within a tournament — a named subset of its roster.
+
+    A tournament may have any number of teams, or none (1v1 events have
+    none). Teams are tournament-scoped: deleting a tournament cascades to
+    its teams.
+    """
+
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"),
+    )
+    name: Mapped[str]
+    # Short display code shown where the individual list shows a country.
+    initials: Mapped[str] = mapped_column(String(8))
+
+    tournament: Mapped[Tournament] = relationship(back_populates="teams")
+    members: Mapped[list["TeamMember"]] = relationship(
+        back_populates="team",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        # Find every team in a tournament.
+        Index("ix_teams_tournament_id", "tournament_id"),
+    )
+
+
+class TeamMember(Base):
+    """A profile's membership in a team.
+
+    No FK to ``players``: a profile can be assigned to a team before the
+    poller has written its ``Player`` row. Mirrors ``TournamentPlayer``.
+    """
+
+    __tablename__ = "team_members"
+
+    team_id: Mapped[int] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    profile_id: Mapped[int] = mapped_column(primary_key=True)
+
+    team: Mapped[Team] = relationship(back_populates="members")
+
+    __table_args__ = (
+        # Find every team a profile belongs to.
+        Index("ix_team_members_profile_id", "profile_id"),
     )
