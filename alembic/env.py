@@ -17,6 +17,8 @@ from app.models import (  # noqa: F401
     MatchPlayer,
     Player,
     PlayerRating,
+    Team,
+    TeamMember,
     Tournament,
     TournamentPlayer,
 )

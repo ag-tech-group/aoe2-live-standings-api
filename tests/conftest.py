@@ -17,6 +17,8 @@ from app.models import (
     MatchState,
     Player,
     PlayerRating,
+    Team,
+    TeamMember,
     Tournament,
     TournamentPlayer,
 )
@@ -178,3 +180,19 @@ def make_tournament(
     tournament = Tournament(**defaults)
     tournament.tracked_players = [TournamentPlayer(profile_id=pid) for pid in (profile_ids or [])]
     return tournament
+
+
+def make_team(name: str, profile_ids: list[int] | None = None, **overrides: Any) -> Team:
+    """Build a Team with reasonable defaults and an optional member list.
+
+    Attach to a tournament via ``tournament.teams = [...]`` so its
+    ``tournament_id`` and ``id`` are assigned on flush.
+    """
+    defaults: dict[str, Any] = {
+        "name": name,
+        "initials": name[:8].upper(),
+    }
+    defaults.update(overrides)
+    team = Team(**defaults)
+    team.members = [TeamMember(profile_id=pid) for pid in (profile_ids or [])]
+    return team

@@ -23,12 +23,16 @@ from app.models import (
     MatchState,
     Player,
     PlayerRating,
+    Team,
+    TeamMember,
     Tournament,
     TournamentPlayer,
 )
 from app.schemas import (
     ListEnvelope,
     StandingRow,
+    TeamMemberRead,
+    TeamStandingRow,
     TournamentRead,
     TournamentRecord,
     compute_last_polled_at,
@@ -266,6 +270,82 @@ async def get_standings(
         timestamps.append(rating.updated_at)
 
     return ListEnvelope[StandingRow](
+        last_polled_at=compute_last_polled_at(timestamps),
+        items=items,
+    )
+
+
+@router.get("/{tournament_slug}/teams/standings")
+async def get_team_standings(
+    response: Response,
+    tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
+) -> ListEnvelope[TeamStandingRow]:
+    """The tournament's teams, ranked by combined current rating.
+
+    A team's combined rating is the sum of its members' current ratings
+    on the tournament's leaderboard; the average is that sum over the
+    member count. Members without a rating on that leaderboard are
+    omitted. Teams are optional — a tournament with none returns an empty
+    list. Sorted by combined sum desc.
+    """
+    response.headers["Cache-Control"] = _STANDINGS_CACHE_CONTROL
+
+    teams = (
+        (await session.execute(select(Team).where(Team.tournament_id == tournament.id)))
+        .scalars()
+        .all()
+    )
+
+    member_stmt = (
+        select(
+            TeamMember.team_id,
+            TeamMember.profile_id,
+            Player.alias,
+            PlayerRating.current_rating,
+            PlayerRating.updated_at,
+        )
+        .join(Team, Team.id == TeamMember.team_id)
+        .join(Player, Player.profile_id == TeamMember.profile_id)
+        .join(PlayerRating, PlayerRating.profile_id == TeamMember.profile_id)
+        .where(
+            Team.tournament_id == tournament.id,
+            PlayerRating.leaderboard_id == tournament.leaderboard_id,
+        )
+    )
+    members_by_team: dict[int, list[TeamMemberRead]] = {}
+    timestamps: list[datetime | None] = []
+    for team_id, profile_id, alias, rating, updated_at in (
+        await session.execute(member_stmt)
+    ).all():
+        members_by_team.setdefault(team_id, []).append(
+            TeamMemberRead(profile_id=profile_id, alias=alias, current_rating=rating)
+        )
+        timestamps.append(updated_at)
+
+    items: list[TeamStandingRow] = []
+    for team in teams:
+        members = sorted(
+            members_by_team.get(team.id, []),
+            key=lambda m: m.current_rating,
+            reverse=True,
+        )
+        total = sum(m.current_rating for m in members)
+        count = len(members)
+        items.append(
+            TeamStandingRow(
+                team_id=team.id,
+                name=team.name,
+                initials=team.initials,
+                member_count=count,
+                combined_rating_sum=total,
+                combined_rating_average=(total / count) if count else 0.0,
+                members=members,
+            )
+        )
+    items.sort(key=lambda t: t.combined_rating_sum, reverse=True)
+
+    return ListEnvelope[TeamStandingRow](
         last_polled_at=compute_last_polled_at(timestamps),
         items=items,
     )

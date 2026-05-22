@@ -1,6 +1,6 @@
 from app.models.match import LiveMatchPlayer, Match, MatchOutcome, MatchPlayer, MatchState
 from app.models.player import Player, PlayerRating
-from app.models.tournament import Tournament, TournamentPlayer
+from app.models.tournament import Team, TeamMember, Tournament, TournamentPlayer
 
 __all__ = [
     "LiveMatchPlayer",
@@ -10,6 +10,8 @@ __all__ = [
     "MatchState",
     "Player",
     "PlayerRating",
+    "Team",
+    "TeamMember",
     "Tournament",
     "TournamentPlayer",
 ]
