@@ -6,7 +6,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Match, MatchOutcome, MatchPlayer, MatchState, Player, PlayerRating
+from app.models import (
+    Match,
+    MatchOutcome,
+    MatchPlayer,
+    MatchState,
+    Player,
+    PlayerRating,
+    Tournament,
+    TournamentPlayer,
+)
 
 
 class TestPlayer:
@@ -178,4 +187,52 @@ class TestMatch:
             .scalars()
             .all()
         )
+        assert remaining == []
+
+
+class TestTournament:
+    async def test_create_with_players_and_load_via_relationship(self, session: AsyncSession):
+        tournament = Tournament(
+            slug="hera-invitational-2026",
+            name="Hera Streamer Invitational 2026",
+            leaderboard_id=3,
+            start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            end_date=datetime(2026, 6, 14, tzinfo=UTC),
+        )
+        tournament.tracked_players.append(TournamentPlayer(profile_id=199325))
+        tournament.tracked_players.append(TournamentPlayer(profile_id=347269))
+        session.add(tournament)
+        await session.commit()
+
+        stmt = (
+            select(Tournament)
+            .where(Tournament.slug == "hera-invitational-2026")
+            .options(selectinload(Tournament.tracked_players))
+        )
+        loaded = (await session.execute(stmt)).scalar_one()
+
+        assert loaded.name == "Hera Streamer Invitational 2026"
+        assert loaded.leaderboard_id == 3
+        assert sorted(p.profile_id for p in loaded.tracked_players) == [199325, 347269]
+
+    async def test_dates_are_optional(self, session: AsyncSession):
+        session.add(Tournament(slug="undated", name="Undated", leaderboard_id=3))
+        await session.commit()
+
+        loaded = (
+            await session.execute(select(Tournament).where(Tournament.slug == "undated"))
+        ).scalar_one()
+        assert loaded.start_date is None
+        assert loaded.end_date is None
+
+    async def test_cascade_delete_tournament_removes_players(self, session: AsyncSession):
+        tournament = Tournament(slug="temp", name="Temp", leaderboard_id=3)
+        tournament.tracked_players.append(TournamentPlayer(profile_id=1))
+        session.add(tournament)
+        await session.commit()
+
+        await session.delete(tournament)
+        await session.commit()
+
+        remaining = (await session.execute(select(TournamentPlayer))).scalars().all()
         assert remaining == []
