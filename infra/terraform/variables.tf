@@ -35,7 +35,7 @@ variable "db_user" {
 }
 
 variable "tracked_profile_ids" {
-  description = "Comma-separated Relic profile IDs the poller watches. Empty list short-circuits the per-profile pollers. Tournament rosters land here."
+  description = "One-time seed roster for an empty database: comma-separated Relic profile IDs used to bootstrap the first tournament. Read only by ensure_seed_tournament() at startup — a no-op once any tournament exists. The live roster is the tournament_players table, managed via the write API; this value does not track it."
   type        = string
   default     = "199325,347269"
 }
