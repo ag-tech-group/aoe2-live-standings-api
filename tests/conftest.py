@@ -10,7 +10,16 @@ from app import leaderboards_cache
 from app.database import Base, get_async_session
 from app.events import hub
 from app.main import app, limiter
-from app.models import Match, MatchOutcome, MatchPlayer, MatchState, Player, PlayerRating
+from app.models import (
+    Match,
+    MatchOutcome,
+    MatchPlayer,
+    MatchState,
+    Player,
+    PlayerRating,
+    Tournament,
+    TournamentPlayer,
+)
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -152,3 +161,20 @@ def make_match_player(match_id: int, profile_id: int, **overrides: Any) -> Match
     }
     defaults.update(overrides)
     return MatchPlayer(**defaults)
+
+
+def make_tournament(
+    slug: str, profile_ids: list[int] | None = None, **overrides: Any
+) -> Tournament:
+    """Build a Tournament with reasonable defaults and an optional roster."""
+    defaults: dict[str, Any] = {
+        "slug": slug,
+        "name": f"Tournament {slug}",
+        "leaderboard_id": 3,
+        "start_date": None,
+        "end_date": None,
+    }
+    defaults.update(overrides)
+    tournament = Tournament(**defaults)
+    tournament.tracked_players = [TournamentPlayer(profile_id=pid) for pid in (profile_ids or [])]
+    return tournament
