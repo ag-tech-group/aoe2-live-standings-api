@@ -15,6 +15,7 @@ from app.errors import register_error_handlers
 from app.features import router as features_router
 from app.limiting import limiter
 from app.logging import setup_logging
+from app.middleware.idempotency import IdempotencyMiddleware
 from app.poller.lifespan import lifespan
 from app.routers import (
     leaderboards_router,
@@ -145,6 +146,12 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
             duration_ms=duration_ms,
         )
     return response
+
+
+# Idempotency-Key middleware (#61). Buffers + caches write responses
+# keyed by client-supplied UUID header. No-op when the header is
+# absent. Scoped to /v1/* writes only.
+app.add_middleware(IdempotencyMiddleware)
 
 
 # Error handlers — wired after the request-ID middleware so

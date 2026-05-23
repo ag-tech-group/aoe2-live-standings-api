@@ -12,6 +12,7 @@ from app.database import Base
 # Models must be imported here so Alembic autogenerate can detect them via
 # Base.metadata.
 from app.models import (  # noqa: F401
+    IdempotencyKey,
     Leaderboard,
     LiveMatchPlayer,
     Match,
