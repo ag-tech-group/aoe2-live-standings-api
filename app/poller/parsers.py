@@ -17,7 +17,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.models.match import MatchOutcome, MatchState
-from app.schemas.leaderboard import LeaderboardRead
 
 # Upstream uses -1 to mean "no rank on this leaderboard" (player never
 # qualified). We normalize to None so the rank columns can carry a clean
@@ -248,20 +247,28 @@ def parse_live_advertisements(
     return matches, live_players
 
 
-def parse_available_leaderboards(payload: dict[str, Any]) -> list[LeaderboardRead]:
-    """Pluck (id, name, isranked) from ``getAvailableLeaderboards``.
+def parse_available_leaderboards(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract leaderboard rows from ``getAvailableLeaderboards``.
 
-    The full payload also carries matchtype, race, and region metadata —
-    those land in v1.x when we need them for display mappings.
+    Returns ``{leaderboard_id, name, is_ranked, matchtypes}`` dicts suitable
+    for ``upsert_leaderboard``. ``matchtypes`` carries the list of upstream
+    matchtype IDs this leaderboard covers — the recent-matches poller reads
+    it to rebuild its ``matchtype_id -> leaderboard_id`` map.
     """
-    rows: list[LeaderboardRead] = []
+    rows: list[dict[str, Any]] = []
     for lb in payload.get("leaderboards", []):
+        # matchtypes[] entries are sometimes ints, sometimes dicts wrapping
+        # an id — be defensive (mirrors matchtype_to_leaderboard_map).
+        matchtypes = [
+            mt["id"] if isinstance(mt, dict) else int(mt) for mt in lb.get("matchtypes", []) or []
+        ]
         rows.append(
-            LeaderboardRead(
-                leaderboard_id=lb["id"],
-                name=lb.get("name", ""),
-                is_ranked=bool(lb.get("isranked", 0)),
-            )
+            {
+                "leaderboard_id": lb["id"],
+                "name": lb.get("name", ""),
+                "is_ranked": bool(lb.get("isranked", 0)),
+                "matchtypes": matchtypes,
+            }
         )
     return rows
 

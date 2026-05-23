@@ -350,14 +350,17 @@ class TestParseAvailableLeaderboards:
     def test_basic_extraction(self):
         payload = {
             "leaderboards": [
-                {"id": 3, "name": "1v1 RM Ranked", "isranked": 1},
+                {"id": 3, "name": "1v1 RM Ranked", "isranked": 1, "matchtypes": [6]},
                 {"id": 99, "name": "Custom POM", "isranked": 0},
             ]
         }
         items = parse_available_leaderboards(payload)
-        assert [i.leaderboard_id for i in items] == [3, 99]
-        assert items[0].is_ranked is True
-        assert items[1].is_ranked is False
+        assert [i["leaderboard_id"] for i in items] == [3, 99]
+        assert items[0]["is_ranked"] is True
+        assert items[1]["is_ranked"] is False
+        assert items[0]["matchtypes"] == [6]
+        # Missing matchtypes in the upstream payload defaults to [].
+        assert items[1]["matchtypes"] == []
 
 
 class TestMatchtypeToLeaderboardMap:

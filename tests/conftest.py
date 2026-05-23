@@ -8,7 +8,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app import leaderboards_cache
 from app.auth import get_current_user_id, jwks
 from app.database import Base, get_async_session
 from app.events import hub
@@ -49,13 +48,6 @@ def reset_rate_limiter():
     limiter._storage.reset()
     yield
     limiter._storage.reset()
-
-
-@pytest.fixture(autouse=True)
-def reset_leaderboards_cache():
-    """Drop any leaderboard metadata a test wrote into the module-level cache."""
-    yield
-    leaderboards_cache.clear_cache()
 
 
 @pytest.fixture(autouse=True)

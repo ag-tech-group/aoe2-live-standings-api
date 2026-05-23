@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         return
 
     client = build_upstream_client()
-    matchtype_map = await load_leaderboards(client)
+    matchtype_map = await load_leaderboards(client, async_session_maker)
 
     async with async_session_maker() as session:
         await ensure_seed_tournament(session)
