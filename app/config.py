@@ -98,9 +98,32 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
-        if not self.is_development:
-            if "postgres:postgres@" in self.database_url:
-                raise ValueError("Default database credentials must not be used in production")
+        """Fail-loud guard against shipping common misconfig to prod.
+
+        Catches the cases where a default placeholder value or a known
+        weak credential would otherwise silently make it into a non-
+        development environment. Cheap insurance against an env-var
+        added in a follow-up PR that ships with its placeholder.
+        """
+        if self.is_development:
+            return self
+
+        if "postgres:postgres@" in self.database_url:
+            raise ValueError(
+                "Default database credentials (postgres:postgres) must not be used "
+                "outside development — set DATABASE_URL to a real connection string"
+            )
+
+        # The default JWKS URL is the prod criticalbit-auth-api host;
+        # an explicit empty value means the JWT verifier has nothing
+        # to verify against and every request would 401. Catch that
+        # at boot rather than at first request.
+        if not self.auth_jwks_url:
+            raise ValueError(
+                "AUTH_JWKS_URL must not be empty outside development — the "
+                "write/management API can't verify access tokens without it"
+            )
+
         return self
 
 
