@@ -1,23 +1,23 @@
-"""FastAPI ``lifespan`` integration for the polling worker.
+"""FastAPI ``lifespan`` integration for the listener + poller background tasks.
 
-On startup: build one shared ``httpx.AsyncClient``, load leaderboard
-metadata into the in-memory cache, seed a tournament if the database has
-none, and start three long-running ``asyncio.Task``s — one per polling
-cadence (30s / 60s / 15s). Each poller re-resolves the tracked roster
-from the tournament tables every cycle, so roster edits made through the
-management API take effect without a restart.
+The same image runs as two Cloud Run services in production (issue #14):
 
-On shutdown: cancel the tasks, await their unwinding, then close the
-shared client. Cancellation surfaces as ``CancelledError`` inside each
-``while True`` loop; the runners re-raise it deliberately so the loop
-exits cleanly rather than swallowing the signal in their per-tick
-try/except.
+- The **API** service has ``LISTENER_ENABLED=true`` and ``POLLING_ENABLED=false``.
+  Its lifespan starts only the LISTEN/NOTIFY listener, which republishes
+  nudges from the DB to the local ``EventHub`` for SSE fan-out.
+- The **worker** service has ``LISTENER_ENABLED=false`` and ``POLLING_ENABLED=true``.
+  Its lifespan loads leaderboards, seeds a tournament if needed, and
+  starts the three long-running polling tasks (30s / 60s / 15s).
 
-The whole lifespan is gated by ``settings.polling_enabled``. When
-disabled, the app boots normally with an empty leaderboard cache and no
-background tasks — useful for local dev that doesn't want to hit
-upstream, and a defensive default for test environments that bypass
-``ASGITransport``'s lifespan-off behavior.
+In local dev both flags default true, so a single uvicorn process runs
+everything — mono mode. In tests, ``ASGITransport`` bypasses the lifespan
+entirely so neither task group ever starts.
+
+On shutdown the lifespan cancels every task it started, awaits the
+unwinding, then closes the shared upstream client (if one was built).
+``asyncio.CancelledError`` surfaces inside each ``while True`` loop; the
+runners re-raise it deliberately so the loop exits cleanly rather than
+swallowing the signal in their per-tick try/except.
 """
 
 from __future__ import annotations
@@ -44,46 +44,55 @@ logger = structlog.get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Boot the polling worker on app startup; tear it down on shutdown."""
-    if not settings.polling_enabled:
-        logger.info("polling_disabled")
+    """Boot the listener and/or pollers per settings; tear them down on shutdown."""
+    tasks: list[asyncio.Task] = []
+    client = None
+
+    if settings.listener_enabled:
+        tasks.append(
+            asyncio.create_task(
+                listen_for_nudges(settings.database_url),
+                name="listen_nudges",
+            )
+        )
+        logger.info("listener_starting")
+
+    if settings.polling_enabled:
+        client = build_upstream_client()
+        matchtype_map = await load_leaderboards(client, async_session_maker)
+        async with async_session_maker() as session:
+            await ensure_seed_tournament(session)
+        tasks.extend(
+            [
+                asyncio.create_task(
+                    run_player_stats_poller(client, async_session_maker),
+                    name="poll_player_stats",
+                ),
+                asyncio.create_task(
+                    run_recent_matches_poller(client, async_session_maker, matchtype_map),
+                    name="poll_recent_matches",
+                ),
+                asyncio.create_task(
+                    run_live_matches_poller(client, async_session_maker),
+                    name="poll_live_matches",
+                ),
+            ]
+        )
+        logger.info("polling_starting")
+
+    if not tasks:
+        logger.info("lifespan_idle")
         yield
         return
-
-    client = build_upstream_client()
-    matchtype_map = await load_leaderboards(client, async_session_maker)
-
-    async with async_session_maker() as session:
-        await ensure_seed_tournament(session)
-    logger.info("polling_starting")
-
-    tasks = [
-        asyncio.create_task(
-            listen_for_nudges(settings.database_url),
-            name="listen_nudges",
-        ),
-        asyncio.create_task(
-            run_player_stats_poller(client, async_session_maker),
-            name="poll_player_stats",
-        ),
-        asyncio.create_task(
-            run_recent_matches_poller(client, async_session_maker, matchtype_map),
-            name="poll_recent_matches",
-        ),
-        asyncio.create_task(
-            run_live_matches_poller(client, async_session_maker),
-            name="poll_live_matches",
-        ),
-    ]
 
     try:
         yield
     finally:
-        logger.info("polling_stopping")
+        logger.info("lifespan_stopping")
         for task in tasks:
             task.cancel()
-        # Wait for each task to actually finish unwinding. `gather` with
-        # `return_exceptions=True` swallows the CancelledError each task
-        # re-raises so we don't propagate it out of shutdown.
+        # `return_exceptions=True` so the CancelledError each runner
+        # re-raises doesn't propagate out of shutdown.
         await asyncio.gather(*tasks, return_exceptions=True)
-        await client.aclose()
+        if client is not None:
+            await client.aclose()

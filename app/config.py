@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     upstream_base_url: str = "https://aoe-api.worldsedgelink.com"
     polling_enabled: bool = True
 
+    # Whether the LISTEN/NOTIFY listener runs in this process. In prod
+    # the API service has this true and the worker has it false — the
+    # worker writes nudges but has no SSE clients to fan out to. Local
+    # dev defaults both true so a single mono process does everything.
+    listener_enabled: bool = True
+
     # Seed-tournament bootstrap. On startup, when the `tournaments` table is
     # empty, a tournament is created from these values with the
     # `tracked_profile_ids` roster — the migration path off the old
