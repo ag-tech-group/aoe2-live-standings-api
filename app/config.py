@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # via Terraform `var.sentry_dsn` in prod.
     sentry_dsn: str = ""
 
+    # When True, HTTPException + RequestValidationError responses use
+    # the new envelope shape from `app/errors.py` (#57). When False
+    # (the default during the rollout window), they keep FastAPI's
+    # legacy `{"detail": ...}` shape. `BusinessError` always uses the
+    # envelope regardless of this flag. Flip on after the frontend
+    # has updated its error-handling to read the envelope shape, then
+    # delete this flag + the legacy paths in a follow-up.
+    feature_error_envelope_v2: bool = False
+
     # Upstream polling configuration.
     upstream_base_url: str = "https://aoe-api.worldsedgelink.com"
     polling_enabled: bool = True

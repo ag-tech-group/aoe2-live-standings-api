@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import API_V1_PREFIX, settings
+from app.errors import register_error_handlers
 from app.features import router as features_router
 from app.limiting import limiter
 from app.logging import setup_logging
@@ -144,6 +145,13 @@ async def request_logging_middleware(request: Request, call_next) -> Response:
             duration_ms=duration_ms,
         )
     return response
+
+
+# Error handlers — wired after the request-ID middleware so
+# `request.state.request_id` is populated by the time a handler runs.
+# `BusinessError` always responds with the new envelope; `HTTPException`
+# + validation errors respect the `FEATURE_ERROR_ENVELOPE_V2` flag.
+register_error_handlers(app)
 
 
 # Application routers, all mounted under /v1 so the whole API surface is
