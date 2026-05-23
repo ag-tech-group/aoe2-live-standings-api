@@ -12,7 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_tournament_owner
+from app.audit import AuditAction, audit
+from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Team, TeamMember, Tournament
@@ -49,6 +50,7 @@ async def create_team(
     request: Request,
     payload: TeamCreate,
     tournament: Tournament = Depends(require_tournament_owner),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> TeamRead:
     """Create a team within the tournament — owner-gated.
@@ -59,6 +61,14 @@ async def create_team(
     team = Team(tournament_id=tournament.id, name=payload.name, initials=payload.initials)
     session.add(team)
     await session.commit()
+    audit(
+        AuditAction.TEAM_CREATE,
+        actor_user_id=actor_user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        target_team_id=team.id,
+        name=payload.name,
+    )
     return TeamRead.model_validate(team)
 
 
@@ -68,15 +78,24 @@ async def update_team(
     request: Request,
     payload: TeamUpdate,
     team: Team = Depends(get_owned_team),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> TeamRead:
     """Edit a team's name or initials — owner-gated.
 
     PATCH semantics: only the fields present in the request body change.
     """
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
         setattr(team, field, value)
     await session.commit()
+    audit(
+        AuditAction.TEAM_UPDATE,
+        actor_user_id=actor_user_id,
+        tournament_id=team.tournament_id,
+        target_team_id=team.id,
+        changes=changes,
+    )
     return TeamRead.model_validate(team)
 
 
@@ -85,6 +104,7 @@ async def update_team(
 async def delete_team(
     request: Request,
     team: Team = Depends(get_owned_team),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Delete a team — owner-gated.
@@ -92,8 +112,13 @@ async def delete_team(
     The team's ``TeamMember`` rows cascade with it. Polled player data is
     untouched; only the team grouping is removed.
     """
+    audit_payload = {
+        "tournament_id": team.tournament_id,
+        "target_team_id": team.id,
+    }
     await session.delete(team)
     await session.commit()
+    audit(AuditAction.TEAM_DELETE, actor_user_id=actor_user_id, **audit_payload)
 
 
 @router.post("/{team_id}/members", status_code=204)
@@ -102,6 +127,7 @@ async def add_team_member(
     request: Request,
     payload: TeamMemberCreate,
     team: Team = Depends(get_owned_team),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Add a profile to a team — owner-gated.
@@ -123,6 +149,13 @@ async def add_team_member(
 
     session.add(TeamMember(team_id=team.id, profile_id=payload.profile_id))
     await session.commit()
+    audit(
+        AuditAction.TEAM_MEMBER_ADD,
+        actor_user_id=actor_user_id,
+        tournament_id=team.tournament_id,
+        target_team_id=team.id,
+        target_profile_id=payload.profile_id,
+    )
 
 
 @router.delete("/{team_id}/members/{profile_id}", status_code=204)
@@ -131,6 +164,7 @@ async def remove_team_member(
     request: Request,
     profile_id: int,
     team: Team = Depends(get_owned_team),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Remove a profile from a team — owner-gated.
@@ -150,3 +184,10 @@ async def remove_team_member(
 
     await session.delete(member)
     await session.commit()
+    audit(
+        AuditAction.TEAM_MEMBER_REMOVE,
+        actor_user_id=actor_user_id,
+        tournament_id=team.tournament_id,
+        target_team_id=team.id,
+        target_profile_id=profile_id,
+    )

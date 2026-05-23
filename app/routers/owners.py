@@ -17,7 +17,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_tournament_owner
+from app.audit import AuditAction, audit
+from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Tournament, TournamentOwner
@@ -52,6 +53,7 @@ async def grant_tournament_owner(
     request: Request,
     payload: TournamentOwnerCreate,
     tournament: Tournament = Depends(require_tournament_owner),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Grant ownership to a criticalbit user — owner-gated.
@@ -73,6 +75,13 @@ async def grant_tournament_owner(
 
     session.add(TournamentOwner(tournament_id=tournament.id, user_id=payload.user_id))
     await session.commit()
+    audit(
+        AuditAction.OWNER_GRANT,
+        actor_user_id=actor_user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        target_user_id=payload.user_id,
+    )
 
 
 @router.delete("/{user_id}", status_code=204)
@@ -81,6 +90,7 @@ async def revoke_tournament_owner(
     request: Request,
     user_id: str,
     tournament: Tournament = Depends(require_tournament_owner),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Revoke a user's ownership — owner-gated.
@@ -127,3 +137,11 @@ async def revoke_tournament_owner(
             status_code=422,
             detail="Cannot revoke the last owner — the tournament would become uneditable",
         )
+
+    audit(
+        AuditAction.OWNER_REVOKE,
+        actor_user_id=actor_user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        target_user_id=user_id,
+    )

@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
@@ -127,6 +128,12 @@ async def create_tournament(
     tournament.owners = [TournamentOwner(user_id=user_id)]
     session.add(tournament)
     await session.commit()
+    audit(
+        AuditAction.TOURNAMENT_CREATE,
+        actor_user_id=user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+    )
     return TournamentRead.model_validate(tournament)
 
 
@@ -144,6 +151,7 @@ async def update_tournament(
     request: Request,
     payload: TournamentUpdate,
     tournament: Tournament = Depends(require_tournament_owner),
+    user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> TournamentRead:
     """Edit a tournament's metadata — owner-gated.
@@ -153,7 +161,8 @@ async def update_tournament(
     competition window whose start falls after its end is rejected with
     422. ``slug`` is immutable — it is the key consumer URLs are built on.
     """
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
         setattr(tournament, field, value)
 
     if (
@@ -164,6 +173,13 @@ async def update_tournament(
         raise HTTPException(status_code=422, detail="start_date must not be after end_date")
 
     await session.commit()
+    audit(
+        AuditAction.TOURNAMENT_UPDATE,
+        actor_user_id=user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        changes=changes,
+    )
     return TournamentRead.model_validate(tournament)
 
 
@@ -172,6 +188,7 @@ async def update_tournament(
 async def delete_tournament(
     request: Request,
     tournament: Tournament = Depends(require_tournament_owner),
+    user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Delete a tournament and everything tournament-scoped — owner-gated.
@@ -181,8 +198,18 @@ async def delete_tournament(
     via the FKs' ``ON DELETE CASCADE``. Match history is not tournament-
     scoped and is preserved.
     """
+    # Capture identifying fields before the delete — the audit log
+    # outlives the row, so the slug + id need to be in the event.
+    audit_slug = tournament.slug
+    audit_id = tournament.id
     await session.delete(tournament)
     await session.commit()
+    audit(
+        AuditAction.TOURNAMENT_DELETE,
+        actor_user_id=user_id,
+        tournament_slug=audit_slug,
+        tournament_id=audit_id,
+    )
 
 
 async def _recent_results_by_profile(
