@@ -243,7 +243,7 @@ async def _drive_one_full_polling_cycle(
             )
 
         async with httpx.AsyncClient(base_url=_TEST_UPSTREAM) as client:
-            matchtype_map = await load_leaderboards(client) if leaderboards else {}
+            matchtype_map = await load_leaderboards(client, session_maker) if leaderboards else {}
             if player_stats:
                 await tick_player_stats(client, _TRACKED_PROFILES, session_maker)
             if recent_matches:
@@ -364,7 +364,7 @@ async def test_upstream_failure_isolated_to_one_poller(
         mock.get("/community/advertisement/findAdvertisements").respond(json=_live_payload())
 
         async with httpx.AsyncClient(base_url=_TEST_UPSTREAM) as client:
-            matchtype_map = await load_leaderboards(client)
+            matchtype_map = await load_leaderboards(client, patched_session_maker)
 
             with pytest.raises(httpx.HTTPStatusError):
                 await tick_player_stats(client, _TRACKED_PROFILES, patched_session_maker)

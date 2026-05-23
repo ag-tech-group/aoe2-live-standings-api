@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import leaderboards_cache
-from app.schemas import LeaderboardRead, ListEnvelope
+from app.database import get_async_session
+from app.models import Leaderboard
+from app.schemas import LeaderboardRead, ListEnvelope, compute_last_polled_at
 
 router = APIRouter(prefix="/leaderboards", tags=["leaderboards"])
 
@@ -15,15 +18,20 @@ _LEADERBOARDS_CACHE_CONTROL = "public, max-age=15"
 
 
 @router.get("")
-async def list_leaderboards(response: Response) -> ListEnvelope[LeaderboardRead]:
-    """Available leaderboards, sourced from the in-memory cache.
+async def list_leaderboards(
+    response: Response,
+    session: AsyncSession = Depends(get_async_session),
+) -> ListEnvelope[LeaderboardRead]:
+    """Available leaderboards, sourced from the ``leaderboards`` table.
 
-    The polling worker fills the cache at startup from upstream
+    The polling worker upserts rows here at startup from upstream
     ``getAvailableLeaderboards``. Each tournament tracks one of these by
     ``leaderboard_id``.
     """
     response.headers["Cache-Control"] = _LEADERBOARDS_CACHE_CONTROL
+    stmt = select(Leaderboard).order_by(Leaderboard.leaderboard_id)
+    rows = (await session.execute(stmt)).scalars().all()
     return ListEnvelope[LeaderboardRead](
-        last_polled_at=leaderboards_cache.get_last_refreshed_at(),
-        items=list(leaderboards_cache.get_cache()),
+        last_polled_at=compute_last_polled_at(r.updated_at for r in rows),
+        items=[LeaderboardRead.model_validate(r) for r in rows],
     )

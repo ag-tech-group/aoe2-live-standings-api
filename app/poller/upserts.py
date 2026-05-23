@@ -1,7 +1,7 @@
 """Dialect-aware ``INSERT ... ON CONFLICT`` helpers for the polling worker.
 
-The poller writes to five tables (``players``, ``player_ratings``, ``matches``,
-``match_players``, ``live_match_players``) with four semantic flavors:
+The poller writes to six tables (``leaderboards``, ``players``, ``player_ratings``,
+``matches``, ``match_players``, ``live_match_players``) with four semantic flavors:
 
 - **Full overwrite on conflict** (``upsert_player``, ``upsert_player_rating``,
   ``upsert_match_from_recent``) — incoming row is authoritative.
@@ -30,7 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import LiveMatchPlayer, Match, MatchPlayer, Player, PlayerRating
+from app.models import Leaderboard, LiveMatchPlayer, Match, MatchPlayer, Player, PlayerRating
 
 
 def dialect_insert(session: AsyncSession):
@@ -47,6 +47,24 @@ def dialect_insert(session: AsyncSession):
     if name == "sqlite":
         return sqlite_insert
     raise NotImplementedError(f"Upserts not implemented for dialect: {name}")
+
+
+async def upsert_leaderboard(session: AsyncSession, data: dict[str, Any]) -> None:
+    """Insert a Leaderboard, or overwrite all non-PK columns on conflict.
+
+    The poller upserts on startup from upstream ``getAvailableLeaderboards``;
+    the row is authoritative on every refresh. ``updated_at`` is set to
+    ``now()`` on both paths since ``ON CONFLICT`` bypasses the ORM's
+    ``onupdate`` machinery.
+    """
+    insert = dialect_insert(session)
+    values = {**data, "updated_at": func.now()}
+    stmt = insert(Leaderboard).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["leaderboard_id"],
+        set_={k: getattr(stmt.excluded, k) for k in values if k != "leaderboard_id"},
+    )
+    await session.execute(stmt)
 
 
 async def upsert_player(session: AsyncSession, data: dict[str, Any]) -> None:

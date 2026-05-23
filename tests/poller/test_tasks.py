@@ -14,9 +14,16 @@ import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import leaderboards_cache
 from app.events import EventType, hub
-from app.models import LiveMatchPlayer, Match, MatchPlayer, MatchState, Player, PlayerRating
+from app.models import (
+    Leaderboard,
+    LiveMatchPlayer,
+    Match,
+    MatchPlayer,
+    MatchState,
+    Player,
+    PlayerRating,
+)
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
 from app.poller.player_stats import tick_player_stats
@@ -276,8 +283,8 @@ class TestTickLiveMatches:
 
 
 class TestLoadLeaderboards:
-    async def test_populates_cache_and_returns_matchtype_map(
-        self, upstream_client: httpx.AsyncClient
+    async def test_populates_db_and_returns_matchtype_map(
+        self, upstream_client: httpx.AsyncClient, session: AsyncSession
     ):
         payload = {
             "leaderboards": [
@@ -287,16 +294,19 @@ class TestLoadLeaderboards:
         }
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/getAvailableLeaderboards").respond(json=payload)
-            mapping = await load_leaderboards(upstream_client)
+            mapping = await load_leaderboards(upstream_client, session_maker_for_tasks)
 
-        cached = leaderboards_cache.get_cache()
-        assert {lb.leaderboard_id for lb in cached} == {3, 4}
+        rows = (await session.execute(select(Leaderboard))).scalars().all()
+        assert {lb.leaderboard_id for lb in rows} == {3, 4}
         assert mapping == {6: 3, 7: 4, 8: 4}
 
-    async def test_upstream_error_logs_and_returns_empty(self, upstream_client: httpx.AsyncClient):
+    async def test_upstream_error_logs_and_returns_empty(
+        self, upstream_client: httpx.AsyncClient, session: AsyncSession
+    ):
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/getAvailableLeaderboards").respond(500)
-            mapping = await load_leaderboards(upstream_client)
+            mapping = await load_leaderboards(upstream_client, session_maker_for_tasks)
 
         assert mapping == {}
-        assert leaderboards_cache.get_cache() == ()
+        rows = (await session.execute(select(Leaderboard))).scalars().all()
+        assert rows == []
