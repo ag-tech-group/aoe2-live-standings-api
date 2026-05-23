@@ -34,8 +34,15 @@ async_session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_
 
 
 @pytest.fixture(autouse=True)
-async def setup_database():
-    """Create tables before each test, drop after."""
+async def setup_database(monkeypatch):
+    """Create tables before each test, drop after.
+
+    Also monkey-patches `app.database.async_session_maker` to the test
+    SQLite session so any middleware / module that grabs a session
+    outside the FastAPI dependency chain (e.g. the idempotency
+    middleware) lands on the same in-memory DB the tests use.
+    """
+    monkeypatch.setattr("app.database.async_session_maker", async_session_maker)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
