@@ -29,6 +29,11 @@ class Tournament(Base):
     # bound as open-ended.
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The grand-finals start time — distinct from `end_date` (the
+    # competition-window bound used for stats roll-up). Surfaced to
+    # frontends that want a hero countdown to the marquee match.
+    # Display-only metadata; no business logic reads it.
+    grand_finals_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
