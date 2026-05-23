@@ -63,10 +63,14 @@ jobs:
           docker push "$IMAGE:$GITHUB_SHA"
           docker push "$IMAGE:latest"
 
-      - name: Deploy to Cloud Run
+      - name: Deploy to Cloud Run (api + worker)
         run: |
           IMAGE=us-central1-docker.pkg.dev/aoe2-live-standings-api/aoe2-live-standings-api/api
           gcloud run deploy aoe2-live-standings-api \
+            --image="$IMAGE:$GITHUB_SHA" \
+            --region=us-central1 \
+            --project=aoe2-live-standings-api
+          gcloud run deploy aoe2-live-standings-api-worker \
             --image="$IMAGE:$GITHUB_SHA" \
             --region=us-central1 \
             --project=aoe2-live-standings-api

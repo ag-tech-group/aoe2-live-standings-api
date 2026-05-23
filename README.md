@@ -29,21 +29,43 @@ The upstream data layer is documented in [`docs/data-sources.md`](docs/data-sour
 
 ## Architecture
 
-A single FastAPI process runs two things side by side: an HTTP service that serves snapshots from a Postgres database, and an asyncio background worker that polls the upstream Relic backend (`aoe-api.worldsedgelink.com/community/*`, see [`docs/data-sources.md`](docs/data-sources.md)) and writes the results to that database. Consumers read from the HTTP service only; they never touch upstream. The database is the source of truth for what consumers see; the upstream is the source of truth that we mirror on a cadence.
+Two Cloud Run services share one Postgres database and one container image, differentiated only by env vars (`POLLING_ENABLED` / `LISTENER_ENABLED`):
+
+- **worker** — a pinned singleton (`min=max=1`, private — no public traffic). Polls the upstream Relic backend (`aoe-api.worldsedgelink.com/community/*`, see [`docs/data-sources.md`](docs/data-sources.md)) on three cadences (30 s / 60 s / 15 s), writes to Postgres, and emits a `pg_notify` inside the same transaction whenever data changes.
+- **api** — autoscaling read tier (`min=1 max=10`, public). Serves the `/v1/*` REST endpoints and the SSE `/v1/stream`. Runs a dedicated `LISTEN` connection that picks up the worker's NOTIFYs and fans nudges to its SSE subscribers.
 
 ```
-┌────────────────┐  poll   ┌──────────────┐  read   ┌──────────────┐
-│ Relic backend  │ ──────▶ │  Postgres    │ ──────▶ │  REST API    │
-│ (upstream)     │         │  (snapshot)  │         │  /v1/*       │
-└────────────────┘         └──────────────┘         └──────────────┘
-                              ▲                        │
-                              │                        ▼
-                          asyncio worker        consumer
-                          inside the API        (web client)
-                          process
+   Relic backend (upstream)
+             ▲
+             │ poll
+             │
+   ┌─────────┴────────┐
+   │ worker service   │   singleton; writes + pg_notify
+   │ (private,        │
+   │  min=max=1)      │
+   └─────────┬────────┘
+             │ write + pg_notify (in transaction)
+             ▼
+   ┌──────────────────┐
+   │     Postgres     │
+   │   (snapshot)     │
+   └─────────┬────────┘
+             │ read + LISTEN
+             ▼
+   ┌──────────────────┐
+   │   api service    │   autoscaled; serves /v1/* + SSE
+   │ (public,         │
+   │  min=1 max=10)   │
+   └─────────┬────────┘
+             │ /v1/* + SSE nudges
+             ▼
+         consumers
+        (web client)
 ```
 
 Reads are denormalized: each response row carries everything a consumer needs to render it, so consumers never fan out or join across endpoints.
+
+In local development (and tests) both flags default true, so a single uvicorn process runs everything — mono mode. Tests bypass the lifespan entirely via `ASGITransport`.
 
 ## Tech Stack
 
@@ -302,7 +324,8 @@ aoe2-live-standings-api/
 | `OTEL_SERVICE_NAME`      | Optional | Service name for traces                           | `aoe2-live-standings-api`                                                   |
 | `OTEL_EXPORTER_ENDPOINT` | Optional | OTLP gRPC collector endpoint                      | `http://localhost:4317`                                                     |
 | `FEATURE_*`              | Optional | Feature flags (e.g. `FEATURE_NEW_DASHBOARD=true`) | (none)                                                                      |
-| `POLLING_ENABLED`        | Optional | Run the background polling worker                 | `true`                                                                      |
+| `POLLING_ENABLED`        | Optional | Start the three upstream pollers in this process (worker service) | `true`                                                  |
+| `LISTENER_ENABLED`       | Optional | Start the LISTEN/NOTIFY consumer in this process (api service)    | `true`                                                  |
 | `UPSTREAM_BASE_URL`      | Optional | Relic upstream base URL                           | `https://aoe-api.worldsedgelink.com`                                        |
 | `TRACKED_PROFILE_IDS`    | Optional | Comma-separated profile IDs for the seed tournament's roster — used only to bootstrap a tournament when the database has none | (empty) |
 | `TOURNAMENT_*`           | Optional | Seed tournament's `SLUG` / `NAME` / `LEADERBOARD_ID` / `START_DATE` / `END_DATE` (see `app/config.py`) | (see config) |

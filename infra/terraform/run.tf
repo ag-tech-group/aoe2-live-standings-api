@@ -1,17 +1,26 @@
-# Cloud Run service running the FastAPI app + asyncio polling worker.
+# Cloud Run services running the FastAPI app — split into two roles
+# per issue #14:
 #
-# Why min=1, max=1: this is a stateful service. The poller's asyncio
-# tasks live inside the running process; autoscaling to zero would kill
-# them, and a second instance would create duplicate polling + double-
-# write contention on the same DB rows. v1 is single-worker; multi-
-# instance polling needs a leader-election / cron design we haven't
-# built yet (see follow-up #9 for related freshness work).
+# - **api** (this resource) — public, autoscaling read tier. Serves the
+#   `/v1/*` REST endpoints and the SSE `/v1/stream`. Has the LISTEN/NOTIFY
+#   listener running in its lifespan so SSE clients on each instance
+#   receive nudges fanned out from the worker's writes
+#   (`LISTENER_ENABLED=true`). No pollers (`POLLING_ENABLED=false`).
+#   Scales horizontally with request traffic (`min=1 max=10`).
+# - **worker** (the resource below) — private singleton poller. Runs the
+#   three polling tasks against the upstream Relic API and writes to
+#   Postgres, emitting `pg_notify` on commit. No public traffic; no
+#   `allUsers` invoker. `min=max=1` because the pollers must be a
+#   singleton — a second instance would duplicate every upstream call
+#   and create double-write contention on the same DB rows.
 #
-# We bootstrap with the hello placeholder image so Terraform can create
-# the service shell before there's any pushed image. After the first
-# `docker push`, deploy via `gcloud run deploy --image ...` — the
-# `ignore_changes` on `image` keeps subsequent Terraform applies from
-# rolling the deployed image back to the placeholder.
+# Both services run the SAME image (`Dockerfile`'s `start.sh` runs
+# `alembic upgrade head` then `uvicorn app.main:app`); they are
+# differentiated only by the env vars below. We bootstrap with the
+# hello placeholder image so Terraform can create the service shells
+# before any image is pushed. After the first `docker push`, deploys go
+# via `gcloud run deploy --image ...` from CI — the `ignore_changes`
+# on `image` stops Terraform from rolling back to the placeholder.
 
 resource "google_cloud_run_v2_service" "api" {
   name     = var.service_name
@@ -27,14 +36,18 @@ resource "google_cloud_run_v2_service" "api" {
     timeout = "3600s"
 
     # Each open SSE connection holds a request slot for its whole lifetime.
-    # The default concurrency of 80 would cap concurrent viewers at 80;
-    # 800 buys headroom on a single instance. True horizontal scale (a
-    # separate read/SSE tier) is tracked in issue #14.
+    # The default concurrency of 80 would cap concurrent viewers per
+    # instance at 80; 800 buys headroom on each instance, and the
+    # `max_instance_count = 10` scaling below gives 8000 concurrent
+    # streams' worth of capacity.
     max_instance_request_concurrency = 800
 
     scaling {
+      # min=1 keeps a warm instance so the LISTEN/NOTIFY connection stays
+      # open continuously; max=10 lets the read tier scale with viewer
+      # traffic without the single-instance ceiling we used to have.
       min_instance_count = 1
-      max_instance_count = 1
+      max_instance_count = 10
     }
 
     volumes {
@@ -52,7 +65,9 @@ resource "google_cloud_run_v2_service" "api" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle = false # min-instance always-on CPU so the poller runs between requests
+        # The LISTEN connection is event-driven and needs CPU between
+        # requests to deliver NOTIFY callbacks (and run its 30s ping).
+        cpu_idle = false
       }
 
       # Cloud Run auto-creates this mount when a `cloud_sql_instance` volume
@@ -87,8 +102,17 @@ resource "google_cloud_run_v2_service" "api" {
         value = "production"
       }
 
+      # No pollers on the api service — those run on the worker.
       env {
         name  = "POLLING_ENABLED"
+        value = "false"
+      }
+
+      # The api service runs the LISTEN/NOTIFY listener so SSE clients
+      # connected to it receive nudges fanned out from the worker's
+      # writes.
+      env {
+        name  = "LISTENER_ENABLED"
         value = "true"
       }
 
@@ -107,10 +131,9 @@ resource "google_cloud_run_v2_service" "api" {
       client,
       client_version,
       # GCP populates a top-level (service-level) `scaling` block as a
-      # representation default. We manage scaling via `template.scaling`
-      # (min = max = 1); ignoring the service-level block stops a spurious
-      # "remove scaling" diff on every plan. The live service is unaffected
-      # — this only stops Terraform from trying to delete the block.
+      # representation default. We manage scaling via `template.scaling`;
+      # ignoring the service-level block stops a spurious "remove scaling"
+      # diff on every plan.
       scaling,
     ]
   }
@@ -122,9 +145,109 @@ resource "google_cloud_run_v2_service" "api" {
   ]
 }
 
-# Public access — preview-scale, no auth surface in v1. Locked down later
-# if the API ever gates writes; reads are intentionally open since
-# tournament streamers are the consumer.
+
+resource "google_cloud_run_v2_service" "worker" {
+  name     = "${var.service_name}-worker"
+  location = var.region
+
+  template {
+    service_account = google_service_account.cloud_run.email
+
+    scaling {
+      # min=max=1 keeps the poller a strict singleton. A second instance
+      # would duplicate every upstream call and double-write to the same
+      # DB rows. Multi-instance polling needs leader-election / cron we
+      # haven't built (and may never need at this scale).
+      min_instance_count = 1
+      max_instance_count = 1
+    }
+
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.main.connection_name]
+      }
+    }
+
+    containers {
+      image = "us-docker.pkg.dev/cloudrun/container/hello:latest"
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+        # Always-on CPU so the pollers' asyncio loops run continuously
+        # between any internal /health probes (no incoming user traffic
+        # otherwise — the worker is private).
+        cpu_idle = false
+      }
+
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
+      }
+
+      env {
+        name = "DATABASE_URL"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.database_url.secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      # Seed roster for a brand-new, empty database only — consumed once by
+      # ensure_seed_tournament() at startup. The live roster lives in the
+      # tournament_players table and is managed via the write API.
+      env {
+        name  = "TRACKED_PROFILE_IDS"
+        value = var.tracked_profile_ids
+      }
+
+      env {
+        name  = "ENVIRONMENT"
+        value = "production"
+      }
+
+      # Pollers live on the worker — the api service has them off.
+      env {
+        name  = "POLLING_ENABLED"
+        value = "true"
+      }
+
+      # No listener on the worker — it has no SSE clients to fan out
+      # nudges to. The worker's writes emit `pg_notify`s that the api
+      # service's listener consumes.
+      env {
+        name  = "LISTENER_ENABLED"
+        value = "false"
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template[0].containers[0].image,
+      client,
+      client_version,
+      scaling,
+    ]
+  }
+
+  depends_on = [
+    google_project_iam_member.cloud_run_sql_client,
+    google_project_iam_member.cloud_run_secret_accessor,
+    google_secret_manager_secret_version.database_url,
+  ]
+}
+
+
+# Public access for the API service — preview-scale, no auth on reads.
+# The worker is deliberately *not* listed here: no `allUsers` invoker,
+# no public traffic. Cloud Run's internal probes don't need a public
+# IAM binding.
 #
 # `depends_on` the org policy override: the agtechgroup.solutions org
 # restricts IAM principals to the org's customer ID by default, which
