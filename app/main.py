@@ -6,13 +6,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from scalar_fastapi import get_scalar_api_reference
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
 from app.config import API_V1_PREFIX, settings
 from app.features import router as features_router
+from app.limiting import limiter
 from app.logging import setup_logging
 from app.poller.lifespan import lifespan
 from app.routers import (
@@ -58,12 +58,13 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# `default_limits` applies to every route that isn't decorated with its own
-# `@limiter.limit(...)` or marked `@limiter.exempt`. `get_remote_address` reads
-# `request.client.host`, which is the real client IP only when uvicorn runs with
-# `--proxy-headers` behind a trusted proxy (see start.sh); without that, every
-# request collapses into one bucket and the limit is useless.
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+# `default_limits` on the limiter applies to every route that isn't
+# decorated with its own `@limiter.limit(...)` or marked `@limiter.exempt`.
+# `get_remote_address` reads `request.client.host`, which is the real
+# client IP only when uvicorn runs with `--proxy-headers` behind a trusted
+# proxy (see start.sh); without that, every request collapses into one
+# bucket and the limit is useless. Per-endpoint limits live with each
+# route in the router modules (see #60).
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)

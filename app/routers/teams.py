@@ -8,12 +8,13 @@ gated by ``require_tournament_owner``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_tournament_owner
 from app.database import get_async_session
+from app.limiting import limiter
 from app.models import Team, TeamMember, Tournament
 from app.schemas import TeamCreate, TeamMemberCreate, TeamRead, TeamUpdate
 
@@ -43,7 +44,9 @@ async def get_owned_team(
 
 
 @router.post("", status_code=201)
+@limiter.limit("10/minute")
 async def create_team(
+    request: Request,
     payload: TeamCreate,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),
@@ -60,7 +63,9 @@ async def create_team(
 
 
 @router.patch("/{team_id}")
+@limiter.limit("20/minute")
 async def update_team(
+    request: Request,
     payload: TeamUpdate,
     team: Team = Depends(get_owned_team),
     session: AsyncSession = Depends(get_async_session),
@@ -76,7 +81,9 @@ async def update_team(
 
 
 @router.delete("/{team_id}", status_code=204)
+@limiter.limit("10/minute")
 async def delete_team(
+    request: Request,
     team: Team = Depends(get_owned_team),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
@@ -90,7 +97,9 @@ async def delete_team(
 
 
 @router.post("/{team_id}/members", status_code=204)
+@limiter.limit("20/minute")
 async def add_team_member(
+    request: Request,
     payload: TeamMemberCreate,
     team: Team = Depends(get_owned_team),
     session: AsyncSession = Depends(get_async_session),
@@ -117,7 +126,9 @@ async def add_team_member(
 
 
 @router.delete("/{team_id}/members/{profile_id}", status_code=204)
+@limiter.limit("20/minute")
 async def remove_team_member(
+    request: Request,
     profile_id: int,
     team: Team = Depends(get_owned_team),
     session: AsyncSession = Depends(get_async_session),
