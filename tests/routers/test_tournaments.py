@@ -50,6 +50,13 @@ class TestGetTournamentDetail:
         assert body["leaderboard_id"] == 3
         assert body["start_date"].startswith("2026-06-01")
 
+    async def test_grand_finals_date_round_trips(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup", grand_finals_date=datetime(2026, 6, 15, 18, tzinfo=UTC)))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["grand_finals_date"].startswith("2026-06-15T18")
+
     async def test_unknown_slug_returns_404(self, client: AsyncClient):
         assert (await client.get("/v1/tournaments/nope")).status_code == 404
 
@@ -528,6 +535,37 @@ class TestUpdateTournament:
         response = await client.patch("/v1/tournaments/cup", json={"start_date": None})
         assert response.status_code == 200
         assert response.json()["start_date"] is None
+
+    async def test_can_set_grand_finals_date(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={"grand_finals_date": "2026-06-15T18:00:00Z"},
+        )
+        assert response.status_code == 200
+        assert response.json()["grand_finals_date"].startswith("2026-06-15T18")
+
+    async def test_can_clear_grand_finals_date_with_null(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                grand_finals_date=datetime(2026, 6, 15, 18, tzinfo=UTC),
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"grand_finals_date": None})
+        assert response.status_code == 200
+        assert response.json()["grand_finals_date"] is None
 
     async def test_empty_body_is_a_noop(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
