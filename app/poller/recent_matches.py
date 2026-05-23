@@ -19,7 +19,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.events import EventType, hub
+from app.events import EventType, emit_nudge
 from app.poller.parsers import parse_recent_matches
 from app.poller.roster import get_tracked_profile_ids
 from app.poller.upserts import upsert_match_from_recent, upsert_match_player
@@ -84,6 +84,9 @@ async def tick_recent_matches(
                 await upsert_match_player(session, mp)
             total_matches += len(matches)
             total_players += len(players)
+        # Match writes drive the recent-results display — emit a NOTIFY so
+        # SSE subscribers on every read-tier instance get a refetch nudge.
+        await emit_nudge(session, EventType.MATCHES)
         await session.commit()
     logger.info(
         "poll_recent_matches_ok",
@@ -91,7 +94,6 @@ async def tick_recent_matches(
         matches=total_matches,
         players=total_players,
     )
-    hub.publish(EventType.MATCHES)
 
 
 async def run_recent_matches_poller(

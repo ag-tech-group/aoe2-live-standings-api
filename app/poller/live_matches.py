@@ -19,7 +19,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.events import EventType, hub
+from app.events import EventType, emit_nudge
 from app.poller.parsers import parse_live_advertisements
 from app.poller.roster import get_tracked_profile_ids
 from app.poller.upserts import replace_live_match_players, upsert_match_from_live
@@ -47,13 +47,15 @@ async def tick_live_matches(
         for match in matches:
             await upsert_match_from_live(session, match)
         await replace_live_match_players(session, live_players)
+        # The live snapshot drives `in_match` on the standings row — emit
+        # a NOTIFY so SSE subscribers on every read-tier instance refetch.
+        await emit_nudge(session, EventType.LIVE)
         await session.commit()
     logger.info(
         "poll_live_matches_ok",
         matches=len(matches),
         live_players=len(live_players),
     )
-    hub.publish(EventType.LIVE)
 
 
 async def run_live_matches_poller(

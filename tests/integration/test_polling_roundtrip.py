@@ -9,6 +9,7 @@ to stay deterministic.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -17,6 +18,7 @@ import respx
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.events import EventType, emit_nudge, hub, listen_for_nudges
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
 from app.poller.player_stats import tick_player_stats
@@ -404,3 +406,39 @@ async def test_upstream_failure_isolated_to_one_poller(
     r = await pg_client.get("/v1/tournaments/hera-cup/standings")
     assert r.status_code == 200
     assert r.json() == {"last_polled_at": None, "items": []}
+
+
+@pytest.mark.asyncio
+async def test_emit_nudge_drives_local_hub_via_listener(
+    patched_engine, patched_session_maker: async_sessionmaker
+):
+    """emit_nudge -> Postgres NOTIFY -> listen_for_nudges -> hub.publish.
+
+    End-to-end check that the LISTEN/NOTIFY pipeline works: a transaction's
+    ``emit_nudge`` is held until commit, the listener's dedicated asyncpg
+    connection receives the NOTIFY, parses the JSON payload, and
+    republishes to the local ``EventHub`` for SSE fan-out.
+    """
+    engine, _ = patched_engine
+    database_url = engine.url.render_as_string(hide_password=False)
+
+    nudges = hub.subscribe()
+    listener_task = asyncio.create_task(listen_for_nudges(database_url))
+    try:
+        # The listener needs a beat to open its asyncpg connection and
+        # issue LISTEN; NOTIFYs sent before that aren't delivered to it.
+        await asyncio.sleep(0.5)
+
+        async with patched_session_maker() as session:
+            await emit_nudge(session, EventType.STANDINGS)
+            await session.commit()
+
+        nudge = await asyncio.wait_for(nudges.get(), timeout=2.0)
+        assert nudge.event == EventType.STANDINGS
+    finally:
+        listener_task.cancel()
+        try:
+            await listener_task
+        except asyncio.CancelledError:
+            pass
+        hub.unsubscribe(nudges)

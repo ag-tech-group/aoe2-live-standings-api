@@ -31,6 +31,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.database import async_session_maker
+from app.events import listen_for_nudges
 from app.poller.client import build_upstream_client
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import run_live_matches_poller
@@ -57,6 +58,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("polling_starting")
 
     tasks = [
+        asyncio.create_task(
+            listen_for_nudges(settings.database_url),
+            name="listen_nudges",
+        ),
         asyncio.create_task(
             run_player_stats_poller(client, async_session_maker),
             name="poll_player_stats",
