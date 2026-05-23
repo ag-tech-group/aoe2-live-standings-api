@@ -51,3 +51,9 @@ variable "github_repository" {
   type        = string
   default     = "ag-tech-group/aoe2-live-standings-api"
 }
+
+variable "alerting_email" {
+  description = "Email address that receives Cloud Monitoring alerts for the polling worker. Created as an unverified email channel — Google sends a verification link to this address on the first `tofu apply`; click it before alerts route, otherwise the channel sits idle. Override per-environment via -var or terraform.tfvars."
+  type        = string
+  default     = "amr@agtechgroup.solutions"
+}
