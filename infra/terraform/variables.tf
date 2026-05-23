@@ -68,3 +68,10 @@ variable "budget_monthly_usd" {
   type        = number
   default     = 100
 }
+
+variable "sentry_dsn" {
+  description = "Sentry project DSN for unhandled-exception + log-error capture. Empty string (the default) disables Sentry entirely — `init_sentry()` in app code is a no-op, and no `SENTRY_DSN` env var is set on the Cloud Run services. Supply at apply time once the operator creates the Sentry project (`tofu apply -var sentry_dsn='https://…@…ingest.sentry.io/…'`). Sensitive=true so Terraform redacts it from plan output (the DSN is quasi-public — Sentry's docs encourage embedding it in client-side code — but redaction in logs is still tidier)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}

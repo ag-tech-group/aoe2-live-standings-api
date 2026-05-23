@@ -25,9 +25,14 @@ from app.routers import (
     teams_router,
     tournaments_router,
 )
+from app.sentry import init_sentry
 from app.telemetry import setup_telemetry
 
 setup_logging()
+# Sentry init must run *before* the FastAPI app is constructed — the
+# SDK's middleware auto-instrumentation hooks the app at construction
+# time. A late init silently misses the request middleware chain.
+init_sentry()
 logger = structlog.get_logger("app.request")
 
 app = FastAPI(
