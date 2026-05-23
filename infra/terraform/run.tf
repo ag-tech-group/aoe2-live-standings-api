@@ -120,6 +120,18 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "CORS_ORIGINS"
         value = var.cors_origins
       }
+
+      # Sentry DSN — conditional. When `var.sentry_dsn` is empty (the
+      # default), no env var is set and `init_sentry()` in app code
+      # is a no-op. Supplied at apply time once the operator creates
+      # the Sentry project (see #53).
+      dynamic "env" {
+        for_each = var.sentry_dsn == "" ? [] : [1]
+        content {
+          name  = "SENTRY_DSN"
+          value = var.sentry_dsn
+        }
+      }
     }
   }
 
@@ -223,6 +235,16 @@ resource "google_cloud_run_v2_service" "worker" {
       env {
         name  = "LISTENER_ENABLED"
         value = "false"
+      }
+
+      # Sentry DSN — conditional, same as the api service. Worker
+      # exceptions (a polling task raising) want Sentry coverage too.
+      dynamic "env" {
+        for_each = var.sentry_dsn == "" ? [] : [1]
+        content {
+          name  = "SENTRY_DSN"
+          value = var.sentry_dsn
+        }
       }
     }
   }

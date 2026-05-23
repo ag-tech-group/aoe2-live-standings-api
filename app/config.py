@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     otel_service_name: str = "aoe2-live-standings-api"
     otel_exporter_endpoint: str = "http://localhost:4317"
 
+    # Sentry DSN — empty disables Sentry initialization entirely (the
+    # default in dev and tests, and the safe-state if the operator
+    # hasn't created a Sentry project yet). Supplied at apply time
+    # via Terraform `var.sentry_dsn` in prod.
+    sentry_dsn: str = ""
+
     # Upstream polling configuration.
     upstream_base_url: str = "https://aoe-api.worldsedgelink.com"
     polling_enabled: bool = True

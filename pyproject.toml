@@ -23,6 +23,7 @@ dependencies = [
     "httpx>=0.28.1",
     "pyjwt>=2.12.1",
     "cryptography>=46.0.5",
+    "sentry-sdk[fastapi]>=2.20.0",
 ]
 
 [dependency-groups]

@@ -10,7 +10,7 @@ import structlog
 from app.config import settings
 
 # Keys whose values should be redacted from logs
-_PII_KEY_PATTERN = re.compile(
+PII_KEY_PATTERN = re.compile(
     r"(password|token|secret|authorization|cookie|api_key|credential)",
     re.IGNORECASE,
 )
@@ -21,7 +21,7 @@ def pii_scrubbing_processor(
 ) -> dict[str, Any]:
     """Redact values for keys that look like they contain sensitive data."""
     for key in list(event_dict):
-        if _PII_KEY_PATTERN.search(key):
+        if PII_KEY_PATTERN.search(key):
             event_dict[key] = "[REDACTED]"
     return event_dict
 

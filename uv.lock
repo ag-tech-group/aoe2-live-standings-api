@@ -80,6 +80,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyjwt" },
     { name = "scalar-fastapi" },
+    { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "slowapi" },
     { name = "sqlalchemy" },
     { name = "structlog" },
@@ -114,6 +115,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.13.0" },
     { name = "pyjwt", specifier = ">=2.12.1" },
     { name = "scalar-fastapi", specifier = ">=1.0.0" },
+    { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.20.0" },
     { name = "slowapi", specifier = ">=0.1.9" },
     { name = "sqlalchemy", specifier = ">=2.0.48" },
     { name = "structlog", specifier = ">=25.0.0" },
@@ -1240,6 +1242,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/af/95/bbbf63b38eafc93862827bda0fba415a486882642d9293f6b918145fd4f9/scalar_fastapi-1.8.1.tar.gz", hash = "sha256:eadb625d386fa94a79e5463af0aa6bcf5e02bc4d665454ed0795960987152531", size = 8258, upload-time = "2026-03-18T09:36:57.005Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/97/29/584cc791765b92a35362733875ff881df3b3d181670285eaf571a17170d7/scalar_fastapi-1.8.1-py3-none-any.whl", hash = "sha256:0ff296877d65082039eba8682fef6eafbe1cd77c5b55a3b3c0b96681eb15ca62", size = 7636, upload-time = "2026-03-18T09:36:56.224Z" },
+]
+
+[[package]]
+name = "sentry-sdk"
+version = "2.60.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/a2/2e6c090db384cc515069f4f85542bd5baf6786852073020ea73d4a76d3ea/sentry_sdk-2.60.0.tar.gz", hash = "sha256:0bd25e54e78ca02d0be512529fa644bbbf9e8470d7b26371294012d4ca93c978", size = 452946, upload-time = "2026-05-13T13:34:52.516Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/29/41/f2b800b7f12a05dd48c2a6280d4dd812d1425fc66ed3fe3fd99420c41d1a/sentry_sdk-2.60.0-py3-none-any.whl", hash = "sha256:28a536c03291c8bcb363cf35c611b32738ec118ff64d8d6383b096448ac4c803", size = 475616, upload-time = "2026-05-13T13:34:50.259Z" },
+]
+
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
 ]
 
 [[package]]
