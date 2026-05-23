@@ -37,6 +37,18 @@ resource "google_sql_database_instance" "main" {
     insights_config {
       query_insights_enabled = true
     }
+
+    # db-f1-micro's default is ~25 connections (with a few reserved
+    # for superusers), too tight for our scaling profile: api at
+    # `max=10` × 5 pool + worker × 5 + migrate job + brief overlap
+    # during rolling deploys can push past 25 transiently and starve
+    # the migrate job. 100 gives headroom; Cloud SQL's own docs list
+    # 100 as a recommended ceiling for the f1-micro tier (each
+    # connection costs memory and the instance has only 614 MB).
+    database_flags {
+      name  = "max_connections"
+      value = "100"
+    }
   }
 
   # GCP-side guard: the Cloud SQL API rejects an instance delete while this
