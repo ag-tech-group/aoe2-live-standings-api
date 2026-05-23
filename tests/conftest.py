@@ -51,6 +51,25 @@ def reset_rate_limiter():
     limiter._storage.reset()
 
 
+@pytest.fixture
+def audit_events(monkeypatch):
+    """Capture audit emissions across all routers.
+
+    Patches the ``audit`` symbol imported into each router module so
+    tests can assert what events were emitted without going through
+    structlog. Returns a list of dicts: ``[{"action": ..., **kwargs}]``
+    in emission order.
+    """
+    events: list[dict] = []
+
+    def fake_audit(action, **kwargs):
+        events.append({"action": action, **kwargs})
+
+    for mod in ("tournaments", "owners", "players", "teams"):
+        monkeypatch.setattr(f"app.routers.{mod}.audit", fake_audit)
+    return events
+
+
 @pytest.fixture(autouse=True)
 def reset_event_hub():
     """Drop any SSE subscribers a test left registered on the module-level hub."""

@@ -9,7 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.auth import require_tournament_owner
+from app.audit import AuditAction, audit
+from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Match, MatchPlayer, Player, Tournament, TournamentPlayer
@@ -146,6 +147,7 @@ async def add_roster_player(
     request: Request,
     payload: RosterPlayerCreate,
     tournament: Tournament = Depends(require_tournament_owner),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Add a profile to the tournament's roster — owner-gated.
@@ -167,6 +169,13 @@ async def add_roster_player(
 
     session.add(TournamentPlayer(tournament_id=tournament.id, profile_id=payload.profile_id))
     await session.commit()
+    audit(
+        AuditAction.ROSTER_ADD,
+        actor_user_id=actor_user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        target_profile_id=payload.profile_id,
+    )
 
 
 @router.delete("/{profile_id}", status_code=204)
@@ -175,6 +184,7 @@ async def remove_roster_player(
     request: Request,
     profile_id: int,
     tournament: Tournament = Depends(require_tournament_owner),
+    actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
     """Remove a profile from the tournament's roster — owner-gated.
@@ -196,3 +206,10 @@ async def remove_roster_player(
 
     await session.delete(entry)
     await session.commit()
+    audit(
+        AuditAction.ROSTER_REMOVE,
+        actor_user_id=actor_user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        target_profile_id=profile_id,
+    )
