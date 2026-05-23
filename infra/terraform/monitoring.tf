@@ -1,22 +1,29 @@
-# Observability + alerting for the polling worker.
+# Silent-failure alerting for the polling worker.
 #
-# Two failure modes need coverage, neither caught by Cloud Run's built-in
-# health checks (the worker container stays "healthy" with the HTTP server
-# up even if the poller tasks are dead):
+# Cloud Run's built-in health checks won't catch a wedged poller — the
+# worker container stays "healthy" with its HTTP server up even if the
+# poller tasks have died. We need an outside-the-process watchdog.
 #
-#   1. Loud — a poll tick raises and the run loop emits `poll_<task>_failed`,
-#      then catches the exception and retries on the next cycle. The worker
-#      stays running but data goes stale. Caught by counting failed events.
-#   2. Silent — the worker emits *neither* ok nor failed: a task died, the
-#      instance wedged, the process is stuck. Caught only by the *absence*
-#      of `poll_<task>_ok` for longer than the task's own cadence.
+# Two failure modes exist, but only one is handled here:
 #
-# Six log-based counters (3 ok + 3 failed, one pair per task) feed two
-# alert policies. Each task's absence-duration is sized at 5–6× its
-# cadence to absorb container restarts and brief upstream blips without
-# false-firing. Notifications go to a single email channel — swap in
-# Slack/PagerDuty by adding more `google_monitoring_notification_channel`
-# resources and extending `notification_channels` on each policy.
+#   1. Loud — a poll tick raises, the run loop emits `poll_<task>_failed`,
+#      catches the exception, and retries on the next cycle. **Sentry's
+#      job** (planned). The exception itself is the signal; Sentry will
+#      capture it with stack/breadcrumbs/fingerprinting far better than a
+#      log-based threshold alert can.
+#   2. Silent — the worker emits *neither* ok nor failed: a task died,
+#      the instance wedged, the process is stuck. Default Sentry can't
+#      see what didn't happen (only Sentry's paid Cron Monitoring would,
+#      via per-tick heartbeat instrumentation). **Covered here**, via
+#      Cloud Monitoring's `condition_absent` on per-task `poll_<task>_ok`
+#      counters.
+#
+# This file therefore defines three log-based counters (one per task) and
+# one alert policy reading them. Each task's absence-duration is sized at
+# 5–8× its cadence to absorb container restarts and brief upstream blips
+# without false-firing. Notifications go to a single email channel — swap
+# in Slack/PagerDuty by adding more `google_monitoring_notification_channel`
+# resources and extending the policy's `notification_channels` list.
 
 locals {
   # Each entry: the task's poll cadence (informational, drives the
@@ -25,7 +32,7 @@ locals {
   poller_tasks = {
     live_matches = {
       cadence_seconds  = 15
-      absence_duration = "90s" # 6× cadence
+      absence_duration = "120s" # 8× cadence — duration must be a whole-minute multiple per Cloud Monitoring
     }
     player_stats = {
       cadence_seconds  = 30
@@ -63,66 +70,29 @@ resource "google_logging_metric" "poll_ok" {
   }
 }
 
-# Failed-tick counters — one per task. The threshold alert reads these
-# to detect recurring errors (single transient failures are expected
-# and retried on the next tick — only repeated ones get attention).
-resource "google_logging_metric" "poll_failed" {
-  for_each = local.poller_tasks
-
-  name        = "poll_${each.key}_failed"
-  description = "Failed ${each.key} poll cycles on the worker."
-  filter      = "${local.worker_log_filter} AND jsonPayload.event=\"poll_${each.key}_failed\""
-
-  metric_descriptor {
-    metric_kind = "DELTA"
-    value_type  = "INT64"
-    unit        = "1"
-  }
+# Bridge the freshly-created metrics into a queryable state before the
+# alert policy references them. Cloud Monitoring takes up to a few
+# minutes to make a new log-based metric resolvable by `metric.type=`,
+# and `google_monitoring_alert_policy` validates that filter at create
+# time — so on a clean apply, the policy races the metrics and fails
+# with 404. This wait runs only on the *first* apply (when this
+# resource itself is being created); subsequent applies skip it.
+resource "time_sleep" "wait_for_metric_propagation" {
+  depends_on      = [google_logging_metric.poll_ok]
+  create_duration = "180s"
 }
 
 # Email notification channel. Created in unverified state — Google
-# sends a verification link to the address on first apply; click it
-# before alerts route. (An unverified channel won't error the apply
-# but also won't deliver.)
+# sends a verification code to the address on first apply; submit it
+# via the `notificationChannels:verify` API (or the Cloud Console
+# Monitoring → Alerting → Notification channels UI) before alerts
+# route. An unverified channel won't error the apply but also won't
+# deliver.
 resource "google_monitoring_notification_channel" "email" {
   display_name = "Polling worker alerts (email)"
   type         = "email"
   labels = {
     email_address = var.alerting_email
-  }
-}
-
-# Loud failure: any single task crosses 2+ failures in a 5-minute
-# rolling window. Threshold `> 1` over `ALIGN_SUM`/300s = the events
-# during that window, requiring `duration = 60s` of sustained breach
-# to suppress single-tick aberrations.
-resource "google_monitoring_alert_policy" "poller_erroring" {
-  display_name = "Polling worker — erroring (loud)"
-  combiner     = "OR"
-  severity     = "WARNING"
-
-  notification_channels = [google_monitoring_notification_channel.email.name]
-
-  dynamic "conditions" {
-    for_each = local.poller_tasks
-    content {
-      display_name = "${conditions.key} failed >= 2 in 5min"
-      condition_threshold {
-        filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.poll_failed[conditions.key].name}\" AND resource.type=\"cloud_run_revision\""
-        duration        = "60s"
-        comparison      = "COMPARISON_GT"
-        threshold_value = 1 # strict GT: fires on 2 or more events
-        aggregations {
-          alignment_period   = "300s"
-          per_series_aligner = "ALIGN_SUM"
-        }
-      }
-    }
-  }
-
-  documentation {
-    content   = "The polling worker is logging `poll_*_failed` events at >= 2/5min. The enclosing run loop retries on the next tick, so this is not a service outage, but data is going stale. Inspect Cloud Run logs on `aoe2-live-standings-api-worker` for the failure messages — most often an upstream aoe2-api schema or rate-limit change."
-    mime_type = "text/markdown"
   }
 }
 
@@ -134,6 +104,8 @@ resource "google_monitoring_alert_policy" "poller_stalled" {
   display_name = "Polling worker — stalled (silent)"
   combiner     = "OR"
   severity     = "CRITICAL"
+
+  depends_on = [time_sleep.wait_for_metric_propagation]
 
   notification_channels = [google_monitoring_notification_channel.email.name]
 
