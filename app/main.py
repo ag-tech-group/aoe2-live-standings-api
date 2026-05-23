@@ -21,6 +21,7 @@ from app.routers import (
     leaderboards_router,
     live_router,
     matches_router,
+    me_router,
     owners_router,
     players_router,
     stream_router,
@@ -166,6 +167,7 @@ register_error_handlers(app)
 # mounted with the /v1 prefix automatically.
 ROUTERS = (
     features_router,
+    me_router,
     players_router,
     leaderboards_router,
     tournaments_router,
