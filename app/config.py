@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_service_name: str = "aoe2-live-standings-api"
     otel_exporter_endpoint: str = "http://localhost:4317"
+    # When otel_enabled=True, what fraction of incoming traces to
+    # sample. 1.0 in dev so every local request is traceable; 0.1 in
+    # prod via env var, since trace volume directly drives cost on
+    # the Cloud Trace side.
+    otel_traces_sample_ratio: float = 1.0
+    # If true, the Cloud Trace exporter is used (auth via the Cloud
+    # Run runtime SA, project inferred from metadata). If false, the
+    # OTLP/gRPC exporter is used (for self-hosted collectors or
+    # other backends — keeps the legacy path working).
+    otel_use_cloud_trace: bool = False
 
     # Sentry DSN — empty disables Sentry initialization entirely (the
     # default in dev and tests, and the safe-state if the operator

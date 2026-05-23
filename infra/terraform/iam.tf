@@ -21,3 +21,13 @@ resource "google_project_iam_member" "cloud_run_secret_accessor" {
   role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.cloud_run.email}"
 }
+
+# Cloud Trace exporter authentication — the runtime SA writes spans
+# via the Cloud Trace API (see app/telemetry.py and #58). The agent
+# role grants `cloudtrace.traces.patch` without the broader admin
+# permissions.
+resource "google_project_iam_member" "cloud_run_trace_agent" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.cloud_run.email}"
+}

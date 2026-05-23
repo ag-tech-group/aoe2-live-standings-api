@@ -132,6 +132,22 @@ resource "google_cloud_run_v2_service" "api" {
           value = var.sentry_dsn
         }
       }
+
+      # OpenTelemetry tracing → Cloud Trace (#58). Auth comes from the
+      # runtime SA's roles/cloudtrace.agent binding; project is
+      # inferred via metadata.
+      env {
+        name  = "OTEL_ENABLED"
+        value = "true"
+      }
+      env {
+        name  = "OTEL_USE_CLOUD_TRACE"
+        value = "true"
+      }
+      env {
+        name  = "OTEL_TRACES_SAMPLE_RATIO"
+        value = "0.1"
+      }
     }
   }
 
@@ -245,6 +261,22 @@ resource "google_cloud_run_v2_service" "worker" {
           name  = "SENTRY_DSN"
           value = var.sentry_dsn
         }
+      }
+
+      # OpenTelemetry tracing — same config as the api service. The
+      # worker's poll-tick spans are exported alongside the api's
+      # request spans into the same Cloud Trace project.
+      env {
+        name  = "OTEL_ENABLED"
+        value = "true"
+      }
+      env {
+        name  = "OTEL_USE_CLOUD_TRACE"
+        value = "true"
+      }
+      env {
+        name  = "OTEL_TRACES_SAMPLE_RATIO"
+        value = "0.1"
       }
     }
   }
