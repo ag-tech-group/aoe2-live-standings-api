@@ -2,8 +2,9 @@
 
 A tournament scopes the read surface — its roster (``TournamentPlayer``)
 and its ``leaderboard_id`` select which players and ratings a standings
-request sees. ``PATCH /{slug}`` edits a tournament's metadata and is
-owner-gated; every other route in this router is public.
+request sees. ``POST /`` is open to any authenticated criticalbit user
+(the caller is recorded as the first owner); ``PATCH`` and
+``DELETE /{slug}`` are owner-gated; every read route is public.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import require_tournament_owner
+from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.models import (
     LiveMatchPlayer,
@@ -27,6 +28,7 @@ from app.models import (
     Team,
     TeamMember,
     Tournament,
+    TournamentOwner,
     TournamentPlayer,
 )
 from app.schemas import (
@@ -34,6 +36,7 @@ from app.schemas import (
     StandingRow,
     TeamMemberRead,
     TeamStandingRow,
+    TournamentCreate,
     TournamentRead,
     TournamentRecord,
     TournamentUpdate,
@@ -83,6 +86,47 @@ async def list_tournaments(
     return [TournamentRead.model_validate(t) for t in tournaments]
 
 
+@router.post("", status_code=201)
+async def create_tournament(
+    payload: TournamentCreate,
+    user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
+) -> TournamentRead:
+    """Create a tournament — any authenticated criticalbit user may.
+
+    The caller is recorded as the first owner, immediately able to ``PATCH``
+    metadata, manage the roster + teams, and ``DELETE`` the tournament.
+    409 if the slug is taken (it is unique across the deployment and how
+    consumer URLs route to the right tournament). A competition window
+    whose start falls after its end is rejected with 422.
+    """
+    if (
+        payload.start_date is not None
+        and payload.end_date is not None
+        and payload.start_date > payload.end_date
+    ):
+        raise HTTPException(status_code=422, detail="start_date must not be after end_date")
+
+    existing = (
+        await session.execute(select(Tournament.id).where(Tournament.slug == payload.slug))
+    ).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=f"Tournament '{payload.slug}' already exists")
+
+    tournament = Tournament(
+        slug=payload.slug,
+        name=payload.name,
+        leaderboard_id=payload.leaderboard_id,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        grand_finals_date=payload.grand_finals_date,
+    )
+    tournament.owners = [TournamentOwner(user_id=user_id)]
+    session.add(tournament)
+    await session.commit()
+    return TournamentRead.model_validate(tournament)
+
+
 @router.get("/{tournament_slug}")
 async def get_tournament_detail(
     tournament: Tournament = Depends(get_tournament),
@@ -116,6 +160,22 @@ async def update_tournament(
 
     await session.commit()
     return TournamentRead.model_validate(tournament)
+
+
+@router.delete("/{tournament_slug}", status_code=204)
+async def delete_tournament(
+    tournament: Tournament = Depends(require_tournament_owner),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Delete a tournament and everything tournament-scoped — owner-gated.
+
+    Cascades to the roster (``tournament_players``), teams + team members
+    (``teams`` / ``team_members``), and owners (``tournament_owners``)
+    via the FKs' ``ON DELETE CASCADE``. Match history is not tournament-
+    scoped and is preserved.
+    """
+    await session.delete(tournament)
+    await session.commit()
 
 
 async def _recent_results_by_profile(

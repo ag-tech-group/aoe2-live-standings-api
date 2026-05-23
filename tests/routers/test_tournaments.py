@@ -3,9 +3,19 @@
 from datetime import UTC, datetime
 
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import LiveMatchPlayer, MatchOutcome, MatchState
+from app.models import (
+    LiveMatchPlayer,
+    MatchOutcome,
+    MatchState,
+    Team,
+    TeamMember,
+    Tournament,
+    TournamentOwner,
+    TournamentPlayer,
+)
 from app.routers.tournaments import _RECENT_RESULTS_LIMIT
 from tests.conftest import (
     DEFAULT_TEST_USER_ID,
@@ -13,6 +23,7 @@ from tests.conftest import (
     make_match_player,
     make_player,
     make_player_rating,
+    make_team,
     make_tournament,
 )
 
@@ -601,3 +612,156 @@ class TestUpdateTournament:
 
         response = await client.patch("/v1/tournaments/cup", json={"name": None})
         assert response.status_code == 422
+
+
+class TestCreateTournament:
+    """POST /v1/tournaments — self-serve create, caller becomes owner."""
+
+    _BODY = {
+        "slug": "spring-cup",
+        "name": "Spring Cup",
+        "leaderboard_id": 3,
+    }
+
+    async def test_unauthenticated_returns_401(self, client: AsyncClient):
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 401
+
+    async def test_creates_tournament_and_returns_201(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 201
+        body = response.json()
+        assert body["slug"] == "spring-cup"
+        assert body["name"] == "Spring Cup"
+        assert body["leaderboard_id"] == 3
+        # Persisted, not just echoed back.
+        get_response = await client.get("/v1/tournaments/spring-cup")
+        assert get_response.status_code == 200
+        assert get_response.json()["slug"] == "spring-cup"
+
+    async def test_creator_becomes_owner(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        await client.post("/v1/tournaments", json=self._BODY)
+        # The caller can immediately PATCH the new tournament — proves
+        # the owner row landed under their user id.
+        response = await client.patch("/v1/tournaments/spring-cup", json={"name": "Renamed"})
+        assert response.status_code == 200
+        assert response.json()["name"] == "Renamed"
+
+    async def test_optional_dates_round_trip(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                **self._BODY,
+                "start_date": "2026-06-01T00:00:00Z",
+                "end_date": "2026-06-30T23:59:59Z",
+                "grand_finals_date": "2026-06-15T18:00:00Z",
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["start_date"].startswith("2026-06-01")
+        assert body["end_date"].startswith("2026-06-30")
+        assert body["grand_finals_date"].startswith("2026-06-15T18")
+
+    async def test_duplicate_slug_returns_409(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("spring-cup"))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 409
+
+    async def test_invalid_slug_format_returns_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        # Uppercase, spaces, leading/trailing hyphens are all rejected.
+        for bad_slug in ("Spring Cup", "-leading", "trailing-", "Caps"):
+            response = await client.post("/v1/tournaments", json={**self._BODY, "slug": bad_slug})
+            assert response.status_code == 422, f"expected 422 for slug={bad_slug!r}"
+
+    async def test_start_after_end_returns_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                **self._BODY,
+                "start_date": "2026-07-01T00:00:00Z",
+                "end_date": "2026-06-01T00:00:00Z",
+            },
+        )
+        assert response.status_code == 422
+
+
+class TestDeleteTournament:
+    """DELETE /v1/tournaments/{slug} — owner-gated, cascades to scoped rows."""
+
+    async def test_unauthenticated_returns_401(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup"))
+        await session.commit()
+
+        response = await client.delete("/v1/tournaments/cup")
+        assert response.status_code == 401
+
+    async def test_unknown_slug_returns_404(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.delete("/v1/tournaments/nope")
+        assert response.status_code == 404
+
+    async def test_non_owner_returns_403(self, client: AsyncClient, session: AsyncSession, auth_as):
+        other_user = "00000000-0000-0000-0000-0000000000bb"
+        session.add(make_tournament("cup", owner_ids=[other_user]))
+        await session.commit()
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.delete("/v1/tournaments/cup")
+        assert response.status_code == 403
+
+    async def test_owner_deletes(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.delete("/v1/tournaments/cup")
+        assert response.status_code == 204
+        assert response.content == b""
+        assert (await client.get("/v1/tournaments/cup")).status_code == 404
+
+    async def test_cascades_to_roster_teams_and_owners(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # A tournament with a roster, teams (with members), and a second
+        # owner — every scoped row should be gone after the delete.
+        tournament = make_tournament(
+            "cup",
+            profile_ids=[1, 2],
+            owner_ids=[DEFAULT_TEST_USER_ID, "00000000-0000-0000-0000-0000000000bb"],
+        )
+        team = make_team("Reds", profile_ids=[1])
+        tournament.teams = [team]
+        session.add(tournament)
+        await session.commit()
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.delete("/v1/tournaments/cup")
+        assert response.status_code == 204
+
+        # Tournament row gone — every scoped row cascades with it.
+        assert (
+            await session.execute(select(Tournament).where(Tournament.slug == "cup"))
+        ).scalar_one_or_none() is None
+        assert (await session.execute(select(TournamentPlayer))).first() is None
+        assert (await session.execute(select(Team))).first() is None
+        assert (await session.execute(select(TeamMember))).first() is None
+        assert (await session.execute(select(TournamentOwner))).first() is None

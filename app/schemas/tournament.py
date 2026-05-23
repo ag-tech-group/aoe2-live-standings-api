@@ -26,6 +26,29 @@ class TournamentRead(BaseModel):
     created_at: datetime
 
 
+class TournamentCreate(BaseModel):
+    """Body for ``POST /v1/tournaments`` — create a new tournament.
+
+    Required fields back non-nullable columns; the optional date fields
+    behave the same way as on ``TournamentUpdate`` (omit to leave unset,
+    explicit ``null`` is just an unset). ``slug`` is the routing key
+    consumers' URLs are built from — restricted to lowercase alphanumeric
+    + internal hyphens so the value drops into a path segment unchanged.
+    """
+
+    slug: str = Field(
+        min_length=1,
+        max_length=64,
+        # No leading / trailing hyphen; internal hyphens (including consecutive) are fine.
+        pattern=r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+    )
+    name: str = Field(min_length=1, max_length=200)
+    leaderboard_id: int = Field(gt=0)
+    start_date: datetime | None = None
+    end_date: datetime | None = None
+    grand_finals_date: datetime | None = None
+
+
 class TournamentUpdate(BaseModel):
     """Partial update for a tournament's metadata (``PATCH``).
 
