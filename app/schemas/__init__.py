@@ -10,7 +10,13 @@ from app.schemas.team import (
     TeamStandingRow,
     TeamUpdate,
 )
-from app.schemas.tournament import TournamentCreate, TournamentRead, TournamentUpdate
+from app.schemas.tournament import (
+    TournamentCreate,
+    TournamentOwnerCreate,
+    TournamentOwnerRead,
+    TournamentRead,
+    TournamentUpdate,
+)
 
 __all__ = [
     "LeaderboardRead",
@@ -30,6 +36,8 @@ __all__ = [
     "TeamStandingRow",
     "TeamUpdate",
     "TournamentCreate",
+    "TournamentOwnerCreate",
+    "TournamentOwnerRead",
     "TournamentRead",
     "TournamentRecord",
     "TournamentUpdate",
