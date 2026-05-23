@@ -77,3 +77,31 @@ class TournamentUpdate(BaseModel):
         if value is None:
             raise ValueError("may not be null")
         return value
+
+
+class TournamentOwnerRead(BaseModel):
+    """A criticalbit user authorized to manage a tournament."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: str
+    created_at: datetime
+
+
+class TournamentOwnerCreate(BaseModel):
+    """Body for ``POST /v1/tournaments/{slug}/owners`` — grant ownership.
+
+    ``user_id`` is the target's criticalbit UUID (the ``sub`` claim from
+    their access token). How a host discovers another user's UUID is
+    out of scope for this API — typically copied from a user profile in
+    the criticalbit ecosystem or shared directly.
+    """
+
+    user_id: str = Field(
+        # The criticalbit-auth-api uses standard UUIDs for `sub`. Both
+        # casings are tolerated; matching the column shape (String(36))
+        # for length.
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        min_length=36,
+        max_length=36,
+    )
