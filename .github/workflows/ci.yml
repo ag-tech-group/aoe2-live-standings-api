@@ -63,6 +63,23 @@ jobs:
           docker push "$IMAGE:$GITHUB_SHA"
           docker push "$IMAGE:latest"
 
+      # Migrations run as a Cloud Run Job before either service rolls a new
+      # revision. `jobs execute --wait` blocks until the task completes and
+      # propagates its exit status — if the migration fails, this step
+      # fails, the deploy step is skipped, and the existing revisions keep
+      # serving traffic against the unchanged schema.
+      - name: Run database migrations
+        run: |
+          IMAGE=us-central1-docker.pkg.dev/aoe2-live-standings-api/aoe2-live-standings-api/api
+          gcloud run jobs update aoe2-live-standings-api-migrate \
+            --image="$IMAGE:$GITHUB_SHA" \
+            --region=us-central1 \
+            --project=aoe2-live-standings-api
+          gcloud run jobs execute aoe2-live-standings-api-migrate \
+            --region=us-central1 \
+            --project=aoe2-live-standings-api \
+            --wait
+
       - name: Deploy to Cloud Run (api + worker)
         run: |
           IMAGE=us-central1-docker.pkg.dev/aoe2-live-standings-api/aoe2-live-standings-api/api

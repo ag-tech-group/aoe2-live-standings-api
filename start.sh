@@ -1,8 +1,15 @@
 #!/bin/sh
 set -e
 
-# Apply any pending database migrations
-uv run alembic upgrade head
+# Migrations are no longer run here — they run as a Cloud Run Job
+# (`aoe2-live-standings-api-migrate`) that completes before any new
+# service revision rolls. See `infra/terraform/jobs.tf` and the
+# `Run database migrations` step in `.github/workflows/ci.yml`.
+# Keeping migrations out of the container start path avoids the race
+# where a new revision rolls out while the old one is still serving
+# traffic, and lets a migration failure halt the deploy *before*
+# services swap rather than surfacing as a soft "container never
+# becomes Ready" signal after the fact.
 
 # Start the application.
 # --proxy-headers --forwarded-allow-ips='*' makes uvicorn trust the
