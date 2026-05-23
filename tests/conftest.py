@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.auth import get_current_user_id, jwks
 from app.database import Base, get_async_session
 from app.events import hub
-from app.main import app, limiter
+from app.limiting import limiter
+from app.main import app
 from app.models import (
     Match,
     MatchOutcome,

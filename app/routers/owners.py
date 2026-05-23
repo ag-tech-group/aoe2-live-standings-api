@@ -13,12 +13,13 @@ beyond Cloud Logging's request log). Revoking the *last* owner is a
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_tournament_owner
 from app.database import get_async_session
+from app.limiting import limiter
 from app.models import Tournament, TournamentOwner
 from app.schemas import TournamentOwnerCreate, TournamentOwnerRead
 
@@ -46,7 +47,9 @@ async def list_tournament_owners(
 
 
 @router.post("", status_code=204)
+@limiter.limit("5/minute")
 async def grant_tournament_owner(
+    request: Request,
     payload: TournamentOwnerCreate,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),
@@ -73,7 +76,9 @@ async def grant_tournament_owner(
 
 
 @router.delete("/{user_id}", status_code=204)
+@limiter.limit("5/minute")
 async def revoke_tournament_owner(
+    request: Request,
     user_id: str,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),

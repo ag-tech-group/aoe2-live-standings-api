@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import require_tournament_owner
 from app.database import get_async_session
+from app.limiting import limiter
 from app.models import Match, MatchPlayer, Player, Tournament, TournamentPlayer
 from app.routers.tournaments import get_tournament
 from app.schemas import (
@@ -140,7 +141,9 @@ async def get_player(
 
 
 @router.post("", status_code=204)
+@limiter.limit("20/minute")
 async def add_roster_player(
+    request: Request,
     payload: RosterPlayerCreate,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),
@@ -167,7 +170,9 @@ async def add_roster_player(
 
 
 @router.delete("/{profile_id}", status_code=204)
+@limiter.limit("20/minute")
 async def remove_roster_player(
+    request: Request,
     profile_id: int,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),
