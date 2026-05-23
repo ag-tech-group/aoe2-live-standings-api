@@ -57,3 +57,14 @@ variable "alerting_email" {
   type        = string
   default     = "amr@agtechgroup.solutions"
 }
+
+variable "billing_account" {
+  description = "GCP billing account ID linked to this project, in the form `01234A-567890-BCDEF1`. Required at apply time for the budget alert; find it with `gcloud billing projects describe aoe2-live-standings-api --account=… --format='value(billingAccountName)'` (returns `billingAccounts/<id>` — the trailing id alone is what goes here). No default: it's neither secret nor inferable, and an apply-time error is preferable to a stale baked-in value drifting from reality."
+  type        = string
+}
+
+variable "budget_monthly_usd" {
+  description = "Monthly budget cap for the project in USD. Notification thresholds fire at 50%, 90%, and 100% of this amount on actual spend, plus a 100%-forecast warning when the month's projected total would exceed the cap. $100 default sits well above the steady-state idle cost (Cloud Run min-instances + Cloud SQL db-f1-micro ≈ a few USD/month), so the 50% trigger ($50) is the first signal of anything materially abnormal."
+  type        = number
+  default     = 100
+}
