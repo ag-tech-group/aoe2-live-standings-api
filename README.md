@@ -148,16 +148,20 @@ Most of the API is scoped to a tournament:
 
 Unscoped: `GET /v1/leaderboards` (leaderboard metadata), `GET /v1/stream` (SSE refresh nudges), `GET /v1/flags` (feature flags).
 
+### Authenticated read
+
+- `GET /v1/me` — identity (`user_id`) plus the list of tournaments the caller owns. One round-trip lets the frontend gate admin UI without per-tournament probes. 401 when unauthenticated.
+
 ### Write endpoints (authenticated)
 
-The management API lets a tournament host edit configuration without a redeploy. Every write route is gated — see [Authentication](#authentication).
+The management API lets a tournament host edit configuration without a redeploy. Every write route is gated — see [Authentication](#authentication). Writes accept an optional `Idempotency-Key: <uuid>` header to dedupe retries (same key + same body → cached response).
 
+- `POST /v1/tournaments` — create a tournament. Any authenticated user may; the caller becomes the first owner. `DELETE /v1/tournaments/{slug}` — delete the tournament and everything tournament-scoped (cascades to roster, teams, owners).
 - `PATCH /v1/tournaments/{slug}` — edit a tournament's name, dates, or leaderboard
+- `GET /v1/tournaments/{slug}/owners` — list owners; `POST` to grant ownership to another criticalbit user; `DELETE .../owners/{user_id}` to revoke. Revoking the last owner is rejected (the tournament would become uneditable).
 - `POST /v1/tournaments/{slug}/players` — add a profile to the roster; `DELETE .../players/{profile_id}` — remove one
 - `POST /v1/tournaments/{slug}/teams` — create a team; `PATCH` / `DELETE .../teams/{team_id}` — edit or delete one
 - `POST /v1/tournaments/{slug}/teams/{team_id}/members` — add a team member; `DELETE .../members/{profile_id}` — remove one
-
-Creating and deleting whole tournaments is not yet exposed over HTTP — tournaments are still seeded by the startup bootstrap (see [Environment Variables](#environment-variables)).
 
 See `/docs` or `/openapi.json` for the full, authoritative spec.
 
@@ -324,13 +328,16 @@ aoe2-live-standings-api/
 | `LOG_LEVEL`              | Optional | Logging level                                     | `INFO`                                                                      |
 | `OTEL_ENABLED`           | Optional | Enable OpenTelemetry tracing                      | `false`                                                                     |
 | `OTEL_SERVICE_NAME`      | Optional | Service name for traces                           | `aoe2-live-standings-api`                                                   |
-| `OTEL_EXPORTER_ENDPOINT` | Optional | OTLP gRPC collector endpoint                      | `http://localhost:4317`                                                     |
-| `FEATURE_*`              | Optional | Feature flags (e.g. `FEATURE_NEW_DASHBOARD=true`) | (none)                                                                      |
+| `OTEL_EXPORTER_ENDPOINT` | Optional | OTLP gRPC collector endpoint (used when `OTEL_USE_CLOUD_TRACE` is false) | `http://localhost:4317`                              |
+| `OTEL_USE_CLOUD_TRACE`   | Optional | Export spans directly to Google Cloud Trace via the native exporter (prod) | `false`                                            |
+| `OTEL_TRACES_SAMPLE_RATIO` | Optional | Fraction of incoming traces to sample (1.0 = 100%, 0.1 = 10%) | `1.0`                                                          |
+| `SENTRY_DSN`             | Optional | Sentry project DSN. Empty disables Sentry init entirely | (empty)                                                              |
+| `FEATURE_*`              | Optional | Feature flags (e.g. `FEATURE_ERROR_ENVELOPE_V2=true`) | (none)                                                                  |
 | `POLLING_ENABLED`        | Optional | Start the three upstream pollers in this process (worker service) | `true`                                                  |
 | `LISTENER_ENABLED`       | Optional | Start the LISTEN/NOTIFY consumer in this process (api service)    | `true`                                                  |
 | `UPSTREAM_BASE_URL`      | Optional | Relic upstream base URL                           | `https://aoe-api.worldsedgelink.com`                                        |
 | `TRACKED_PROFILE_IDS`    | Optional | Comma-separated profile IDs for the seed tournament's roster — used only to bootstrap a tournament when the database has none | (empty) |
-| `TOURNAMENT_*`           | Optional | Seed tournament's `SLUG` / `NAME` / `LEADERBOARD_ID` / `START_DATE` / `END_DATE` (see `app/config.py`) | (see config) |
+| `TOURNAMENT_*`           | Optional | Seed tournament's `SLUG` / `NAME` / `LEADERBOARD_ID` / `START_DATE` / `GRAND_FINALS_DATE` (see `app/config.py`) | (see config) |
 | `AUTH_JWKS_URL`          | Optional | JWKS endpoint used to verify the write API's access tokens | `https://auth-api.criticalbit.gg/auth/jwks` |
 | `AUTH_TOKEN_ISSUER`      | Optional | Expected JWT `iss` claim; when set, tokens with a different issuer are rejected | (empty — issuer not checked) |
 
