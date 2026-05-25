@@ -33,7 +33,6 @@ from app.models import (
     TournamentOwner,
     TournamentPlayer,
 )
-from app.poller.status import PollerSource
 from app.schemas import (
     ListEnvelope,
     StandingRow,
@@ -400,7 +399,7 @@ async def get_standings(
         timestamps.append(rating.updated_at)
 
     return ListEnvelope[StandingRow](
-        last_polled_at=compute_last_polled_at(timestamps, source=PollerSource.PLAYER_STATS),
+        last_polled_at=compute_last_polled_at(timestamps),
         items=items,
     )
 
@@ -476,6 +475,6 @@ async def get_team_standings(
     items.sort(key=lambda t: t.combined_rating_sum, reverse=True)
 
     return ListEnvelope[TeamStandingRow](
-        last_polled_at=compute_last_polled_at(timestamps, source=PollerSource.PLAYER_STATS),
+        last_polled_at=compute_last_polled_at(timestamps),
         items=items,
     )

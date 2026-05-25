@@ -15,10 +15,8 @@ import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, emit_nudge
-from app.poller import status as poller_status
 from app.poller.parsers import parse_player_stats
 from app.poller.roster import get_tracked_profile_ids
-from app.poller.status import PollerSource
 from app.poller.upserts import upsert_player, upsert_player_rating
 
 logger = structlog.get_logger(__name__)
@@ -64,7 +62,6 @@ async def tick_player_stats(
         await emit_nudge(session, EventType.STANDINGS)
         await session.commit()
     logger.info("poll_player_stats_ok", players=len(players), ratings=len(ratings))
-    poller_status.record_tick(PollerSource.PLAYER_STATS)
 
 
 async def run_player_stats_poller(
