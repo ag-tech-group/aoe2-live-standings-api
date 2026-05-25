@@ -26,6 +26,7 @@ from app.models import (
     TournamentOwner,
     TournamentPlayer,
 )
+from app.poller import status as poller_status
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -82,6 +83,17 @@ def reset_event_hub():
     """Drop any SSE subscribers a test left registered on the module-level hub."""
     yield
     hub._subscribers.clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_poller_status():
+    """Clear poller-tick state between tests so the `last_polled_at`
+    fallback chain in `compute_last_polled_at` doesn't see leftovers
+    from earlier tests that ran a real poller cycle (e.g., the
+    integration test)."""
+    poller_status.reset()
+    yield
+    poller_status.reset()
 
 
 @pytest.fixture(autouse=True)
