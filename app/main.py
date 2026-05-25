@@ -58,7 +58,11 @@ app.add_middleware(
     allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    # `Idempotency-Key` is a custom request header on every write
+    # (#61); browsers fire a CORS preflight to confirm it's allowed
+    # before sending the real request. Without it in this list, every
+    # write from a browser fails at preflight.
+    allow_headers=["Content-Type", "Idempotency-Key"],
 )
 
 # `default_limits` on the limiter applies to every route that isn't
