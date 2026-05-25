@@ -77,12 +77,25 @@ class TournamentUpdate(BaseModel):
 
 
 class TournamentOwnerRead(BaseModel):
-    """A criticalbit user authorized to manage a tournament."""
+    """A criticalbit user authorized to manage a tournament.
+
+    ``display_name``, ``email``, and ``avatar_url`` are resolved against
+    criticalbit-auth-api at response time and cached briefly per ``user_id``.
+    Any may be ``null``: ``display_name`` / ``avatar_url`` if the user has
+    none set, ``email`` typically populated (auth-api always returns one,
+    possibly a synthetic placeholder for Steam users who haven't gone
+    through the accept-tos email gate). All three are null when the
+    auth-api call fails — the row still resolves so the admin UI can
+    degrade gracefully to just ``user_id``.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     user_id: str
     created_at: datetime
+    display_name: str | None = None
+    email: str | None = None
+    avatar_url: str | None = None
 
 
 class TournamentOwnerCreate(BaseModel):
