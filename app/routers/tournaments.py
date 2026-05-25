@@ -102,14 +102,17 @@ async def create_tournament(
     metadata, manage the roster + teams, and ``DELETE`` the tournament.
     409 if the slug is taken (it is unique across the deployment and how
     consumer URLs route to the right tournament). A competition window
-    whose start falls after its end is rejected with 422.
+    whose start falls after its grand finals is rejected with 422.
     """
     if (
         payload.start_date is not None
-        and payload.end_date is not None
-        and payload.start_date > payload.end_date
+        and payload.grand_finals_date is not None
+        and payload.start_date > payload.grand_finals_date
     ):
-        raise HTTPException(status_code=422, detail="start_date must not be after end_date")
+        raise HTTPException(
+            status_code=422,
+            detail="start_date must not be after grand_finals_date",
+        )
 
     existing = (
         await session.execute(select(Tournament.id).where(Tournament.slug == payload.slug))
@@ -122,7 +125,6 @@ async def create_tournament(
         name=payload.name,
         leaderboard_id=payload.leaderboard_id,
         start_date=payload.start_date,
-        end_date=payload.end_date,
         grand_finals_date=payload.grand_finals_date,
     )
     tournament.owners = [TournamentOwner(user_id=user_id)]
@@ -157,9 +159,10 @@ async def update_tournament(
     """Edit a tournament's metadata — owner-gated.
 
     PATCH semantics: only the fields present in the request body change.
-    ``start_date`` / ``end_date`` accept ``null`` to clear a bound; a
-    competition window whose start falls after its end is rejected with
-    422. ``slug`` is immutable — it is the key consumer URLs are built on.
+    ``start_date`` / ``grand_finals_date`` accept ``null`` to clear a
+    bound; a competition window whose start falls after its grand finals
+    is rejected with 422. ``slug`` is immutable — it is the key consumer
+    URLs are built on.
     """
     changes = payload.model_dump(exclude_unset=True)
     for field, value in changes.items():
@@ -167,10 +170,13 @@ async def update_tournament(
 
     if (
         tournament.start_date is not None
-        and tournament.end_date is not None
-        and tournament.start_date > tournament.end_date
+        and tournament.grand_finals_date is not None
+        and tournament.start_date > tournament.grand_finals_date
     ):
-        raise HTTPException(status_code=422, detail="start_date must not be after end_date")
+        raise HTTPException(
+            status_code=422,
+            detail="start_date must not be after grand_finals_date",
+        )
 
     await session.commit()
     audit(
@@ -283,9 +289,9 @@ async def _tournament_record_by_profile(
     """Map each profile to its win/loss record within the tournament window.
 
     Counts completed matches on the tournament's leaderboard whose
-    ``started_at`` falls inside ``[start_date, end_date]`` — a null bound
-    is treated as open. Every profile gets an entry; those with no matches
-    in the window get a zero record.
+    ``started_at`` falls inside ``[start_date, grand_finals_date]`` —
+    a null bound is treated as open. Every profile gets an entry;
+    those with no matches in the window get a zero record.
     """
     records = {
         profile_id: TournamentRecord(games_played=0, wins=0, losses=0, streak=0)
@@ -306,8 +312,8 @@ async def _tournament_record_by_profile(
     )
     if tournament.start_date is not None:
         stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.end_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.end_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
 
     outcomes: dict[int, list[MatchOutcome]] = {}
     for profile_id, outcome in (await session.execute(stmt)).all():

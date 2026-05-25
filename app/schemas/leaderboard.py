@@ -30,7 +30,7 @@ class TournamentRecord(BaseModel):
     """A player's win/loss record within a tournament's date window.
 
     Counts only completed matches on the tournament's leaderboard between
-    its ``start_date`` and ``end_date`` (a null bound is treated as open).
+    its ``start_date`` and ``grand_finals_date`` (a null bound is treated as open).
     Distinct from the lifetime-ladder ``wins`` / ``losses`` / ``streak``
     on ``StandingRow``.
     """
