@@ -20,10 +20,8 @@ import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, emit_nudge
-from app.poller import status as poller_status
 from app.poller.parsers import parse_live_advertisements
 from app.poller.roster import get_tracked_profile_ids
-from app.poller.status import PollerSource
 from app.poller.upserts import replace_live_match_players, upsert_match_from_live
 
 logger = structlog.get_logger(__name__)
@@ -58,7 +56,6 @@ async def tick_live_matches(
         matches=len(matches),
         live_players=len(live_players),
     )
-    poller_status.record_tick(PollerSource.LIVE_MATCHES)
 
 
 async def run_live_matches_poller(

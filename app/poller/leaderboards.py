@@ -14,9 +14,7 @@ import httpx
 import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.poller import status as poller_status
 from app.poller.parsers import matchtype_to_leaderboard_map, parse_available_leaderboards
-from app.poller.status import PollerSource
 from app.poller.upserts import upsert_leaderboard
 
 logger = structlog.get_logger(__name__)
@@ -51,5 +49,4 @@ async def load_leaderboards(
             await upsert_leaderboard(session, row)
         await session.commit()
     logger.info("load_leaderboards_ok", count=len(rows))
-    poller_status.record_tick(PollerSource.LEADERBOARDS)
     return matchtype_to_leaderboard_map(payload)

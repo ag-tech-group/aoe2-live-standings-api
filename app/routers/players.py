@@ -14,7 +14,6 @@ from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Match, MatchPlayer, Player, Tournament, TournamentPlayer
-from app.poller.status import PollerSource
 from app.routers.tournaments import get_tournament
 from app.schemas import (
     ListEnvelope,
@@ -75,7 +74,7 @@ async def list_players(
         timestamps.extend(r.updated_at for r in player_read.ratings)
 
     return ListEnvelope[PlayerRead](
-        last_polled_at=compute_last_polled_at(timestamps, source=PollerSource.PLAYER_STATS),
+        last_polled_at=compute_last_polled_at(timestamps),
         items=items,
     )
 
@@ -136,7 +135,7 @@ async def get_player(
     detail = PlayerDetail.model_validate(player)
     return detail.model_copy(
         update={
-            "last_polled_at": compute_last_polled_at(timestamps, source=PollerSource.PLAYER_STATS),
+            "last_polled_at": compute_last_polled_at(timestamps),
             "recent_matches": recent_matches,
         }
     )
