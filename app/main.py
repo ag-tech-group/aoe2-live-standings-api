@@ -40,7 +40,15 @@ logger = structlog.get_logger("app.request")
 
 app = FastAPI(
     title="AoE2 Live Standings API",
-    description="Open-source live-standings API for AoE2: DE tournaments.",
+    description=(
+        "Open-source live-standings API for AoE2: DE tournaments.\n\n"
+        "---\n\n"
+        "Age of Empires II © Microsoft Corporation. AoE2 Live Standings API "
+        "was created under Microsoft's [Game Content Usage Rules]"
+        "(https://www.xbox.com/en-us/developers/rules) using assets from "
+        "Age of Empires II and it is not endorsed by or affiliated with "
+        "Microsoft."
+    ),
     version="0.0.1",
     docs_url=None,
     lifespan=lifespan,
