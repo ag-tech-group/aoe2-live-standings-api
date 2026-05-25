@@ -2,10 +2,12 @@
 
 from datetime import UTC, datetime
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.users_client import UserIdentity
 from app.models import TournamentOwner
 from tests.conftest import DEFAULT_TEST_USER_ID, make_tournament
 
@@ -196,3 +198,126 @@ class TestRevokeTournamentOwner:
         # And the owner row is still there — the conditional DELETE didn't fire.
         rows = (await session.execute(select(TournamentOwner))).scalars().all()
         assert [r.user_id for r in rows] == [DEFAULT_TEST_USER_ID]
+
+
+class TestListTournamentOwnersEnrichment:
+    """Identity enrichment via auth-api /users/lookup on the owners list.
+
+    The conftest's autouse fixture stubs ``fetch_identities`` to a no-op so
+    the existing tests don't reach the network; these tests override it
+    with a stub that returns canned identities to exercise the merge path.
+    """
+
+    async def test_enriched_fields_appear_in_response(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+        auth_as,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        async def _fake_fetch(user_ids, *, access_token):
+            return {
+                DEFAULT_TEST_USER_ID: UserIdentity(
+                    user_id=DEFAULT_TEST_USER_ID,
+                    email="hera@criticalbit.gg",
+                    display_name="Hera",
+                    avatar_url="https://example.com/hera.png",
+                ),
+            }
+
+        monkeypatch.setattr("app.routers.owners.fetch_identities", _fake_fetch)
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.get("/v1/tournaments/cup/owners")
+        assert response.status_code == 200
+        body = response.json()
+        assert body[0]["user_id"] == DEFAULT_TEST_USER_ID
+        assert body[0]["display_name"] == "Hera"
+        assert body[0]["email"] == "hera@criticalbit.gg"
+        assert body[0]["avatar_url"] == "https://example.com/hera.png"
+        assert "created_at" in body[0]
+
+    async def test_missing_identity_returns_null_fields(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+        auth_as,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        # auth-api returned successfully but didn't know this user (or the
+        # call failed and got swallowed) — the row still resolves with
+        # ``user_id`` + ``created_at`` and null enrichment fields, so the
+        # admin UI degrades gracefully.
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        async def _empty_fetch(user_ids, *, access_token):
+            return {}
+
+        monkeypatch.setattr("app.routers.owners.fetch_identities", _empty_fetch)
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.get("/v1/tournaments/cup/owners")
+        assert response.status_code == 200
+        row = response.json()[0]
+        assert row["user_id"] == DEFAULT_TEST_USER_ID
+        assert row["display_name"] is None
+        assert row["email"] is None
+        assert row["avatar_url"] is None
+
+    async def test_fetch_called_with_all_owner_ids(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+        auth_as,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Two owners — both ids should be passed to the auth-api client in
+        # a single batched call.
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.owners.append(TournamentOwner(user_id=OTHER_USER_ID))
+        session.add(tournament)
+        await session.commit()
+
+        captured: dict = {"ids": None, "token": "<not-called>"}
+
+        async def _capturing_fetch(user_ids, *, access_token):
+            captured["ids"] = list(user_ids)
+            captured["token"] = access_token
+            return {}
+
+        monkeypatch.setattr("app.routers.owners.fetch_identities", _capturing_fetch)
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.get("/v1/tournaments/cup/owners")
+        assert response.status_code == 200
+        assert set(captured["ids"]) == {DEFAULT_TEST_USER_ID, OTHER_USER_ID}
+
+    async def test_access_token_cookie_is_forwarded_to_client(
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+        auth_as,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        captured: dict = {"token": "<not-called>"}
+
+        async def _capturing_fetch(user_ids, *, access_token):
+            captured["token"] = access_token
+            return {}
+
+        monkeypatch.setattr("app.routers.owners.fetch_identities", _capturing_fetch)
+
+        # `auth_as` overrides the dep but doesn't set a cookie; the explicit
+        # cookie set on the test client is what the handler reads.
+        auth_as(DEFAULT_TEST_USER_ID)
+        client.cookies.set("criticalbit_access", "the-token")
+        response = await client.get("/v1/tournaments/cup/owners")
+        assert response.status_code == 200
+        assert captured["token"] == "the-token"

@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.auth import get_current_user_id, jwks
+from app.auth import get_current_user_id, jwks, users_client
 from app.database import Base, get_async_session
 from app.events import hub
 from app.limiting import limiter
@@ -100,6 +100,29 @@ def stub_jwks(monkeypatch: pytest.MonkeyPatch):
     jwks.reset_cache()
     yield
     jwks.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def stub_users_client(monkeypatch: pytest.MonkeyPatch):
+    """Default ``fetch_identities`` to empty so the owners router never hits
+    a real auth-api in tests.
+
+    Tests that exercise the enrichment path opt in by monkey-patching
+    ``app.routers.owners.fetch_identities`` to a stub returning canned
+    identities; tests that exercise the client itself import
+    ``app.auth.users_client.fetch_identities`` directly (this fixture
+    doesn't touch that binding) and use respx to mock the HTTP layer.
+    The cache is reset around every test so identities don't leak between
+    cases.
+    """
+
+    async def _empty(user_ids, *, access_token):
+        return {}
+
+    monkeypatch.setattr("app.routers.owners.fetch_identities", _empty)
+    users_client.reset_cache()
+    yield
+    users_client.reset_cache()
 
 
 async def override_get_async_session() -> AsyncGenerator[AsyncSession, None]:

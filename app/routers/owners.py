@@ -18,7 +18,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
-from app.auth import get_current_user_id, require_tournament_owner
+from app.auth import ACCESS_TOKEN_COOKIE, get_current_user_id, require_tournament_owner
+from app.auth.users_client import fetch_identities
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Tournament, TournamentOwner
@@ -29,6 +30,7 @@ router = APIRouter(prefix="/tournaments/{tournament_slug}/owners", tags=["owners
 
 @router.get("")
 async def list_tournament_owners(
+    request: Request,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),
 ) -> list[TournamentOwnerRead]:
@@ -37,6 +39,13 @@ async def list_tournament_owners(
     Oldest first — useful when reasoning about who's been around longest
     and which slot is "the original creator". Owner-gated like the rest
     of this router.
+
+    Each row is enriched with the user's ``display_name`` / ``email`` /
+    ``avatar_url`` via a single batched call to auth-api's ``/users/lookup``
+    (cached ~60s per id). The caller's access-token cookie is forwarded so
+    the lookup runs as the same user that hit this endpoint. If auth-api
+    is unreachable the enrichment fields fall back to ``null`` and the
+    bare ``user_id`` / ``created_at`` rows still ship.
     """
     stmt = (
         select(TournamentOwner)
@@ -44,7 +53,24 @@ async def list_tournament_owners(
         .order_by(TournamentOwner.created_at)
     )
     rows = (await session.execute(stmt)).scalars().all()
-    return [TournamentOwnerRead.model_validate(r) for r in rows]
+
+    user_ids = [r.user_id for r in rows]
+    access_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    identities = await fetch_identities(user_ids, access_token=access_token)
+
+    result: list[TournamentOwnerRead] = []
+    for row in rows:
+        identity = identities.get(row.user_id)
+        result.append(
+            TournamentOwnerRead(
+                user_id=row.user_id,
+                created_at=row.created_at,
+                display_name=identity.display_name if identity else None,
+                email=identity.email if identity else None,
+                avatar_url=identity.avatar_url if identity else None,
+            )
+        )
+    return result
 
 
 @router.post("", status_code=204)

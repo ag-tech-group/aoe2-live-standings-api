@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # is enforced as the expected `iss` claim only when set (empty = skip).
     auth_jwks_url: str = "https://auth-api.criticalbit.gg/auth/jwks"
     auth_token_issuer: str = ""
+    # Base URL for criticalbit-auth-api outbound calls (user identity lookups).
+    # Defaults to the same prod host as the JWKS URL; override in local dev
+    # to point at a locally-run auth-api on another port.
+    auth_api_base_url: str = "https://auth-api.criticalbit.gg"
 
     @property
     def is_development(self) -> bool:
@@ -141,6 +145,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AUTH_JWKS_URL must not be empty outside development — the "
                 "write/management API can't verify access tokens without it"
+            )
+
+        # Owner-list identity enrichment calls auth-api at this base; empty
+        # would silently degrade every enriched response. Same fail-loud
+        # treatment as the JWKS URL.
+        if not self.auth_api_base_url:
+            raise ValueError(
+                "AUTH_API_BASE_URL must not be empty outside development — the "
+                "owners-list endpoint resolves user identity against it"
             )
 
         return self
