@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.database import get_async_session
 from app.models import LiveMatchPlayer, Match, Tournament, TournamentPlayer
 from app.models.match import MatchState
+from app.poller.status import PollerSource
 from app.routers.tournaments import get_tournament
 from app.schemas import ListEnvelope, MatchRead, compute_last_polled_at
 
@@ -53,6 +54,6 @@ async def get_live(
     items = [MatchRead.model_validate(m) for m in matches]
     timestamps: list[datetime | None] = [m.updated_at for m in matches]
     return ListEnvelope[MatchRead](
-        last_polled_at=compute_last_polled_at(timestamps),
+        last_polled_at=compute_last_polled_at(timestamps, source=PollerSource.LIVE_MATCHES),
         items=items,
     )

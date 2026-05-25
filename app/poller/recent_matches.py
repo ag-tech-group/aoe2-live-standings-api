@@ -20,8 +20,10 @@ import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, emit_nudge
+from app.poller import status as poller_status
 from app.poller.parsers import parse_recent_matches
 from app.poller.roster import get_tracked_profile_ids
+from app.poller.status import PollerSource
 from app.poller.upserts import upsert_match_from_recent, upsert_match_player
 
 logger = structlog.get_logger(__name__)
@@ -94,6 +96,7 @@ async def tick_recent_matches(
         matches=total_matches,
         players=total_players,
     )
+    poller_status.record_tick(PollerSource.RECENT_MATCHES)
 
 
 async def run_recent_matches_poller(

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_async_session
 from app.models import Leaderboard
+from app.poller.status import PollerSource
 from app.schemas import LeaderboardRead, ListEnvelope, compute_last_polled_at
 
 router = APIRouter(prefix="/leaderboards", tags=["leaderboards"])
@@ -32,6 +33,8 @@ async def list_leaderboards(
     stmt = select(Leaderboard).order_by(Leaderboard.leaderboard_id)
     rows = (await session.execute(stmt)).scalars().all()
     return ListEnvelope[LeaderboardRead](
-        last_polled_at=compute_last_polled_at(r.updated_at for r in rows),
+        last_polled_at=compute_last_polled_at(
+            (r.updated_at for r in rows), source=PollerSource.LEADERBOARDS
+        ),
         items=[LeaderboardRead.model_validate(r) for r in rows],
     )
