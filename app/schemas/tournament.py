@@ -21,7 +21,6 @@ class TournamentRead(BaseModel):
     name: str
     leaderboard_id: int
     start_date: datetime | None
-    end_date: datetime | None
     grand_finals_date: datetime | None
     created_at: datetime
 
@@ -45,7 +44,6 @@ class TournamentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     leaderboard_id: int = Field(gt=0)
     start_date: datetime | None = None
-    end_date: datetime | None = None
     grand_finals_date: datetime | None = None
 
 
@@ -53,10 +51,10 @@ class TournamentUpdate(BaseModel):
     """Partial update for a tournament's metadata (``PATCH``).
 
     Every field is optional; only the fields present in the request body
-    are applied. ``start_date`` / ``end_date`` / ``grand_finals_date``
-    may be set to ``null`` to clear them. ``name`` and ``leaderboard_id``
-    back non-nullable columns, so an explicit ``null`` for either is
-    rejected with 422.
+    are applied. ``start_date`` / ``grand_finals_date`` may be set to
+    ``null`` to clear them. ``name`` and ``leaderboard_id`` back non-
+    nullable columns, so an explicit ``null`` for either is rejected
+    with 422.
 
     ``slug`` is intentionally not updatable — it is the routing key
     consumers' URLs are built from.
@@ -65,7 +63,6 @@ class TournamentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     leaderboard_id: int | None = Field(default=None, gt=0)
     start_date: datetime | None = None
-    end_date: datetime | None = None
     grand_finals_date: datetime | None = None
 
     @field_validator("name", "leaderboard_id")

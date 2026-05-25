@@ -39,7 +39,7 @@ async def ensure_seed_tournament(session: AsyncSession) -> None:
         name=settings.tournament_name,
         leaderboard_id=settings.tournament_leaderboard_id,
         start_date=settings.tournament_start_date,
-        end_date=settings.tournament_end_date,
+        grand_finals_date=settings.tournament_grand_finals_date,
     )
     tournament.tracked_players = [TournamentPlayer(profile_id=pid) for pid in profile_ids]
     session.add(tournament)

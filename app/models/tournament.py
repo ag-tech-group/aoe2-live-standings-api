@@ -25,14 +25,12 @@ class Tournament(Base):
     # (e.g. 3 for 1v1 RM Ranked). One ladder per tournament.
     leaderboard_id: Mapped[int]
     # The competition window. Nullable so a tournament can be created
-    # before its schedule is fixed; tournament-scoped stats treat a null
-    # bound as open-ended.
+    # before its schedule is fixed; tournament-scoped queries treat a
+    # null bound as open-ended. `grand_finals_date` is both the hero-
+    # countdown target the frontend surfaces *and* the terminating
+    # bound for "what matches count for this tournament" filters —
+    # there's no separate `end_date` anymore (dropped in #76).
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The grand-finals start time — distinct from `end_date` (the
-    # competition-window bound used for stats roll-up). Surfaced to
-    # frontends that want a hero countdown to the marquee match.
-    # Display-only metadata; no business logic reads it.
     grand_finals_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

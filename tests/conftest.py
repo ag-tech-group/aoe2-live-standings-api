@@ -240,7 +240,7 @@ def make_tournament(
         "name": f"Tournament {slug}",
         "leaderboard_id": 3,
         "start_date": None,
-        "end_date": None,
+        "grand_finals_date": None,
     }
     defaults.update(overrides)
     tournament = Tournament(**defaults)

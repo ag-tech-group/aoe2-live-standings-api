@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     tournament_name: str = "Default Tournament"
     tournament_leaderboard_id: int = 3
     tournament_start_date: datetime | None = None
-    tournament_end_date: datetime | None = None
+    tournament_grand_finals_date: datetime | None = None
 
     # Authentication for the write/management API. The read surface stays
     # unauthenticated; write routes verify the `criticalbit_access` cookie's

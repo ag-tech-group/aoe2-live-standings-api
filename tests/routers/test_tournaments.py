@@ -459,7 +459,7 @@ class TestStandingsTournamentRecord:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                end_date=datetime(2026, 5, 10, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -587,7 +587,7 @@ class TestUpdateTournament:
         assert response.status_code == 200
         assert response.json()["name"] == "Unchanged"
 
-    async def test_start_after_end_is_422(
+    async def test_start_after_grand_finals_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -598,7 +598,7 @@ class TestUpdateTournament:
             "/v1/tournaments/cup",
             json={
                 "start_date": "2026-07-01T00:00:00Z",
-                "end_date": "2026-06-01T00:00:00Z",
+                "grand_finals_date": "2026-06-01T00:00:00Z",
             },
         )
         assert response.status_code == 422
@@ -660,14 +660,12 @@ class TestCreateTournament:
             json={
                 **self._BODY,
                 "start_date": "2026-06-01T00:00:00Z",
-                "end_date": "2026-06-30T23:59:59Z",
                 "grand_finals_date": "2026-06-15T18:00:00Z",
             },
         )
         assert response.status_code == 201
         body = response.json()
         assert body["start_date"].startswith("2026-06-01")
-        assert body["end_date"].startswith("2026-06-30")
         assert body["grand_finals_date"].startswith("2026-06-15T18")
 
     async def test_duplicate_slug_returns_409(
@@ -689,7 +687,7 @@ class TestCreateTournament:
             response = await client.post("/v1/tournaments", json={**self._BODY, "slug": bad_slug})
             assert response.status_code == 422, f"expected 422 for slug={bad_slug!r}"
 
-    async def test_start_after_end_returns_422(
+    async def test_start_after_grand_finals_returns_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -698,7 +696,7 @@ class TestCreateTournament:
             json={
                 **self._BODY,
                 "start_date": "2026-07-01T00:00:00Z",
-                "end_date": "2026-06-01T00:00:00Z",
+                "grand_finals_date": "2026-06-01T00:00:00Z",
             },
         )
         assert response.status_code == 422
