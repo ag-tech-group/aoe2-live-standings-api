@@ -8,6 +8,8 @@ Open-source live-standings API for AoE2: DE tournaments. One deployment serves m
 
 The upstream data layer is documented in [`docs/data-sources.md`](docs/data-sources.md).
 
+> Age of Empires II © Microsoft Corporation. AoE2 Live Standings API was created under Microsoft's [Game Content Usage Rules](https://www.xbox.com/en-us/developers/rules) using assets from Age of Empires II and it is not endorsed by or affiliated with Microsoft.
+
 ## Table of Contents
 
 - [Architecture](#architecture)
