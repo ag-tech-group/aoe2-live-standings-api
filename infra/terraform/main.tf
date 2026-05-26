@@ -20,6 +20,13 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.11"
     }
+    # `archive` zips the Cloud Function source on plan; the resulting
+    # MD5 keys the GCS object name in alerts_sentry.tf so source
+    # changes auto-trigger function redeploys.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.5"
+    }
   }
 
   backend "gcs" {

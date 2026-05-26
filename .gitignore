@@ -213,3 +213,7 @@ __marimo__/
 *.tfstate
 *.tfstate.backup
 *.tfplan
+# `archive_file` data sources zip Cloud Function sources to a local
+# `output_path` on each plan/apply (see alerts_sentry.tf). The zip is
+# regenerated deterministically from source, so we never check it in.
+infra/terraform/.terraform-fn-*.zip
