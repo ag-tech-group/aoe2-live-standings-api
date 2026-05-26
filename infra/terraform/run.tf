@@ -6,7 +6,8 @@
 #   listener running in its lifespan so SSE clients on each instance
 #   receive nudges fanned out from the worker's writes
 #   (`LISTENER_ENABLED=true`). No pollers (`POLLING_ENABLED=false`).
-#   Scales horizontally with request traffic (`min=1 max=10`).
+#   Scales horizontally with request traffic (`min=1 max=10` normally;
+#   bumped to `max=20` for the Hera invitational per #84).
 # - **worker** (the resource below) — private singleton poller. Runs the
 #   three polling tasks against the upstream Relic API and writes to
 #   Postgres, emitting `pg_notify` on commit. No public traffic; no
@@ -38,16 +39,23 @@ resource "google_cloud_run_v2_service" "api" {
     # Each open SSE connection holds a request slot for its whole lifetime.
     # The default concurrency of 80 would cap concurrent viewers per
     # instance at 80; 800 buys headroom on each instance, and the
-    # `max_instance_count = 10` scaling below gives 8000 concurrent
+    # `max_instance_count = 20` scaling below gives 16000 concurrent
     # streams' worth of capacity.
+    #
+    # Concurrency stays at 800 (not raised alongside the instance count)
+    # to keep per-instance memory pressure off the hot path — see the
+    # memory limit below; raising both at once was flagged as needing a
+    # stress test in #84 and we chose the horizontal-scale route instead.
     max_instance_request_concurrency = 800
 
     scaling {
       # min=1 keeps a warm instance so the LISTEN/NOTIFY connection stays
-      # open continuously; max=10 lets the read tier scale with viewer
-      # traffic without the single-instance ceiling we used to have.
+      # open continuously. max=20 (raised from 10 for #84 event-window
+      # hardening) gives 800 × 20 = 16,000 concurrent SSE seats — well
+      # over the 9,000-viewer High-active projection in
+      # docs/event-traffic-cost-model.md. Revert to 10 after the event.
       min_instance_count = 1
-      max_instance_count = 10
+      max_instance_count = 20
     }
 
     volumes {
@@ -62,8 +70,16 @@ resource "google_cloud_run_v2_service" "api" {
 
       resources {
         limits = {
-          cpu    = "1"
-          memory = "512Mi"
+          cpu = "1"
+          # 1Gi (raised from 512Mi for #84 event-window hardening). At the
+          # 800-concurrent-SSE design point, 512Mi was within budget but
+          # left no margin for the Sentry SDK buffer, OTel span batcher,
+          # and the LISTEN/NOTIFY listener's state to grow under sustained
+          # load. The extra headroom costs ~$5–10/mo across scaled
+          # instances at peak and removes a memory-pressure failure mode
+          # we'd otherwise discover during the event. Revert to 512Mi
+          # after the event.
+          memory = "1Gi"
         }
         # The LISTEN connection is event-driven and needs CPU between
         # requests to deliver NOTIFY callbacks (and run its 30s ping).
