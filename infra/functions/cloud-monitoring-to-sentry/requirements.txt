@@ -1,0 +1,8 @@
+# Pinned to match the SDK major used by the API (see pyproject.toml's
+# `sentry-sdk[fastapi]>=2.20.0`). 2.x has the `push_scope` API used in
+# main.py; 1.x's surface is different.
+sentry-sdk>=2.20.0,<3.0.0
+
+# Cloud Functions 2nd gen runtime ships a recent functions-framework but
+# pinning here so local installs and unit tests match prod.
+functions-framework>=3.10.0,<4.0.0
