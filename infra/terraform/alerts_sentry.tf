@@ -41,16 +41,29 @@ resource "google_pubsub_topic" "alerts" {
 }
 
 # The Cloud Monitoring service agent publishes to the topic when an
-# alert policy attached to the pubsub channel fires. Without this
-# binding the channel apply succeeds but no messages ever land.
+# alert policy attached to the pubsub channel fires. Without IAM the
+# channel apply succeeds but no messages ever land.
+#
+# Chicken-and-egg: the agent (service-<n>@gcp-sa-monitoring-notification…)
+# is created lazily on first monitoring-API use, so a clean-project
+# apply that just hardcodes the agent's address into the IAM binding
+# 400s with "service account does not exist." `google_project_service_identity`
+# forces creation up front. Beta-only resource — see main.tf for the
+# `google-beta` provider declaration that pulls it in.
 data "google_project" "current" {
   project_id = var.project_id
+}
+
+resource "google_project_service_identity" "monitoring_notification" {
+  provider = google-beta
+  project  = var.project_id
+  service  = "monitoring-notification.googleapis.com"
 }
 
 resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
   topic  = google_pubsub_topic.alerts.name
   role   = "roles/pubsub.publisher"
-  member = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+  member = "serviceAccount:${google_project_service_identity.monitoring_notification.email}"
 }
 
 # --- Notification channel that alert policies attach to -------------------
@@ -99,6 +112,18 @@ resource "google_project_iam_member" "fn_run_invoker" {
   project = var.project_id
   role    = "roles/run.invoker"
   member  = "serviceAccount:${google_service_account.fn_alert_forwarder.email}"
+}
+
+# Cloud Build runs as the Compute Engine default SA for Cloud Functions
+# 2nd gen builds in projects predating the Aug-2024 default-builder
+# change. Without `roles/cloudbuild.builds.builder` the build fails with
+# a "missing permission on the build service account" error before any
+# function code runs. This binding lifts that, scoped narrowly to the
+# build role.
+resource "google_project_iam_member" "compute_sa_cloudbuild_builder" {
+  project = var.project_id
+  role    = "roles/cloudbuild.builds.builder"
+  member  = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
 
 # --- Function source: zip + upload ---------------------------------------
@@ -206,5 +231,9 @@ resource "google_cloudfunctions2_function" "alert_to_sentry" {
     google_secret_manager_secret_iam_member.fn_sentry_dsn_accessor,
     google_project_iam_member.fn_eventarc_receiver,
     google_project_iam_member.fn_run_invoker,
+    # The build SA IAM binding must land before the function is created
+    # — otherwise the build step fails with "missing permission on the
+    # build service account" before the function code is touched.
+    google_project_iam_member.compute_sa_cloudbuild_builder,
   ]
 }
