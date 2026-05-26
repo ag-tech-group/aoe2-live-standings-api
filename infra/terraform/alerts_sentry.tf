@@ -40,33 +40,34 @@ resource "google_pubsub_topic" "alerts" {
   name = "cloud-monitoring-alerts"
 }
 
-# The Cloud Monitoring service agent publishes to the topic when an
-# alert policy attached to the pubsub channel fires. Without IAM the
-# channel apply succeeds but no messages ever land.
+# The Cloud Monitoring notification service agent publishes to the
+# topic when an alert policy attached to the pubsub channel fires.
+# Without IAM, the channel apply succeeds but no messages ever land.
 #
 # Chicken-and-egg: the agent (service-<n>@gcp-sa-monitoring-notification…)
-# is created lazily on first monitoring-API use, so a clean-project
-# apply that just hardcodes the agent's address into the IAM binding
-# 400s with "service account does not exist." `google_project_service_identity`
-# forces creation up front. Beta-only resource — see main.tf for the
-# `google-beta` provider declaration that pulls it in.
+# is created lazily by GCP when the first pubsub-typed notification
+# channel is created in the project — it is not a Service Usage
+# service, so `google_project_service_identity` can't be used to
+# force-create it (apply errors with `SERVICE_CONFIG_NOT_FOUND` if you
+# try `monitoring-notification.googleapis.com`).
+#
+# The dependency order below is therefore:
+#
+#   pubsub topic → notification channel → (GCP creates agent here) →
+#     time_sleep → IAM binding → … alert policies
+#
+# The `time_sleep` gives the agent a short window to propagate so the
+# pubsub-IAM API can see it; without the bridge, the IAM binding races
+# the agent's creation and 400s with `service account does not exist`.
 data "google_project" "current" {
   project_id = var.project_id
 }
 
-resource "google_project_service_identity" "monitoring_notification" {
-  provider = google-beta
-  project  = var.project_id
-  service  = "monitoring-notification.googleapis.com"
-}
-
-resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
-  topic  = google_pubsub_topic.alerts.name
-  role   = "roles/pubsub.publisher"
-  member = "serviceAccount:${google_project_service_identity.monitoring_notification.email}"
-}
-
 # --- Notification channel that alert policies attach to -------------------
+#
+# Created *before* the IAM binding so its creation triggers GCP's lazy
+# spawn of the monitoring-notification service agent. The channel itself
+# doesn't need the agent to exist at create time — only at fire time.
 
 resource "google_monitoring_notification_channel" "sentry_pubsub" {
   display_name = "Sentry (via Pub/Sub forwarder)"
@@ -75,8 +76,28 @@ resource "google_monitoring_notification_channel" "sentry_pubsub" {
     topic = google_pubsub_topic.alerts.id
   }
   description = "Forwards Cloud Monitoring incidents to Sentry via the cloud-monitoring-to-sentry Cloud Function. See infra/functions/cloud-monitoring-to-sentry/README.md."
+}
 
-  depends_on = [google_pubsub_topic_iam_member.monitoring_publisher]
+# Bridge between channel creation (which triggers agent spawn) and the
+# IAM binding that references the agent. Empirically the agent appears
+# within seconds, but Cloud Monitoring's internal propagation is not
+# strictly synchronous with the channel resource's creation — the
+# sleep is the cheapest reliable smoothing of that race. Created only
+# on first apply (when the channel itself is being created).
+resource "time_sleep" "wait_for_notification_agent" {
+  depends_on      = [google_monitoring_notification_channel.sentry_pubsub]
+  create_duration = "60s"
+}
+
+resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
+  topic = google_pubsub_topic.alerts.name
+  role  = "roles/pubsub.publisher"
+  # Hardcoded agent address — same shape Google uses for the agent's
+  # email. Resolves once the notification channel above triggers the
+  # agent's lazy creation and the time_sleep clears.
+  member = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+
+  depends_on = [time_sleep.wait_for_notification_agent]
 }
 
 # --- Cloud Function service account + IAM ---------------------------------
