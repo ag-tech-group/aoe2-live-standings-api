@@ -12,6 +12,14 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 6.0"
     }
+    # `google-beta` is only used by `google_project_service_identity` in
+    # alerts_sentry.tf (the GA `google` provider doesn't expose it).
+    # Forces creation of the monitoring-notification service agent so
+    # the pubsub IAM binding can succeed on first apply.
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 6.0"
+    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
@@ -44,6 +52,15 @@ provider "google" {
   # The OrgPolicy API specifically rejects requests without a quota
   # project; rather than mutate ADC shared state via
   # `set-quota-project`, the provider declares it explicitly here.
+  user_project_override = true
+  billing_project       = var.project_id
+}
+
+# Same configuration as the GA provider above — only used for the one
+# beta-only `google_project_service_identity` resource.
+provider "google-beta" {
+  project               = var.project_id
+  region                = var.region
   user_project_override = true
   billing_project       = var.project_id
 }
