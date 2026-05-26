@@ -95,6 +95,14 @@ resource "google_cloud_run_v2_job" "migrate" {
       # image on every merge — Terraform owns the job's shape but not
       # its current image.
       template[0].template[0].containers[0].image,
+      # Every `gcloud run jobs ...` invocation (deploy, execute, update)
+      # stamps these top-level fields on the resource. Without ignoring
+      # them, each `tofu plan` shows a `client/client_version → null`
+      # diff that Terraform wants to clear, and the next gcloud call
+      # rewrites it — recurring no-op drift. Matches the same ignore
+      # on the api/worker services in run.tf.
+      client,
+      client_version,
     ]
   }
 }
