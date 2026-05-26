@@ -4,9 +4,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Team, TeamMember
+from app.models import LiveMatchPlayer, MatchState, Team, TeamMember
 from tests.conftest import (
     DEFAULT_TEST_USER_ID,
+    make_match,
     make_player,
     make_player_rating,
     make_team,
@@ -105,6 +106,90 @@ class TestTeamStandings:
         await session.commit()
         response = await client.get("/v1/tournaments/cup/teams/standings")
         assert response.headers["Cache-Control"] == "public, max-age=15"
+
+
+class TestTeamMemberIdentityAndLiveStatus:
+    """``TeamMemberRead.country`` and ``in_match`` / ``live_match_id``.
+
+    Mirrors ``TestStandingsInMatch`` in ``test_tournaments.py`` — the
+    fields are sourced from the same row + helper as the per-player
+    standings endpoint, so a member's live status here matches their
+    standings row in the same poll cycle.
+    """
+
+    async def test_country_populates_on_team_members(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1, country="kr")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        member = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ][0]
+        assert member["country"] == "kr"
+
+    async def test_in_match_true_with_live_match_id(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_match(601, state=MatchState.IN_PROGRESS, completed_at=None))
+        session.add(LiveMatchPlayer(match_id=601, profile_id=1))
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        member = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ][0]
+        assert member["in_match"] is True
+        assert member["live_match_id"] == 601
+
+    async def test_not_in_match_when_no_live_row(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        member = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ][0]
+        assert member["in_match"] is False
+        assert member["live_match_id"] is None
+
+    async def test_in_match_is_per_member_within_a_team(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Two members on the same team — one in a live match, one not.
+        # Live status must not bleed between members.
+        for profile_id in (1, 2):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=2000)
+            )
+            session.add(player)
+        session.add(make_match(602, state=MatchState.IN_PROGRESS, completed_at=None))
+        session.add(LiveMatchPlayer(match_id=602, profile_id=1))
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        members = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ]
+        status = {m["profile_id"]: (m["in_match"], m["live_match_id"]) for m in members}
+        assert status == {1: (True, 602), 2: (False, None)}
 
 
 class TestCreateTeam:

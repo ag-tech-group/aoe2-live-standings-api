@@ -6,11 +6,26 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TeamMemberRead(BaseModel):
-    """One member of a team, with their current rating on the tournament's leaderboard."""
+    """One member of a team, with their current rating + live-match status.
+
+    Shape parallels the per-player ``StandingRow`` fields the web app
+    already renders on the standings tab: ``country`` for the flag pill,
+    ``in_match`` / ``live_match_id`` for the live badge. Same source as
+    ``StandingRow`` (see ``get_team_standings`` for the query), so a
+    member's status here matches their standings row in the same poll.
+    """
 
     profile_id: int
     alias: str
+    # ISO 3166-1 alpha-2, lowercase — same shape as ``StandingRow.country``.
+    # Nullable: upstream sometimes returns players without a country set.
+    country: str | None
     current_rating: int
+    # True while the member is in a live (staging / in-progress) match,
+    # as of the last live poll (~15s cadence). ``live_match_id`` is that
+    # match's id when ``in_match`` is true, else null.
+    in_match: bool
+    live_match_id: int | None
 
 
 class TeamStandingRow(BaseModel):
