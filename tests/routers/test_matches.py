@@ -121,6 +121,18 @@ class TestListMatches:
         response = await client.get("/v1/tournaments/cup/matches", params={"limit": 500})
         assert response.status_code == 422
 
+    async def test_list_uses_split_cdn_browser_cache(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # CDN caches for 15s; browser revalidates every request — same
+        # pattern as standings/players (#96).
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/matches")
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
+        )
+
 
 class TestGetMatch:
     async def test_unknown_match_returns_404(self, client: AsyncClient, session: AsyncSession):
@@ -151,7 +163,9 @@ class TestGetMatch:
         assert payload["last_polled_at"] is not None
         assert sorted(p["profile_id"] for p in payload["players"]) == [199325, 409748]
 
-    async def test_completed_match_uses_60s_cache(self, client: AsyncClient, session: AsyncSession):
+    async def test_completed_match_uses_60s_cdn_cache(
+        self, client: AsyncClient, session: AsyncSession
+    ):
         match = make_match(1, state=MatchState.COMPLETED)
         match.players.append(make_match_player(1, profile_id=99))
         session.add(match)
@@ -159,7 +173,12 @@ class TestGetMatch:
         await session.commit()
 
         response = await client.get("/v1/tournaments/cup/matches/1")
-        assert response.headers["Cache-Control"] == "public, max-age=60"
+        # CDN holds for 60s (`s-maxage`), browser revalidates every request
+        # (`max-age=0, must-revalidate`) so admin mutations are seen
+        # immediately. See #96 + app/routers/tournaments.py for the rationale.
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=60, max-age=0, must-revalidate"
+        )
 
     async def test_in_progress_match_uses_no_store(
         self, client: AsyncClient, session: AsyncSession

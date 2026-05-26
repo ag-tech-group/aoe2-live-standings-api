@@ -17,10 +17,13 @@ from app.schemas import ListEnvelope, MatchRead, compute_last_polled_at
 
 router = APIRouter(prefix="/tournaments/{tournament_slug}/live", tags=["live"])
 
-# The live-matches poller runs every 15s; a 10s shared cache keeps
+# The live-matches poller runs every 15s; a 10s shared CDN cache keeps
 # tournament overlays close to real time while smoothing the burst from
-# multiple viewers refreshing during the same poll cycle.
-_LIVE_CACHE_CONTROL = "public, max-age=10"
+# multiple viewers refreshing during the same poll cycle. Browser
+# revalidates every request (`max-age=0, must-revalidate`) — same pattern
+# as the other live endpoints (#96); see app/routers/tournaments.py
+# for the full rationale.
+_LIVE_CACHE_CONTROL = "public, s-maxage=10, max-age=0, must-revalidate"
 
 _LIVE_STATES = (MatchState.STAGING, MatchState.IN_PROGRESS)
 

@@ -13,8 +13,11 @@ from app.schemas import LeaderboardRead, ListEnvelope, compute_last_polled_at
 router = APIRouter(prefix="/leaderboards", tags=["leaderboards"])
 
 # Leaderboard metadata changes rarely (only when Relic publishes a new
-# ladder); a 15s shared cache is plenty.
-_LEADERBOARDS_CACHE_CONTROL = "public, max-age=15"
+# ladder); a 15s shared cache is plenty. Browser revalidates every
+# request (`max-age=0, must-revalidate`) — same pattern as the other
+# live endpoints (#96); see app/routers/tournaments.py for the full
+# rationale.
+_LEADERBOARDS_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
 
 
 @router.get("")

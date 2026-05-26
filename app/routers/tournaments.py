@@ -48,8 +48,14 @@ from app.schemas import (
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
 # Standings update on the player-stats polling cadence (30s); 15s shared
-# cache keeps worst-case staleness around 45s.
-_STANDINGS_CACHE_CONTROL = "public, max-age=15"
+# cache keeps worst-case staleness around 45s. Browser revalidates every
+# request (`max-age=0, must-revalidate`) so admin mutations and
+# SSE-driven refetches always see fresh data — a plain `public, max-age=15`
+# was making the browser serve a pre-mutation snapshot for up to 15s
+# after a write (#96). The CDN still coalesces origin traffic via
+# `s-maxage=15`, which is what protects the DB at event-window scale
+# (see docs/event-traffic-cost-model.md).
+_STANDINGS_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
 
 # How many recent win/loss outcomes each standings row carries. Most-
 # recent-first; the consumer renders a compact form strip and can show
