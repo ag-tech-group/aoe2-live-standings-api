@@ -431,6 +431,7 @@ async def get_team_standings(
             TeamMember.team_id,
             TeamMember.profile_id,
             Player.alias,
+            Player.country,
             PlayerRating.current_rating,
             PlayerRating.updated_at,
         )
@@ -442,13 +443,26 @@ async def get_team_standings(
             PlayerRating.leaderboard_id == tournament.leaderboard_id,
         )
     )
+    member_rows = (await session.execute(member_stmt)).all()
+
+    # Fetch live-match status for every member in one query, using the same
+    # helper the per-player ``/standings`` endpoint uses. Sharing the helper
+    # is the reason a member's ``in_match`` here matches their standings row
+    # within the same poll cycle — both read from the same snapshot.
+    live_match_ids = await _live_match_by_profile(session, [row.profile_id for row in member_rows])
+
     members_by_team: dict[int, list[TeamMemberRead]] = {}
     timestamps: list[datetime | None] = []
-    for team_id, profile_id, alias, rating, updated_at in (
-        await session.execute(member_stmt)
-    ).all():
+    for team_id, profile_id, alias, country, rating, updated_at in member_rows:
         members_by_team.setdefault(team_id, []).append(
-            TeamMemberRead(profile_id=profile_id, alias=alias, current_rating=rating)
+            TeamMemberRead(
+                profile_id=profile_id,
+                alias=alias,
+                country=country,
+                current_rating=rating,
+                in_match=profile_id in live_match_ids,
+                live_match_id=live_match_ids.get(profile_id),
+            )
         )
         timestamps.append(updated_at)
 
