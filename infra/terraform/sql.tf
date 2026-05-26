@@ -1,4 +1,6 @@
-# Cloud SQL Postgres 16 — preview tier (db-f1-micro, shared-CPU, ~$8/mo).
+# Cloud SQL Postgres 16 — preview tier (db-f1-micro, shared-CPU, ~$8/mo)
+# normally; bumped to db-g1-small (shared-CPU, 1.7GB, ~$33/mo) for the
+# duration of the Hera invitational per #84.
 #
 # Connectivity to Cloud Run is via the built-in Cloud SQL Auth Proxy
 # (mounted as a Unix socket at /cloudsql/<connection_name>); no VPC peering
@@ -12,9 +14,17 @@ resource "google_sql_database_instance" "main" {
   settings {
     # ENTERPRISE_PLUS is the default in recent provider versions and only
     # supports `db-perf-optimized-N-*` tiers; ENTERPRISE is what allows the
-    # cheap shared-core `db-f1-micro` we want for preview.
-    edition           = "ENTERPRISE"
-    tier              = "db-f1-micro"
+    # cheap shared-core `db-f1-micro` / `db-g1-small` tiers we want for
+    # preview and event-window operation.
+    edition = "ENTERPRISE"
+    # db-g1-small (1.7GB, shared-CPU) — raised from db-f1-micro (614MB)
+    # for #84 event-window hardening. With Cloudflare absorbing polling
+    # traffic the binding DB constraint is no longer reads/sec but
+    # connection-pool memory under sustained pressure; the larger RAM
+    # absorbs that and leaves headroom for the planner cache. Tier
+    # change triggers a one-time instance restart — schedule outside
+    # the event window. Revert to db-f1-micro after the event.
+    tier              = "db-g1-small"
     availability_type = "ZONAL"
     disk_size         = 10
     disk_type         = "PD_HDD"
