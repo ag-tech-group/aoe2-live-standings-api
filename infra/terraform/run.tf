@@ -121,15 +121,19 @@ resource "google_cloud_run_v2_service" "api" {
         value = var.cors_origins
       }
 
-      # Sentry DSN — conditional. When `var.sentry_dsn` is empty (the
-      # default), no env var is set and `init_sentry()` in app code
-      # is a no-op. Supplied at apply time once the operator creates
-      # the Sentry project (see #53).
-      dynamic "env" {
-        for_each = var.sentry_dsn == "" ? [] : [1]
-        content {
-          name  = "SENTRY_DSN"
-          value = var.sentry_dsn
+      # Sentry DSN — pulled from Secret Manager via the data block in
+      # secrets.tf (see that file for the seeding recipe and rotation
+      # notes). Static block, not dynamic — the secret is the source of
+      # truth. To disable Sentry entirely, delete every version of the
+      # `sentry-dsn` secret; the next revision roll would then fail to
+      # start (loud signal), not silently boot Sentry-less.
+      env {
+        name = "SENTRY_DSN"
+        value_source {
+          secret_key_ref {
+            secret  = data.google_secret_manager_secret.sentry_dsn.secret_id
+            version = "latest"
+          }
         }
       }
 
@@ -253,13 +257,16 @@ resource "google_cloud_run_v2_service" "worker" {
         value = "false"
       }
 
-      # Sentry DSN — conditional, same as the api service. Worker
-      # exceptions (a polling task raising) want Sentry coverage too.
-      dynamic "env" {
-        for_each = var.sentry_dsn == "" ? [] : [1]
-        content {
-          name  = "SENTRY_DSN"
-          value = var.sentry_dsn
+      # Sentry DSN — same Secret Manager source as the api service. The
+      # worker wants Sentry coverage too (a polling task raising). See
+      # secrets.tf for the seeding + rotation recipe.
+      env {
+        name = "SENTRY_DSN"
+        value_source {
+          secret_key_ref {
+            secret  = data.google_secret_manager_secret.sentry_dsn.secret_id
+            version = "latest"
+          }
         }
       }
 

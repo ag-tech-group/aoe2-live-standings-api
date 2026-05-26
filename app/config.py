@@ -44,8 +44,9 @@ class Settings(BaseSettings):
 
     # Sentry DSN — empty disables Sentry initialization entirely (the
     # default in dev and tests, and the safe-state if the operator
-    # hasn't created a Sentry project yet). Supplied at apply time
-    # via Terraform `var.sentry_dsn` in prod.
+    # hasn't created a Sentry project yet). In prod, Cloud Run mounts
+    # the value from the `sentry-dsn` Secret Manager secret as the
+    # `SENTRY_DSN` env var (see infra/terraform/secrets.tf + run.tf).
     sentry_dsn: str = ""
 
     # When True, HTTPException + RequestValidationError responses use

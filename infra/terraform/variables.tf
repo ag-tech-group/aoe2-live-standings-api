@@ -69,9 +69,9 @@ variable "budget_monthly_usd" {
   default     = 100
 }
 
-variable "sentry_dsn" {
-  description = "Sentry project DSN for unhandled-exception + log-error capture. Empty string (the default) disables Sentry entirely — `init_sentry()` in app code is a no-op, and no `SENTRY_DSN` env var is set on the Cloud Run services. Supply at apply time once the operator creates the Sentry project (`tofu apply -var sentry_dsn='https://…@…ingest.sentry.io/…'`). Sensitive=true so Terraform redacts it from plan output (the DSN is quasi-public — Sentry's docs encourage embedding it in client-side code — but redaction in logs is still tidier)."
-  type        = string
-  default     = ""
-  sensitive   = true
-}
+# `sentry_dsn` variable removed — the DSN now lives in Secret Manager
+# (see `data "google_secret_manager_secret" "sentry_dsn"` in secrets.tf)
+# and is referenced by Cloud Run via `secret_key_ref` in run.tf. This
+# closes #91: a `tofu apply` without `-var sentry_dsn=…` no longer
+# silently removes the SENTRY_DSN env var from production. Rotation
+# happens by adding a new version to the secret; no TF apply needed.
