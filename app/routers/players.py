@@ -26,9 +26,12 @@ from app.schemas import (
 
 router = APIRouter(prefix="/tournaments/{tournament_slug}/players", tags=["players"])
 
-# Polling cadence for player stats is 30s; cache for 15s so a shared cache
-# never serves data more than ~45s stale in the worst case.
-_PLAYERS_CACHE_CONTROL = "public, max-age=15"
+# Polling cadence for player stats is 30s; CDN holds a shared copy for
+# 15s so worst-case staleness is ~45s. Browser revalidates every
+# request (`max-age=0, must-revalidate`) so admin mutations and
+# SSE-driven refetches always see fresh data (#96). See the matching
+# constant in app/routers/tournaments.py for the full rationale.
+_PLAYERS_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
 
 
 @router.get("")

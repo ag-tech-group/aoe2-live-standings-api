@@ -18,14 +18,20 @@ from app.schemas import ListEnvelope, MatchDetail, MatchRead, compute_last_polle
 router = APIRouter(prefix="/tournaments/{tournament_slug}/matches", tags=["matches"])
 
 # List endpoint cache: completed and in-progress mixed; 15s is the same
-# tier as players/standings.
-_MATCHES_LIST_CACHE_CONTROL = "public, max-age=15"
+# tier as players/standings. Browser revalidates every request
+# (`max-age=0, must-revalidate`) — same pattern as the other live
+# endpoints (#96); see app/routers/tournaments.py for the full rationale.
+_MATCHES_LIST_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
 
 # Completed match details rarely change (only `updated_at` ticks on a
-# refresh poll), so a minute of shared cache is safe.
-_COMPLETED_MATCH_CACHE_CONTROL = "public, max-age=60"
+# refresh poll), so a minute of shared cache is safe. Browser still
+# revalidates (`max-age=0`) for #96 consistency — `must-revalidate`
+# means the browser may keep a stale copy but must check before using.
+_COMPLETED_MATCH_CACHE_CONTROL = "public, s-maxage=60, max-age=0, must-revalidate"
 
-# In-progress matches change every poll cycle; refuse to cache them.
+# In-progress matches change every poll cycle; refuse to cache them
+# anywhere — no s-maxage either, since CDN coalescing buys nothing
+# when the next poll could land within the cache window.
 _IN_PROGRESS_MATCH_CACHE_CONTROL = "no-store"
 
 

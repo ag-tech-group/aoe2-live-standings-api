@@ -44,7 +44,10 @@ class TestTournamentLive:
         assert items == []
 
     async def test_cache_control_header(self, client: AsyncClient, session: AsyncSession):
+        # Same split as standings (#96) — see test_tournaments.py for the why.
         session.add(make_tournament("cup"))
         await session.commit()
         response = await client.get("/v1/tournaments/cup/live")
-        assert response.headers["Cache-Control"] == "public, max-age=10"
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=10, max-age=0, must-revalidate"
+        )
