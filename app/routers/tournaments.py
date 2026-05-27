@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
+from app.cache import apply_live_cache_control
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import (
@@ -47,15 +48,12 @@ from app.schemas import (
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
-# Standings update on the player-stats polling cadence (30s); 15s shared
-# cache keeps worst-case staleness around 45s. Browser revalidates every
-# request (`max-age=0, must-revalidate`) so admin mutations and
-# SSE-driven refetches always see fresh data — a plain `public, max-age=15`
-# was making the browser serve a pre-mutation snapshot for up to 15s
-# after a write (#96). The CDN still coalesces origin traffic via
-# `s-maxage=15`, which is what protects the DB at event-window scale
-# (see docs/event-traffic-cost-model.md).
-_STANDINGS_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
+# Standings (per-player and per-team) update on the player-stats polling
+# cadence (30s); 15s shared cache keeps worst-case viewer staleness around
+# 45s. Admins reading right after a roster mutation get `private, no-store`
+# instead — see app/cache.py for the full two-audience contract and #105
+# for the symptom that motivated the auth-aware split.
+_STANDINGS_CDN_SECONDS = 15
 
 # Tournament metadata (name, dates, leaderboard, slug). Same split-cache
 # pattern as standings: CDN holds for 15s, browser always revalidates.
@@ -357,6 +355,7 @@ async def _tournament_record_by_profile(
 
 @router.get("/{tournament_slug}/standings")
 async def get_standings(
+    request: Request,
     response: Response,
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
@@ -367,7 +366,7 @@ async def get_standings(
     to its ``leaderboard_id``. ``recent_results`` and live-match status are
     folded in by two further queries over the same standing set.
     """
-    response.headers["Cache-Control"] = _STANDINGS_CACHE_CONTROL
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
     roster = select(TournamentPlayer.profile_id).where(
         TournamentPlayer.tournament_id == tournament.id
@@ -424,6 +423,7 @@ async def get_standings(
 
 @router.get("/{tournament_slug}/teams/standings")
 async def get_team_standings(
+    request: Request,
     response: Response,
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
@@ -436,7 +436,7 @@ async def get_team_standings(
     omitted. Teams are optional — a tournament with none returns an empty
     list. Sorted by combined sum desc.
     """
-    response.headers["Cache-Control"] = _STANDINGS_CACHE_CONTROL
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
     teams = (
         (await session.execute(select(Team).where(Team.tournament_id == tournament.id)))

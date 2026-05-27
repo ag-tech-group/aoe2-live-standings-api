@@ -89,14 +89,29 @@ class TestListPlayers:
         assert len(items) == 1
         assert items[0]["ratings"] == []
 
-    async def test_cache_control_header(self, client: AsyncClient, session: AsyncSession):
-        # Same split as standings (#96) — see test_tournaments.py for the why.
+    async def test_cache_control_header_unauthenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Viewer path: same split as standings (#96) — see test_tournaments.py.
         session.add(make_tournament("cup"))
         await session.commit()
         response = await client.get("/v1/tournaments/cup/players")
         assert (
             response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
         )
+        assert response.headers["Vary"] == "Cookie"
+
+    async def test_cache_control_header_authenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Admin path: cookie presence flips to `private, no-store` so
+        # roster mutations (#105) are reflected on the next read.
+        session.add(make_tournament("cup"))
+        await session.commit()
+        client.cookies.set("criticalbit_access", "any-value")
+        response = await client.get("/v1/tournaments/cup/players")
+        assert response.headers["Cache-Control"] == "private, no-store"
+        assert response.headers["Vary"] == "Cookie"
 
 
 class TestGetPlayer:

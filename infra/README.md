@@ -139,6 +139,38 @@ done
 # Expected: MISS on #1, HIT (same x-request-id) on #2 and #3.
 ```
 
+### Cloudflare Cache Rule — admin bypass (cookie present)
+
+The rule above lets CF cache live-endpoint responses for viewers, which is what protects origin at event-window scale. But **admins reading right after a mutation must skip the edge cache** — otherwise CF serves the cached viewer response (populated by recent viewer load) and the admin sees stale data until `s-maxage` elapses. The origin's `private, no-store` Cache-Control on authenticated requests can't fix this on its own: CF's cache lookup happens before origin is consulted, and CF's default cache key is URL-only (no cookies), so the cookie that distinguishes admin from viewer is invisible to the cache.
+
+A second Cache Rule, **ordered above** the one above, bypasses cache when the access cookie is present:
+
+- **Location in dashboard:** Caching → Cache Rules (this rule must be **first** in the list — rules run top-down and the first match wins)
+- **Name:** `aoe2-live-standings-api: bypass cache for authenticated requests`
+- **Match (all required):**
+  - Hostname **equals** `aoe2-live-standings-api.criticalbit.gg`
+  - Cookie `criticalbit_access` value matches regex `.+` (i.e., any non-empty value — "cookie is present")
+- **Then:**
+  - Cache eligibility: **Bypass cache**
+
+Why "value matches regex `.+`" rather than just "cookie exists": CF's UI doesn't expose a bare "cookie exists" predicate, but the regex form is the documented equivalent.
+
+The two-rule setup means:
+
+- Viewer request (no `criticalbit_access` cookie) → first rule doesn't match → falls to second rule → cached per origin's `Cache-Control`.
+- Admin request (cookie present) → first rule matches → bypass cache entirely → origin always sees the request → fresh data.
+
+**Verify via:**
+
+```sh
+URL=https://aoe2-live-standings-api.criticalbit.gg/v1/tournaments/default/players
+# Viewer-path: should populate then hit cache
+curl -sI --max-time 8 "$URL" | grep -iE "cf-cache-status|cache-control"  # MISS or HIT
+# Admin-path: should bypass on every request (substitute any non-empty value)
+curl -sI --max-time 8 -H "Cookie: criticalbit_access=test" "$URL" | grep -iE "cf-cache-status|cache-control"
+# Expected: cf-cache-status: BYPASS on every admin-path request.
+```
+
 ### SSE compatibility through Cloudflare
 
 Cloudflare's free tier supports `text/event-stream` and respects our 20s heartbeat (`_HEARTBEAT_INTERVAL_SECONDS` in `app/routers/stream.py`) through the proxy. The 100s default idle-timeout on free plans is well above the heartbeat cadence, so connections stay healthy indefinitely. The SSE endpoint sends `Cache-Control: no-store` *and* is excluded from the Cache Rule above — both prevent CF from buffering the stream.
@@ -148,7 +180,8 @@ Cloudflare's free tier supports `text/event-stream` and respects our 20s heartbe
 Each piece of the CF setup can be undone independently in the dashboard (no DNS TTL wait — changes propagate in seconds):
 
 - **Proxy mode** — toggle the DNS record from orange-cloud back to **DNS-only (grey-cloud)**. Origin connectivity is unaffected; only edge caching and CF routing are bypassed.
-- **Cache Rule** — disable or delete the rule. CF will fall back to the static-asset default (no API caching), but the proxy remains in path.
+- **Cache Rule (respect-origin)** — disable or delete. CF falls back to the static-asset default (no API caching), but the proxy remains in path.
+- **Cache Rule (admin-bypass)** — disable or delete. Admin requests would then hit the same cached responses as viewers, reintroducing #105's read-after-write staleness. The origin still sends `private, no-store` for authenticated callers, but CF answers from cache before consulting origin headers.
 - **SSL mode** — leave at Full/Strict; don't drop to Flexible (see above).
 
 ## What's *not* in Terraform

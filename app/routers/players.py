@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
+from app.cache import apply_live_cache_control
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Match, MatchPlayer, Player, Tournament, TournamentPlayer
@@ -27,15 +28,16 @@ from app.schemas import (
 router = APIRouter(prefix="/tournaments/{tournament_slug}/players", tags=["players"])
 
 # Polling cadence for player stats is 30s; CDN holds a shared copy for
-# 15s so worst-case staleness is ~45s. Browser revalidates every
-# request (`max-age=0, must-revalidate`) so admin mutations and
-# SSE-driven refetches always see fresh data (#96). See the matching
-# constant in app/routers/tournaments.py for the full rationale.
-_PLAYERS_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
+# 15s so worst-case viewer staleness is ~45s. Admins reading right after
+# a roster mutation get `private, no-store` instead — see app/cache.py
+# for the full two-audience contract and #105 for the symptom that
+# motivated the auth-aware split.
+_PLAYERS_CDN_SECONDS = 15
 
 
 @router.get("")
 async def list_players(
+    request: Request,
     response: Response,
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
@@ -51,7 +53,7 @@ async def list_players(
     the response shape stable as a player's leaderboard participation
     changes.
     """
-    response.headers["Cache-Control"] = _PLAYERS_CACHE_CONTROL
+    apply_live_cache_control(request, response, cdn_seconds=_PLAYERS_CDN_SECONDS)
 
     roster = select(TournamentPlayer.profile_id).where(
         TournamentPlayer.tournament_id == tournament.id
@@ -85,6 +87,7 @@ async def list_players(
 @router.get("/{profile_id}")
 async def get_player(
     profile_id: int,
+    request: Request,
     response: Response,
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
@@ -100,7 +103,7 @@ async def get_player(
     404 if the profile isn't on this tournament's roster. Matches are
     joined via ``MatchPlayer.profile_id`` (no FK back to ``Player``).
     """
-    response.headers["Cache-Control"] = _PLAYERS_CACHE_CONTROL
+    apply_live_cache_control(request, response, cdn_seconds=_PLAYERS_CDN_SECONDS)
 
     in_roster = (
         await session.execute(
