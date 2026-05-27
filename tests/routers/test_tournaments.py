@@ -71,6 +71,18 @@ class TestGetTournamentDetail:
     async def test_unknown_slug_returns_404(self, client: AsyncClient):
         assert (await client.get("/v1/tournaments/nope")).status_code == 404
 
+    async def test_cache_control_header(self, client: AsyncClient, session: AsyncSession):
+        # Same split-cache posture as the live endpoints (#96 / #104).
+        # Tournament metadata is admin-mutated via PATCH, so the browser
+        # must always revalidate even though the data changes rarely.
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup")
+        assert response.status_code == 200
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
+        )
+
 
 class TestTournamentStandings:
     async def test_unknown_tournament_returns_404(self, client: AsyncClient):

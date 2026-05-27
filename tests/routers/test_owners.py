@@ -58,6 +58,21 @@ class TestListTournamentOwners:
         assert [o["user_id"] for o in body] == [DEFAULT_TEST_USER_ID, OTHER_USER_ID]
         assert all("created_at" in o for o in body)
 
+    async def test_cache_control_is_no_store(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # Admin-only, must reflect grant/revoke mutations immediately.
+        # The global cache middleware would otherwise stamp
+        # `public, max-age=3600`, pinning both browser and CDN to a
+        # stale owners list for up to an hour after a revoke.
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.get("/v1/tournaments/cup/owners")
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+
 
 class TestGrantTournamentOwner:
     """POST /v1/tournaments/{slug}/owners — owner-gated."""

@@ -93,3 +93,16 @@ class TestGetMe:
         assert cup["start_date"].startswith("2026-06-01")
         # grand_finals_date is part of TournamentRead (post-#44).
         assert "grand_finals_date" in cup
+
+    async def test_cache_control_is_private_no_store(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # /v1/me is per-user content. The global cache middleware would
+        # otherwise stamp `public, max-age=3600`, which (a) caches stale
+        # admin-grant state across mutations and (b) is structurally
+        # unsafe for shared caches like Cloudflare to serve one user's
+        # response to another. The handler sets an explicit override.
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.get("/v1/me")
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "private, no-store"
