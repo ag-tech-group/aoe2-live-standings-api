@@ -57,6 +57,16 @@ router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 # (see docs/event-traffic-cost-model.md).
 _STANDINGS_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
 
+# Tournament metadata (name, dates, leaderboard, slug). Same split-cache
+# pattern as standings: CDN holds for 15s, browser always revalidates.
+# Without this override the endpoint would inherit the middleware's
+# `public, max-age=3600`, which pins the admin's read-after-write to
+# the pre-PATCH snapshot for up to an hour (#104). Metadata changes
+# rarely so a longer `s-maxage` would coalesce more aggressively, but
+# the same 15s used elsewhere keeps the constant simple and the admin
+# UX bounded.
+_TOURNAMENT_DETAIL_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
+
 # How many recent win/loss outcomes each standings row carries. Most-
 # recent-first; the consumer renders a compact form strip and can show
 # fewer client-side.
@@ -147,9 +157,11 @@ async def create_tournament(
 
 @router.get("/{tournament_slug}")
 async def get_tournament_detail(
+    response: Response,
     tournament: Tournament = Depends(get_tournament),
 ) -> TournamentRead:
     """A single tournament's metadata."""
+    response.headers["Cache-Control"] = _TOURNAMENT_DETAIL_CACHE_CONTROL
     return TournamentRead.model_validate(tournament)
 
 

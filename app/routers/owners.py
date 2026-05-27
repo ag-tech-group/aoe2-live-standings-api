@@ -13,7 +13,7 @@ beyond Cloud Logging's request log). Revoking the *last* owner is a
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +27,20 @@ from app.schemas import TournamentOwnerCreate, TournamentOwnerRead
 
 router = APIRouter(prefix="/tournaments/{tournament_slug}/owners", tags=["owners"])
 
+# Admin-only, low-traffic, must reflect grant/revoke mutations on the
+# very next request — same posture as the in-progress match detail at
+# `_IN_PROGRESS_MATCH_CACHE_CONTROL` in matches.py. Without this, the
+# global `cache_control_middleware` in app/main.py stamps
+# `public, max-age=3600`, which pins both browser and CDN to a stale
+# owners list for up to an hour after a revoke. Fix lives at the
+# endpoint until the middleware default is tightened separately.
+_OWNERS_LIST_CACHE_CONTROL = "no-store"
+
 
 @router.get("")
 async def list_tournament_owners(
     request: Request,
+    response: Response,
     tournament: Tournament = Depends(require_tournament_owner),
     session: AsyncSession = Depends(get_async_session),
 ) -> list[TournamentOwnerRead]:
@@ -47,6 +57,7 @@ async def list_tournament_owners(
     is unreachable the enrichment fields fall back to ``null`` and the
     bare ``user_id`` / ``created_at`` rows still ship.
     """
+    response.headers["Cache-Control"] = _OWNERS_LIST_CACHE_CONTROL
     stmt = (
         select(TournamentOwner)
         .where(TournamentOwner.tournament_id == tournament.id)

@@ -11,7 +11,7 @@ All routes here are auth-required.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,9 +23,23 @@ from app.schemas.tournament import TournamentRead
 
 router = APIRouter(prefix="/me", tags=["me"])
 
+# Per-user response — never cache anywhere. `private` keeps shared
+# caches (CDN, corporate proxies) from storing one user's response and
+# serving it to another (the response body is keyed to the JWT `sub`
+# but the URL is not). `no-store` keeps the browser from holding it
+# across a session — admin-grant + revoke mutations need to be
+# reflected on the next page load with no hard-reload required.
+#
+# Without this, the global `cache_control_middleware` in app/main.py
+# stamps `public, max-age=3600` (the catch-all default for 200 GETs),
+# which is structurally wrong for per-user content. Fix lives at the
+# endpoint until the middleware default is tightened separately.
+_ME_CACHE_CONTROL = "private, no-store"
+
 
 @router.get("")
 async def get_me(
+    response: Response,
     user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> MeRead:
@@ -38,9 +52,10 @@ async def get_me(
     for a non-admin user.
 
     Cheap on prod scale (one indexed join), so the frontend can call
-    on every page load. If that ever becomes a hot path, layer a
-    short-TTL `Cache-Control: private` here.
+    on every page load. See ``_ME_CACHE_CONTROL`` above for why we
+    can't fall through to the middleware default here.
     """
+    response.headers["Cache-Control"] = _ME_CACHE_CONTROL
     stmt = (
         select(Tournament)
         .join(TournamentOwner, TournamentOwner.tournament_id == Tournament.id)
