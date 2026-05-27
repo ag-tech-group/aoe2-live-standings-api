@@ -158,17 +158,34 @@ class TestTournamentStandings:
         assert row["country"] == "ca"
         assert row["current_rating"] == 2788
 
-    async def test_cache_control_header(self, client: AsyncClient, session: AsyncSession):
-        # `s-maxage=15` lets the CDN coalesce origin traffic at event-window
-        # scale (docs/event-traffic-cost-model.md); `max-age=0, must-revalidate`
-        # forces the browser to always check, so admin mutations and SSE
-        # refetches see fresh data (#96).
+    async def test_cache_control_header_unauthenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Viewer path: `s-maxage=15` lets CF coalesce origin traffic at
+        # event-window scale (docs/event-traffic-cost-model.md);
+        # `max-age=0, must-revalidate` forces the browser to always
+        # check (#96).
         session.add(make_tournament("cup"))
         await session.commit()
         response = await client.get("/v1/tournaments/cup/standings")
         assert (
             response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
         )
+        assert response.headers["Vary"] == "Cookie"
+
+    async def test_cache_control_header_authenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Admin path: cookie presence flips Cache-Control to
+        # `private, no-store` so the admin's read-after-write skips
+        # every cache layer (#105). The cookie need only be present;
+        # the helper does not verify the JWT.
+        session.add(make_tournament("cup"))
+        await session.commit()
+        client.cookies.set("criticalbit_access", "any-value")
+        response = await client.get("/v1/tournaments/cup/standings")
+        assert response.headers["Cache-Control"] == "private, no-store"
+        assert response.headers["Vary"] == "Cookie"
 
 
 class TestStandingsRecentResults:
