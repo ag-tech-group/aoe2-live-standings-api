@@ -106,10 +106,55 @@ gcloud beta run domain-mappings create \
 
 This prints DNS records (typically a CNAME) that need to be added in the Cloudflare dashboard. Cloud Run provisions a managed TLS cert automatically once DNS verification completes (usually <15 minutes).
 
+### Cloudflare proxy mode (orange-cloud)
+
+The DNS record for `aoe2-live-standings-api.criticalbit.gg` is set to **proxied** (orange-cloud, not grey-cloud) so Cloudflare's edge cache can absorb polling traffic. This is the cheapest single lever against the event-window failure mode modeled in [`docs/event-traffic-cost-model.md`](../docs/event-traffic-cost-model.md) and tracked under #84: the live endpoints set `Cache-Control: public, s-maxage=15, max-age=0, must-revalidate` (see `_STANDINGS_CACHE_CONTROL` in `app/routers/tournaments.py` and the matching constants in `players.py`, `leaderboards.py`, `live.py`, `matches.py`), so a proxy that honors `s-maxage` coalesces viewer traffic into ~4 origin requests/minute per endpoint regardless of concurrent viewer count.
+
+**SSL mode** in the Cloudflare dashboard is set to **Full** (or stricter) — Cloudflare connects to the origin over TLS, validating against Cloud Run's Google-issued cert. **Do not set this to "Flexible"**: Cloud Run rejects plain-HTTP origin connections and the site would 526 / 502 the moment proxy mode is on. The edge cert is a Let's Encrypt wildcard (`*.criticalbit.gg`) configured on the zone — auto-renewing.
+
+### Cloudflare Cache Rule (required for API caching)
+
+**Without this rule, the orange-cloud proxy gives no caching benefit on our endpoints.** Cloudflare's default is to cache only a static-asset allowlist (CSS, JS, images, fonts); API responses get `cf-cache-status: DYNAMIC` (= ineligible) regardless of what `Cache-Control` the origin sends. To make CF respect our `s-maxage`, the zone has a Cache Rule:
+
+- **Location in dashboard:** Caching → Cache Rules
+- **Name:** `aoe2-live-standings-api: respect origin Cache-Control`
+- **Match (both required):**
+  - Hostname **equals** `aoe2-live-standings-api.criticalbit.gg`
+  - URI Path **does not start with** `/v1/stream`  (defense-in-depth — the stream sends `Cache-Control: no-store`, but excluding by path means a future regression to that header can't have CF accidentally buffer the SSE stream)
+- **Then:**
+  - Cache eligibility: **Eligible for cache**
+  - Edge TTL: **Use cache-control header from origin, bypass cache if not present**
+  - Browser TTL: **Use cache-control header from origin, bypass cache if not present**
+
+The "bypass if not present" choice is deliberate: the app's `cache_control_middleware` (`app/main.py`) stamps `public, max-age=3600` on every successful GET that doesn't set its own header, so the only response without `Cache-Control` is a non-200 — and we never want CF caching errors (5xx) past the origin's recovery.
+
+**Verify via:**
+
+```sh
+URL=https://aoe2-live-standings-api.criticalbit.gg/v1/tournaments/default/standings
+for i in 1 2 3; do
+  curl -sI --max-time 8 "$URL" | grep -iE "cf-cache-status|x-request-id"
+  sleep 2
+done
+# Expected: MISS on #1, HIT (same x-request-id) on #2 and #3.
+```
+
+### SSE compatibility through Cloudflare
+
+Cloudflare's free tier supports `text/event-stream` and respects our 20s heartbeat (`_HEARTBEAT_INTERVAL_SECONDS` in `app/routers/stream.py`) through the proxy. The 100s default idle-timeout on free plans is well above the heartbeat cadence, so connections stay healthy indefinitely. The SSE endpoint sends `Cache-Control: no-store` *and* is excluded from the Cache Rule above — both prevent CF from buffering the stream.
+
+### Rollback
+
+Each piece of the CF setup can be undone independently in the dashboard (no DNS TTL wait — changes propagate in seconds):
+
+- **Proxy mode** — toggle the DNS record from orange-cloud back to **DNS-only (grey-cloud)**. Origin connectivity is unaffected; only edge caching and CF routing are bypassed.
+- **Cache Rule** — disable or delete the rule. CF will fall back to the static-asset default (no API caching), but the proxy remains in path.
+- **SSL mode** — leave at Full/Strict; don't drop to Flexible (see above).
+
 ## What's *not* in Terraform
 
 - **Image deploys** — `gcloud run deploy --image ...` (see above).
-- **Cloudflare DNS records** — manual via the Cloudflare dashboard. We don't manage the criticalbit.gg zone from Terraform.
+- **Cloudflare DNS records, proxy mode, SSL mode, and Cache Rule** — all configured manually in the Cloudflare dashboard. The `criticalbit.gg` zone is not Terraform-managed. See the "Custom domain" section above for what's configured and how to re-create it.
 - **Initial GCS state bucket** — created imperatively once, before any `tofu init` could run. Bootstrap chicken-and-egg.
 - **Project + billing link** — same, one-shot bootstrap.
 
