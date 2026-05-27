@@ -147,13 +147,16 @@ A second Cache Rule, **ordered above** the one above, bypasses cache when the ac
 
 - **Location in dashboard:** Caching → Cache Rules (this rule must be **first** in the list — rules run top-down and the first match wins)
 - **Name:** `aoe2-live-standings-api: bypass cache for authenticated requests`
-- **Match (all required):**
-  - Hostname **equals** `aoe2-live-standings-api.criticalbit.gg`
-  - Cookie `criticalbit_access` value matches regex `.+` (i.e., any non-empty value — "cookie is present")
+- **Match (raw expression form, easiest to verify):**
+  ```
+  (http.host eq "aoe2-live-standings-api.criticalbit.gg" and http.cookie contains "criticalbit_access=")
+  ```
 - **Then:**
   - Cache eligibility: **Bypass cache**
 
-Why "value matches regex `.+`" rather than just "cookie exists": CF's UI doesn't expose a bare "cookie exists" predicate, but the regex form is the documented equivalent.
+The trailing `=` in `"criticalbit_access="` pins the substring match to the cookie name's `=` separator, so we can't false-positive on some other cookie that happens to contain `criticalbit_access` as a substring (extremely unlikely, but cheap defense). `contains` on the raw `http.cookie` header works on every CF plan; the `matches` (regex) operator is gated to Pro+ on some fields, so `contains` is the more portable choice.
+
+The visual builder also works (Hostname row + a row matching the cookie header), but the raw expression form above is the source of truth — paste it via the "Edit expression" toggle to skip translating between builder fields.
 
 The two-rule setup means:
 
