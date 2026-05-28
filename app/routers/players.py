@@ -22,6 +22,7 @@ from app.schemas import (
     PlayerDetail,
     PlayerRead,
     RosterPlayerCreate,
+    RosterPlayerUpdate,
     compute_last_polled_at,
 )
 
@@ -218,4 +219,45 @@ async def remove_roster_player(
         tournament_slug=tournament.slug,
         tournament_id=tournament.id,
         target_profile_id=profile_id,
+    )
+
+
+@router.patch("/{profile_id}", status_code=204)
+@limiter.limit("20/minute")
+async def update_roster_player(
+    request: Request,
+    profile_id: int,
+    payload: RosterPlayerUpdate,
+    tournament: Tournament = Depends(require_tournament_owner),
+    actor_user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
+) -> None:
+    """Edit a roster entry's curated fields — owner-gated.
+
+    Currently just ``stream_url``: the player's official stream link, shown
+    in the standings "Watch Live" column. Pass a URL to set it, or ``null``
+    to clear it. 404 if the profile isn't on this tournament's roster. The
+    polled ``Player`` / rating rows are untouched — this writes only the
+    organizer-curated roster row.
+    """
+    entry = (
+        await session.execute(
+            select(TournamentPlayer).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.profile_id == profile_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Player not found in this tournament")
+
+    entry.stream_url = payload.stream_url
+    await session.commit()
+    audit(
+        AuditAction.ROSTER_UPDATE,
+        actor_user_id=actor_user_id,
+        tournament_slug=tournament.slug,
+        tournament_id=tournament.id,
+        target_profile_id=profile_id,
+        stream_url=payload.stream_url,
     )

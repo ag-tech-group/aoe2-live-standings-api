@@ -40,6 +40,7 @@ class AuditAction(StrEnum):
 
     ROSTER_ADD = "roster_add"
     ROSTER_REMOVE = "roster_remove"
+    ROSTER_UPDATE = "roster_update"
 
     TEAM_CREATE = "team_create"
     TEAM_UPDATE = "team_update"

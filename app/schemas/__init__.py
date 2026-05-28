@@ -6,7 +6,13 @@ from app.schemas.leaderboard import (
     TournamentRecord,
 )
 from app.schemas.match import MatchDetail, MatchPlayerRead, MatchRead
-from app.schemas.player import PlayerDetail, PlayerRatingRead, PlayerRead, RosterPlayerCreate
+from app.schemas.player import (
+    PlayerDetail,
+    PlayerRatingRead,
+    PlayerRead,
+    RosterPlayerCreate,
+    RosterPlayerUpdate,
+)
 from app.schemas.team import (
     TeamCreate,
     TeamMemberCreate,
@@ -33,6 +39,7 @@ __all__ = [
     "PlayerRatingRead",
     "PlayerRead",
     "RosterPlayerCreate",
+    "RosterPlayerUpdate",
     "StandingRow",
     "StandingTeam",
     "TeamCreate",

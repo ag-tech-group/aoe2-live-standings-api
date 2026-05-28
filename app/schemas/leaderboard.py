@@ -77,6 +77,9 @@ class StandingRow(BaseModel):
     # team. The standings table renders this in place of the global ladder
     # rank; mirrors the id + display strings on ``TeamStandingRow``.
     team: StandingTeam | None
+    # The player's official stream link for this tournament (organizer-set
+    # on the roster), or null. Powers the standings "Watch Live" column.
+    stream_url: str | None
     current_rating: int
     max_rating: int
     wins: int

@@ -227,6 +227,31 @@ class TestTournamentStandings:
         assert grubby["initials"] == "G"
         assert isinstance(grubby["team_id"], int)
 
+    async def test_stream_url_folded_onto_standings_rows(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A roster player with a stream link set carries it on their row;
+        # a player with none carries null.
+        for profile_id, rating in ((1, 2500), (2, 2400)):
+            player = make_player(profile_id, alias=f"p{profile_id}")
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=rating)
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        for tracked in tournament.tracked_players:
+            if tracked.profile_id == 1:
+                tracked.stream_url = "https://twitch.tv/p1"
+        session.add(tournament)
+        await session.commit()
+
+        rows = {
+            row["profile_id"]: row
+            for row in (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        }
+        assert rows[1]["stream_url"] == "https://twitch.tv/p1"
+        assert rows[2]["stream_url"] is None
+
 
 class TestStandingsRecentResults:
     """recent_results: per-player recent win/loss form on the standings row."""

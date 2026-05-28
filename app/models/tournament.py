@@ -66,6 +66,12 @@ class TournamentPlayer(Base):
         primary_key=True,
     )
     profile_id: Mapped[int] = mapped_column(primary_key=True)
+    # Optional official stream link for this player in this tournament, set
+    # by an owner via PATCH and shown in the standings "Watch Live" column.
+    # Organizer-curated: the poller never writes this table, so the link
+    # survives every poll cycle (unlike a column on the upstream-owned
+    # `players` table would).
+    stream_url: Mapped[str | None]
 
     tournament: Mapped[Tournament] = relationship(back_populates="tracked_players")
 
