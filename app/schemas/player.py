@@ -44,6 +44,10 @@ class PlayerRead(BaseModel):
     region_id: int
     clan_name: str | None
     updated_at: datetime
+    # The player's stream link for THIS tournament, folded in by the
+    # tournament-scoped roster endpoints (the field lives on
+    # `tournament_players`, not the `Player` model). Null when unset.
+    stream_url: str | None = None
     ratings: list[PlayerRatingRead]
 
 

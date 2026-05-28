@@ -113,6 +113,22 @@ class TestListPlayers:
         assert response.headers["Cache-Control"] == "private, no-store"
         assert response.headers["Vary"] == "Cookie"
 
+    async def test_list_includes_stream_url(self, client: AsyncClient, session: AsyncSession):
+        # The per-tournament stream link is folded onto the roster list:
+        # set on one player, null on the other.
+        session.add_all([make_player(1, alias="a"), make_player(2, alias="b")])
+        tournament = make_tournament("cup", profile_ids=[1, 2])
+        for tracked in tournament.tracked_players:
+            if tracked.profile_id == 1:
+                tracked.stream_url = "https://twitch.tv/p1"
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/players")).json()["items"]
+        by_id = {p["profile_id"]: p for p in items}
+        assert by_id[1]["stream_url"] == "https://twitch.tv/p1"
+        assert by_id[2]["stream_url"] is None
+
 
 class TestGetPlayer:
     async def test_profile_outside_roster_returns_404(
@@ -166,6 +182,17 @@ class TestGetPlayer:
         await session.commit()
         response = await client.get("/v1/tournaments/cup/players/1", params={"match_limit": 999})
         assert response.status_code == 422
+
+    async def test_detail_includes_stream_url(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1, alias="Hera")
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1])
+        tournament.tracked_players[0].stream_url = "https://twitch.tv/hera"
+        session.add(tournament)
+        await session.commit()
+
+        payload = (await client.get("/v1/tournaments/cup/players/1")).json()
+        assert payload["stream_url"] == "https://twitch.tv/hera"
 
 
 class TestAddRosterPlayer:

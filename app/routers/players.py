@@ -67,10 +67,23 @@ async def list_players(
     )
     players = (await session.execute(stmt)).scalars().all()
 
+    # Fold in the per-tournament stream links (stored on `tournament_players`,
+    # not `Player`) so the admin roster view can show/pre-fill current links.
+    stream_url_rows = (
+        await session.execute(
+            select(TournamentPlayer.profile_id, TournamentPlayer.stream_url).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.stream_url.is_not(None),
+            )
+        )
+    ).all()
+    stream_urls = dict(stream_url_rows)
+
     items: list[PlayerRead] = []
     timestamps: list[datetime | None] = []
     for player in players:
         player_read = PlayerRead.model_validate(player)
+        player_read.stream_url = stream_urls.get(player.profile_id)
         if leaderboard_id is not None:
             player_read.ratings = [
                 r for r in player_read.ratings if r.leaderboard_id == leaderboard_id
@@ -106,15 +119,15 @@ async def get_player(
     """
     apply_live_cache_control(request, response, cdn_seconds=_PLAYERS_CDN_SECONDS)
 
-    in_roster = (
+    roster_entry = (
         await session.execute(
-            select(TournamentPlayer.profile_id).where(
+            select(TournamentPlayer).where(
                 TournamentPlayer.tournament_id == tournament.id,
                 TournamentPlayer.profile_id == profile_id,
             )
         )
-    ).first()
-    if in_roster is None:
+    ).scalar_one_or_none()
+    if roster_entry is None:
         raise HTTPException(status_code=404, detail="Player not found in this tournament")
 
     player_stmt = (
@@ -144,6 +157,7 @@ async def get_player(
         update={
             "last_polled_at": compute_last_polled_at(timestamps),
             "recent_matches": recent_matches,
+            "stream_url": roster_entry.stream_url,
         }
     )
 
