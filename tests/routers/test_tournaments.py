@@ -199,6 +199,34 @@ class TestTournamentStandings:
         assert response.headers["Cache-Control"] == "private, no-store"
         assert response.headers["Vary"] == "Cookie"
 
+    async def test_team_folded_onto_standings_rows(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Two roster players: one on a team, one on none. The teamed player's
+        # row carries the team's id + display strings; the other carries null.
+        for profile_id, rating in ((1, 2500), (2, 2400)):
+            player = make_player(profile_id, alias=f"p{profile_id}")
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=rating)
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team("Grubby", profile_ids=[1], initials="G")]
+        session.add(tournament)
+        await session.commit()
+
+        rows = {
+            row["profile_id"]: row
+            for row in (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        }
+        assert rows[2]["team"] is None
+        grubby = rows[1]["team"]
+        assert grubby is not None
+        assert set(grubby) == {"team_id", "name", "initials"}
+        assert grubby["name"] == "Grubby"
+        assert grubby["initials"] == "G"
+        assert isinstance(grubby["team_id"], int)
+
 
 class TestStandingsRecentResults:
     """recent_results: per-player recent win/loss form on the standings row."""

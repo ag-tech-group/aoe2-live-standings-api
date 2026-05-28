@@ -37,6 +37,7 @@ from app.models import (
 from app.schemas import (
     ListEnvelope,
     StandingRow,
+    StandingTeam,
     TeamMemberRead,
     TeamStandingRow,
     TournamentCreate,
@@ -358,6 +359,29 @@ async def _tournament_record_by_profile(
     return records
 
 
+async def _team_by_profile(
+    session: AsyncSession,
+    tournament_id: int,
+) -> dict[int, StandingTeam]:
+    """Map each teamed profile to its team within the tournament.
+
+    Scoped to the tournament's teams; a profile appears at most once,
+    since a player belongs to at most one team per tournament. Profiles
+    on no team are absent from the map — the caller renders their row
+    with ``team = null``.
+    """
+    stmt = (
+        select(TeamMember.profile_id, Team.id, Team.name, Team.initials)
+        .join(Team, Team.id == TeamMember.team_id)
+        .where(Team.tournament_id == tournament_id)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {
+        profile_id: StandingTeam(team_id=team_id, name=name, initials=initials)
+        for profile_id, team_id, name, initials in rows
+    }
+
+
 @router.get("/{tournament_slug}/standings")
 async def get_standings(
     request: Request,
@@ -393,6 +417,7 @@ async def get_standings(
     )
     live_match_ids = await _live_match_by_profile(session, profile_ids)
     tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
+    teams_by_profile = await _team_by_profile(session, tournament.id)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
@@ -402,6 +427,7 @@ async def get_standings(
                 profile_id=player.profile_id,
                 alias=player.alias,
                 country=player.country,
+                team=teams_by_profile.get(player.profile_id),
                 current_rating=rating.current_rating,
                 max_rating=rating.max_rating,
                 wins=rating.wins,

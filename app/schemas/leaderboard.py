@@ -42,6 +42,21 @@ class TournamentRecord(BaseModel):
     streak: int
 
 
+class StandingTeam(BaseModel):
+    """The team a standings row's player belongs to, if any.
+
+    A compact reference — id + display strings, no aggregates — folded
+    onto each ``StandingRow`` so the standings table can show a player's
+    team where it would otherwise show their global ladder rank. A player
+    belongs to at most one team per tournament; an un-teamed player's row
+    carries ``team = null``.
+    """
+
+    team_id: int
+    name: str
+    initials: str
+
+
 class StandingRow(BaseModel):
     """One row in a tournament's standings list.
 
@@ -58,6 +73,10 @@ class StandingRow(BaseModel):
     profile_id: int
     alias: str
     country: str | None
+    # The player's team in this tournament, or null when they're on no
+    # team. The standings table renders this in place of the global ladder
+    # rank; mirrors the id + display strings on ``TeamStandingRow``.
+    team: StandingTeam | None
     current_rating: int
     max_rating: int
     wins: int

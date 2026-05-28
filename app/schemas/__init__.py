@@ -1,5 +1,10 @@
 from app.schemas.common import ListEnvelope, compute_last_polled_at
-from app.schemas.leaderboard import LeaderboardRead, StandingRow, TournamentRecord
+from app.schemas.leaderboard import (
+    LeaderboardRead,
+    StandingRow,
+    StandingTeam,
+    TournamentRecord,
+)
 from app.schemas.match import MatchDetail, MatchPlayerRead, MatchRead
 from app.schemas.player import PlayerDetail, PlayerRatingRead, PlayerRead, RosterPlayerCreate
 from app.schemas.team import (
@@ -29,6 +34,7 @@ __all__ = [
     "PlayerRead",
     "RosterPlayerCreate",
     "StandingRow",
+    "StandingTeam",
     "TeamCreate",
     "TeamMemberCreate",
     "TeamMemberRead",
