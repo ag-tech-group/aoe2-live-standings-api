@@ -382,6 +382,24 @@ async def _team_by_profile(
     }
 
 
+async def _stream_url_by_profile(
+    session: AsyncSession,
+    tournament_id: int,
+) -> dict[int, str]:
+    """Map each roster profile with a stream link to its URL.
+
+    Reads the organizer-curated ``stream_url`` on ``tournament_players``.
+    Profiles with no link are absent from the map — the caller renders
+    their row with ``stream_url = null``.
+    """
+    stmt = select(TournamentPlayer.profile_id, TournamentPlayer.stream_url).where(
+        TournamentPlayer.tournament_id == tournament_id,
+        TournamentPlayer.stream_url.is_not(None),
+    )
+    rows = (await session.execute(stmt)).all()
+    return dict(rows)
+
+
 @router.get("/{tournament_slug}/standings")
 async def get_standings(
     request: Request,
@@ -418,6 +436,7 @@ async def get_standings(
     live_match_ids = await _live_match_by_profile(session, profile_ids)
     tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
     teams_by_profile = await _team_by_profile(session, tournament.id)
+    stream_urls = await _stream_url_by_profile(session, tournament.id)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
@@ -428,6 +447,7 @@ async def get_standings(
                 alias=player.alias,
                 country=player.country,
                 team=teams_by_profile.get(player.profile_id),
+                stream_url=stream_urls.get(player.profile_id),
                 current_rating=rating.current_rating,
                 max_rating=rating.max_rating,
                 wins=rating.wins,

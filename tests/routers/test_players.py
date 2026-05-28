@@ -236,3 +236,86 @@ class TestRemoveRosterPlayer:
 
         response = await client.delete("/v1/tournaments/cup/players/199325")
         assert response.status_code == 404
+
+
+class TestUpdateRosterPlayer:
+    """PATCH /v1/tournaments/{slug}/players/{profile_id} — owner-gated stream link."""
+
+    async def test_owner_sets_stream_url(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"stream_url": "https://twitch.tv/hera"},
+        )
+        assert response.status_code == 204
+
+        session.expire_all()
+        entry = (
+            await session.execute(
+                select(TournamentPlayer).where(TournamentPlayer.profile_id == 199325)
+            )
+        ).scalar_one()
+        assert entry.stream_url == "https://twitch.tv/hera"
+
+    async def test_owner_clears_stream_url(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+        await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"stream_url": "https://twitch.tv/hera"},
+        )
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"stream_url": None},
+        )
+        assert response.status_code == 204
+
+        session.expire_all()
+        entry = (
+            await session.execute(
+                select(TournamentPlayer).where(TournamentPlayer.profile_id == 199325)
+            )
+        ).scalar_one()
+        assert entry.stream_url is None
+
+    async def test_invalid_url_is_422(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"stream_url": "not-a-url"},
+        )
+        assert response.status_code == 422
+
+    async def test_profile_not_on_roster_is_404(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"stream_url": "https://twitch.tv/hera"},
+        )
+        assert response.status_code == 404
+
+    async def test_non_owner_is_403(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as("11111111-1111-1111-1111-111111111111")
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"stream_url": "https://twitch.tv/hera"},
+        )
+        assert response.status_code == 403

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.match import MatchRead
 
@@ -64,3 +65,28 @@ class RosterPlayerCreate(BaseModel):
     """Request body for adding a profile to a tournament's roster."""
 
     profile_id: int = Field(gt=0)
+
+
+class RosterPlayerUpdate(BaseModel):
+    """Owner edit for a roster entry's curated fields.
+
+    Currently just the player's official stream link, shown in the
+    standings "Watch Live" column. ``stream_url`` is required in the body
+    but nullable: pass an ``http(s)`` URL to set it, or ``null`` to clear it.
+    """
+
+    stream_url: str | None = Field(max_length=2048)
+
+    @field_validator("stream_url")
+    @classmethod
+    def _validate_stream_url(cls, value: str | None) -> str | None:
+        # A null clears the link; any non-null value must be an absolute
+        # http(s) URL. urlparse also rejects scheme-only strings like
+        # `javascript:...`, since those have no netloc.
+        if value is None:
+            return None
+        candidate = value.strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("stream_url must be an absolute http(s) URL")
+        return candidate
