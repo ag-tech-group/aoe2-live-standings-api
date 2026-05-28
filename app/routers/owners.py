@@ -29,11 +29,11 @@ router = APIRouter(prefix="/tournaments/{tournament_slug}/owners", tags=["owners
 
 # Admin-only, low-traffic, must reflect grant/revoke mutations on the
 # very next request — same posture as the in-progress match detail at
-# `_IN_PROGRESS_MATCH_CACHE_CONTROL` in matches.py. Without this, the
-# global `cache_control_middleware` in app/main.py stamps
-# `public, max-age=3600`, which pins both browser and CDN to a stale
-# owners list for up to an hour after a revoke. Fix lives at the
-# endpoint until the middleware default is tightened separately.
+# `_IN_PROGRESS_MATCH_CACHE_CONTROL` in matches.py. Since #103 the
+# middleware default is `no-store`, so this now matches the default —
+# but declaring it explicitly documents the deliberate no-cache posture
+# (vs. an endpoint that merely forgot to set a header) and keeps the
+# endpoint correct if the default is ever revisited.
 _OWNERS_LIST_CACHE_CONTROL = "no-store"
 
 

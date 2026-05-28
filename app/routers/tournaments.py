@@ -55,15 +55,16 @@ router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 # for the symptom that motivated the auth-aware split.
 _STANDINGS_CDN_SECONDS = 15
 
-# Tournament metadata (name, dates, leaderboard, slug). Same split-cache
-# pattern as standings: CDN holds for 15s, browser always revalidates.
-# Without this override the endpoint would inherit the middleware's
-# `public, max-age=3600`, which pins the admin's read-after-write to
-# the pre-PATCH snapshot for up to an hour (#104). Metadata changes
-# rarely so a longer `s-maxage` would coalesce more aggressively, but
-# the same 15s used elsewhere keeps the constant simple and the admin
-# UX bounded.
-_TOURNAMENT_DETAIL_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
+# Tournament config reads (the list + a single tournament's metadata).
+# Static split-cache: CF holds for 15s, the browser always revalidates
+# (`max-age=0, must-revalidate`). Config changes rarely (only on admin
+# create/delete/edit), and an admin's read-after-write is kept fresh by
+# the Cloudflare cookie-bypass Cache Rule (see infra/README.md) plus the
+# browser revalidation — so unlike the polled-data endpoints, these
+# don't need the auth-aware `app.cache.apply_live_cache_control` split.
+# Since #103 the middleware default is `no-store`, so these must declare
+# their cacheable posture explicitly to stay coalesced for viewers.
+_TOURNAMENT_CONFIG_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"
 
 # How many recent win/loss outcomes each standings row carries. Most-
 # recent-first; the consumer renders a compact form strip and can show
@@ -90,13 +91,17 @@ async def get_tournament(
 
 @router.get("")
 async def list_tournaments(
+    response: Response,
     session: AsyncSession = Depends(get_async_session),
 ) -> list[TournamentRead]:
     """Every tournament this deployment serves, newest first.
 
     Tournaments are configuration rather than polled data, so the response
-    is a plain list — no ``last_polled_at`` envelope.
+    is a plain list — no ``last_polled_at`` envelope, and the static
+    config split-cache rather than the auth-aware polled-data helper
+    (see ``_TOURNAMENT_CONFIG_CACHE_CONTROL``).
     """
+    response.headers["Cache-Control"] = _TOURNAMENT_CONFIG_CACHE_CONTROL
     stmt = select(Tournament).order_by(Tournament.created_at.desc())
     tournaments = (await session.execute(stmt)).scalars().all()
     return [TournamentRead.model_validate(t) for t in tournaments]
@@ -159,7 +164,7 @@ async def get_tournament_detail(
     tournament: Tournament = Depends(get_tournament),
 ) -> TournamentRead:
     """A single tournament's metadata."""
-    response.headers["Cache-Control"] = _TOURNAMENT_DETAIL_CACHE_CONTROL
+    response.headers["Cache-Control"] = _TOURNAMENT_CONFIG_CACHE_CONTROL
     return TournamentRead.model_validate(tournament)
 
 

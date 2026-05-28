@@ -124,12 +124,23 @@ async def request_id_middleware(request: Request, call_next) -> Response:
 
 @app.middleware("http")
 async def cache_control_middleware(request: Request, call_next) -> Response:
-    """Stamp a default Cache-Control on successful GETs that didn't set one.
+    """Default cacheless GETs to ``no-store`` — caching is opt-in (#103).
 
-    Per-route handlers can override by setting ``response.headers["Cache-Control"]``
-    themselves (e.g. ``max-age=10`` on the live feed, ``no-store`` while a match
-    is in progress). This middleware only fills in the conservative 1-hour
-    default when the route stayed silent.
+    A handler that benefits from caching declares its own ``Cache-Control``:
+    the live read endpoints call ``app.cache.apply_live_cache_control``
+    (auth-aware split: CDN-cached for viewers, ``private, no-store`` for
+    authenticated callers); other routes set an explicit header inline.
+    Any 200 GET that stays silent falls through to ``no-store`` here.
+
+    The default is deliberately safe rather than fast. The previous
+    default — ``public, max-age=3600`` on every cacheless GET — silently
+    made auth-gated endpoints publicly cacheable, which caused a string
+    of read-after-write and cross-user-cache bugs (#101, #104, #105).
+    With ``no-store`` as the floor, an endpoint that forgets to declare a
+    cache posture is merely uncached (correct, just not coalesced) rather
+    than wrongly shared or served stale. Endpoints that want edge
+    coalescing must opt in — and in doing so, think about the
+    viewer-vs-admin split explicitly.
     """
     response = await call_next(request)
     if (
@@ -137,7 +148,7 @@ async def cache_control_middleware(request: Request, call_next) -> Response:
         and response.status_code == 200
         and "cache-control" not in response.headers
     ):
-        response.headers["Cache-Control"] = "public, max-age=3600"
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 

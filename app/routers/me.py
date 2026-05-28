@@ -30,10 +30,11 @@ router = APIRouter(prefix="/me", tags=["me"])
 # across a session — admin-grant + revoke mutations need to be
 # reflected on the next page load with no hard-reload required.
 #
-# Without this, the global `cache_control_middleware` in app/main.py
-# stamps `public, max-age=3600` (the catch-all default for 200 GETs),
-# which is structurally wrong for per-user content. Fix lives at the
-# endpoint until the middleware default is tightened separately.
+# Since #103 the middleware default is `no-store`, so a forgotten header
+# here would already be safe — but we keep the explicit `private,
+# no-store` to spell out the per-user posture at the endpoint and to
+# carry the `private` directive (defense against any shared cache that
+# treats bare `no-store` loosely).
 _ME_CACHE_CONTROL = "private, no-store"
 
 

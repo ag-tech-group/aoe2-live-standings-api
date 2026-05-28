@@ -62,9 +62,8 @@ class TestListTournamentOwners:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         # Admin-only, must reflect grant/revoke mutations immediately.
-        # The global cache middleware would otherwise stamp
-        # `public, max-age=3600`, pinning both browser and CDN to a
-        # stale owners list for up to an hour after a revoke.
+        # Matches the #103 middleware default (`no-store`), but declared
+        # explicitly to document the deliberate no-cache posture.
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
