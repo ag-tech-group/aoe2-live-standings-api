@@ -113,6 +113,22 @@ class TestListPlayers:
         assert response.headers["Cache-Control"] == "private, no-store"
         assert response.headers["Vary"] == "Cookie"
 
+    async def test_list_includes_presentation(self, client: AsyncClient, session: AsyncSession):
+        # The presentation bag is folded onto the roster list: set on one
+        # player, empty {} on the other.
+        session.add_all([make_player(1, alias="a"), make_player(2, alias="b")])
+        tournament = make_tournament("cup", profile_ids=[1, 2])
+        for tracked in tournament.tracked_players:
+            if tracked.profile_id == 1:
+                tracked.presentation = {"bio": "hi"}
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/players")).json()["items"]
+        by_id = {p["profile_id"]: p for p in items}
+        assert by_id[1]["presentation"] == {"bio": "hi"}
+        assert by_id[2]["presentation"] == {}
+
 
 class TestGetPlayer:
     async def test_profile_outside_roster_returns_404(
@@ -166,6 +182,17 @@ class TestGetPlayer:
         await session.commit()
         response = await client.get("/v1/tournaments/cup/players/1", params={"match_limit": 999})
         assert response.status_code == 422
+
+    async def test_detail_includes_presentation(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1, alias="Hera")
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1])
+        tournament.tracked_players[0].presentation = {"bio": "AoE2"}
+        session.add(tournament)
+        await session.commit()
+
+        payload = (await client.get("/v1/tournaments/cup/players/1")).json()
+        assert payload["presentation"] == {"bio": "AoE2"}
 
 
 class TestAddRosterPlayer:
@@ -239,41 +266,18 @@ class TestRemoveRosterPlayer:
 
 
 class TestUpdateRosterPlayer:
-    """PATCH /v1/tournaments/{slug}/players/{profile_id} — owner-gated stream link."""
+    """PATCH /v1/tournaments/{slug}/players/{profile_id} — owner-gated presentation bag."""
 
-    async def test_owner_sets_stream_url(self, client: AsyncClient, session: AsyncSession, auth_as):
-        auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
-        await session.commit()
-
-        response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
-            json={"stream_url": "https://twitch.tv/hera"},
-        )
-        assert response.status_code == 204
-
-        session.expire_all()
-        entry = (
-            await session.execute(
-                select(TournamentPlayer).where(TournamentPlayer.profile_id == 199325)
-            )
-        ).scalar_one()
-        assert entry.stream_url == "https://twitch.tv/hera"
-
-    async def test_owner_clears_stream_url(
+    async def test_owner_sets_presentation(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
-        await client.patch(
-            "/v1/tournaments/cup/players/199325",
-            json={"stream_url": "https://twitch.tv/hera"},
-        )
 
         response = await client.patch(
             "/v1/tournaments/cup/players/199325",
-            json={"stream_url": None},
+            json={"presentation": {"streamUrls": ["https://twitch.tv/hera"], "bio": "GOAT"}},
         )
         assert response.status_code == 204
 
@@ -283,16 +287,58 @@ class TestUpdateRosterPlayer:
                 select(TournamentPlayer).where(TournamentPlayer.profile_id == 199325)
             )
         ).scalar_one()
-        assert entry.stream_url is None
+        assert entry.presentation == {"streamUrls": ["https://twitch.tv/hera"], "bio": "GOAT"}
 
-    async def test_invalid_url_is_422(self, client: AsyncClient, session: AsyncSession, auth_as):
+    async def test_patch_replaces_whole_bag(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The PATCH replaces the entire object — keys absent from the new
+        # body are dropped, so an empty object clears the bag.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+        await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"presentation": {"bio": "old", "extra": 1}},
+        )
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"presentation": {"bio": "new"}},
+        )
+        assert response.status_code == 204
+
+        session.expire_all()
+        entry = (
+            await session.execute(
+                select(TournamentPlayer).where(TournamentPlayer.profile_id == 199325)
+            )
+        ).scalar_one()
+        assert entry.presentation == {"bio": "new"}
+
+    async def test_non_object_presentation_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
         response = await client.patch(
             "/v1/tournaments/cup/players/199325",
-            json={"stream_url": "not-a-url"},
+            json={"presentation": "not-an-object"},
+        )
+        assert response.status_code == 422
+
+    async def test_oversize_presentation_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"presentation": {"bio": "x" * 9000}},
         )
         assert response.status_code == 422
 
@@ -305,7 +351,7 @@ class TestUpdateRosterPlayer:
 
         response = await client.patch(
             "/v1/tournaments/cup/players/199325",
-            json={"stream_url": "https://twitch.tv/hera"},
+            json={"presentation": {"bio": "hi"}},
         )
         assert response.status_code == 404
 
@@ -316,6 +362,6 @@ class TestUpdateRosterPlayer:
 
         response = await client.patch(
             "/v1/tournaments/cup/players/199325",
-            json={"stream_url": "https://twitch.tv/hera"},
+            json={"presentation": {"bio": "hi"}},
         )
         assert response.status_code == 403
