@@ -2,10 +2,19 @@
 
 Reference doc for sizing GCP and Netlify costs against tournament-scale traffic, using the planned 2026 Hera-hosted cross-stream invitational as a worked example. Methodology and architecture analysis are reusable for any future event; specific roster numbers will drift.
 
-**Status:** initial pass complete; final roster + bookings pending.
+**Status:** analysis complete; **the recommended mitigations shipped (#84, closed 2026-05-28).**
 **Created:** 2026-05-24.
 **Tracking issue:** [#84 — scaling and reliability hardening](https://github.com/ag-tech-group/aoe2-live-standings-api/issues/84)
 **Related docs:** [data-sources.md](./data-sources.md)
+
+> **⚠️ Read this as the analysis that informed #84, not as current infra state.**
+> The mitigations recommended below have since been implemented:
+> - Cloudflare orange-cloud proxy + Cache Rules — **live** (#84; see `infra/README.md` "Custom domain" for the current setup).
+> - Capacity pre-allocation (Cloud Run `max=20`/`1Gi`, Cloud SQL `db-g1-small`) — **live**, temporary for the event window (#94).
+> - Sentry-routed capacity alerts — **live** (#95).
+> - Cache-header refinements: standings/players/teams use an auth-aware split (`public, s-maxage=15, max-age=0, must-revalidate` for viewers, `private, no-store` for admins); the middleware default is now `no-store` (opt-in caching). This supersedes the flat `public, max-age=15` referenced throughout this doc. (#96, #101, #104, #105, #103.)
+>
+> The traffic/cost analysis below is retained as the reasoning that drove those decisions and as the template for the next event. For current infra, `infra/README.md` is the source of truth.
 
 ## TL;DR
 
@@ -25,16 +34,16 @@ When an event drives a usage spike, three questions need fast answers: *will it 
 |---|---|---|
 | API compute | Cloud Run `aoe2-live-standings-api`, us-central1, 1 vCPU / 512Mi, min=1 max=10, 800 concurrent/instance, CPU always-on, 1hr timeout | `infra/terraform/run.tf:25–174` |
 | Worker compute | Cloud Run `aoe2-live-standings-api-worker`, same shape, min=max=1 (singleton), CPU always-on | `infra/terraform/run.tf:177–298` |
-| Database | Cloud SQL Postgres 16, **db-f1-micro** (shared-core), 10 GB HDD, ZONAL (no HA), PITR on, Cloud SQL Auth Proxy via Unix socket | `infra/terraform/sql.tf:7–63` |
+| Database | Cloud SQL Postgres 16, **db-f1-micro** (shared-core) at analysis time — _now temporarily `db-g1-small` for the event window per #94_ — 10 GB HDD, ZONAL (no HA), PITR on, Cloud SQL Auth Proxy via Unix socket | `infra/terraform/sql.tf` |
 | Polling cadence (worker → upstream Relic API) | Player stats 30s · Recent matches 60s · Live matches 15s | `app/poller/*.py` |
 | Real-time delivery | **SSE** at `GET /v1/stream`, 20s heartbeat, ~70 byte nudge payloads (`STANDINGS`, `MATCHES`, `LIVE`) | `app/routers/stream.py` |
-| Caching | `public, max-age=15` on standings, `max-age=60` on completed matches, `no-store` on in-progress and SSE. No Redis, no in-process cache, **no CDN, Cloudflare DNS-only** | `app/routers/tournaments.py:52`, `app/main.py:126–141`, `infra/README.md:96` |
+| Caching | _At analysis time:_ flat `public, max-age=15` on standings, `max-age=60` on completed matches, `no-store` on in-progress + SSE, **no CDN (Cloudflare DNS-only)**. _Now:_ auth-aware split on live reads (`s-maxage=15` for viewers, `private, no-store` for admins), middleware default `no-store` (opt-in caching), Cloudflare orange-cloud proxy + Cache Rules live. | `app/cache.py`, `app/main.py`, `infra/README.md` |
 | Standings query path | 5 queries: roster + denormalized player+rating join + recent results + live matches + tournament record (N+1 avoided) | `app/routers/tournaments.py:340–404` |
 | Rate limiting | slowapi, 60 RPM/IP default | `app/limiting.py:17` |
 | Payload | StandingRow ~280 B/row × 32-player default ≈ **~9 KB uncompressed / ~2–3 KB gzipped** | `app/schemas/leaderboard.py:45–82` |
 | Frontend (separate repo) | React 19 + Vite, hosted on **Netlify Pro**, served at `aoe2.criticalbit.gg`. Talks to API direct via CORS. | `/home/amr/code/aoe2/hera-streamer-invitational-2026-web` |
 
-The architecture is intentionally SSE-driven: tiny nudges keep clients aware of changes, and clients refetch the heavy standings JSON on demand. The `Cache-Control: public, max-age=15` on standings is the hook that would let any CDN (Cloudflare, Cloud CDN, Netlify edge) coalesce client traffic into ~4 origin requests/minute regardless of viewer count — but nothing is currently honoring it at the edge.
+The architecture is intentionally SSE-driven: tiny nudges keep clients aware of changes, and clients refetch the heavy standings JSON on demand. The `s-maxage=15` on standings is the hook that lets a CDN coalesce client traffic into ~4 origin requests/minute regardless of viewer count. _At the time of writing nothing honored it at the edge; the Cloudflare orange-cloud proxy that does (and the admin cookie-bypass that keeps admins fresh) shipped in #84 — see `infra/README.md`._
 
 ## Audience model
 
