@@ -6,16 +6,26 @@ Terraform + manual deploy steps for the AoE2 Live Standings API preview on GCP.
 
 ```
 infra/
-├── terraform/         # All persistent GCP resources except the deployed image
-│   ├── main.tf        # Provider + GCS-backed state
+├── terraform/              # All persistent GCP resources except the deployed image
+│   ├── main.tf             # Provider + GCS-backed state
 │   ├── variables.tf
-│   ├── sql.tf         # Cloud SQL Postgres 16 (db-f1-micro)
-│   ├── registry.tf    # Artifact Registry Docker repo
-│   ├── iam.tf         # Cloud Run service account + bindings
-│   ├── secrets.tf     # DATABASE_URL in Secret Manager
-│   ├── run.tf         # Cloud Run service (image managed out-of-band)
+│   ├── sql.tf              # Cloud SQL Postgres 16 (see tier note below)
+│   ├── run.tf              # Cloud Run services: api + worker (image managed out-of-band)
+│   ├── jobs.tf             # Cloud Run Job: alembic migrate (run pre-deploy in CI)
+│   ├── registry.tf         # Artifact Registry Docker repo
+│   ├── iam.tf              # Cloud Run runtime service account + bindings
+│   ├── cicd.tf             # GitHub Actions Workload Identity Federation + deployer SA
+│   ├── secrets.tf          # DATABASE_URL (TF-managed) + SENTRY_DSN (data ref)
+│   ├── org_policy.tf       # Project-level allow-public-IAM override (for allUsers invoker)
+│   ├── billing.tf          # Monthly budget + threshold alerts
+│   ├── monitoring.tf       # Polling-worker silent-failure alert (log-metric absence)
+│   ├── uptime.tf           # Uptime checks on the read surface + alert
+│   ├── alerts_sentry.tf    # Pub/Sub topic + Cloud Function + channel: alerts → Sentry
+│   ├── capacity_alerts.tf  # Event-window capacity alerts (SQL CPU/conns, Run instances)
 │   └── outputs.tf
-└── README.md          # This file
+├── functions/
+│   └── cloud-monitoring-to-sentry/   # Cloud Function source (forwards alerts to Sentry)
+└── README.md               # This file
 ```
 
 ## Prerequisites
@@ -190,10 +200,12 @@ Each piece of the CF setup can be undone independently in the dashboard (no DNS 
 ## What's *not* in Terraform
 
 - **Image deploys** — `gcloud run deploy --image ...` (see above).
-- **Cloudflare DNS records, proxy mode, SSL mode, and Cache Rule** — all configured manually in the Cloudflare dashboard. The `criticalbit.gg` zone is not Terraform-managed. See the "Custom domain" section above for what's configured and how to re-create it.
+- **Cloudflare DNS records, proxy mode, SSL mode, and Cache Rules** — all configured manually in the Cloudflare dashboard (two Cache Rules: respect-origin + admin cookie-bypass). The `criticalbit.gg` zone is not Terraform-managed. See the "Custom domain" section above for what's configured and how to re-create it.
 - **Initial GCS state bucket** — created imperatively once, before any `tofu init` could run. Bootstrap chicken-and-egg.
 - **Project + billing link** — same, one-shot bootstrap.
 
 ## Ongoing cost
 
-~$8-10/month at idle, dominated by the Cloud SQL `db-f1-micro` instance. Cloud Run with `min_instance_count=1` runs continuously but the always-on CPU charge on a single small instance is in the dollar-per-month range. Artifact Registry storage and Secret Manager versions are free at this scale.
+**Baseline (~$8–10/month at idle):** dominated by the Cloud SQL `db-f1-micro` instance. Cloud Run with `min_instance_count=1` runs continuously but the always-on CPU charge on a single small instance is in the dollar-per-month range. Artifact Registry storage, Secret Manager versions, the Pub/Sub topic, and the alert-forwarder Cloud Function (invoked only when an alert fires) are all free / negligible at this scale. Cloudflare proxy is free-tier.
+
+**Event-window bump (temporary, per #84):** during the Hera invitational the capacity is pre-allocated higher — Cloud SQL `db-g1-small` (~$33/mo), Cloud Run api `max_instances=20` + `memory=1Gi`. The extra cost only materializes under load (Cloud Run bills per-use); the SQL tier is the main fixed delta (~+$25/mo). These revert after the event — grep `event-window hardening` in `infra/terraform/` for the set. See `docs/event-traffic-cost-model.md` for the full traffic/cost analysis.
