@@ -3,6 +3,27 @@
 from httpx import AsyncClient
 
 
+class TestCacheControlDefault:
+    """The cache middleware defaults cacheless 200 GETs to `no-store` (#103).
+
+    Caching is opt-in: endpoints that benefit set their own header. A route
+    that stays silent — like the health/liveness probes — must NOT be
+    publicly cached (the old `public, max-age=3600` default was the root
+    cause of the #101/#104/#105 staleness + cross-user-cache bugs).
+    """
+
+    async def test_health_probe_is_not_cached(self, client: AsyncClient):
+        # /health sets no Cache-Control of its own → falls to the default.
+        response = await client.get("/health")
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+
+    async def test_root_is_not_cached(self, client: AsyncClient):
+        response = await client.get("/")
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+
+
 class TestSecurityTxt:
     async def test_served_as_plain_text_with_required_fields(self, client: AsyncClient):
         response = await client.get("/.well-known/security.txt")

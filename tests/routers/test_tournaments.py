@@ -42,6 +42,18 @@ class TestListTournaments:
         items = (await client.get("/v1/tournaments")).json()
         assert [t["slug"] for t in items] == ["newer", "older"]
 
+    async def test_cache_control_header(self, client: AsyncClient, session: AsyncSession):
+        # Config split-cache (same as tournament detail): CF coalesces for
+        # viewers, browser always revalidates. Must be explicit since the
+        # #103 middleware default is `no-store`.
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments")
+        assert response.status_code == 200
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
+        )
+
 
 class TestGetTournamentDetail:
     async def test_returns_metadata(self, client: AsyncClient, session: AsyncSession):

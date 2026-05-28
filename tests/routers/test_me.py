@@ -97,11 +97,11 @@ class TestGetMe:
     async def test_cache_control_is_private_no_store(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # /v1/me is per-user content. The global cache middleware would
-        # otherwise stamp `public, max-age=3600`, which (a) caches stale
-        # admin-grant state across mutations and (b) is structurally
-        # unsafe for shared caches like Cloudflare to serve one user's
-        # response to another. The handler sets an explicit override.
+        # /v1/me is per-user content. `private` keeps shared caches from
+        # serving one user's response to another; `no-store` keeps the
+        # browser from holding stale admin-grant state across mutations.
+        # (Since #103 the middleware default is `no-store` too, but the
+        # explicit `private` here is the load-bearing extra.)
         auth_as(DEFAULT_TEST_USER_ID)
         response = await client.get("/v1/me")
         assert response.status_code == 200
