@@ -60,12 +60,14 @@ class StandingTeam(BaseModel):
 class StandingRow(BaseModel):
     """One row in a tournament's standings list.
 
-    A denormalized read model: a join of ``Player`` and ``PlayerRating``
+    A denormalized read model: a left join of ``Player`` and ``PlayerRating``
     plus folded-in derived fields, so a consumer renders a full standings
     table from one response with no per-player fan-out. ``recent_results``
     is completed-match form; ``tournament_record`` is the player's record
     within the tournament's date window; ``in_match`` / ``live_match_id``
-    are current live-match status. Sorted by ``current_rating`` desc.
+    are current live-match status. Sorted by ``current_rating`` desc, with
+    unrated roster members (no rating row on the tournament's leaderboard
+    — typically brand-new accounts) at the tail, ordered by ``profile_id``.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -81,8 +83,13 @@ class StandingRow(BaseModel):
     # the roster and rendered by the consumer; empty object when unset. The
     # API stores it but never interprets it.
     presentation: dict
-    current_rating: int
-    max_rating: int
+    # Null when the roster member has no rating row on this tournament's
+    # leaderboard yet (e.g. a brand-new account that hasn't played its
+    # first ranked match). The other lifetime-ladder fields below are 0
+    # in that case, and ``recent_results`` / ``tournament_record`` are
+    # empty/zero.
+    current_rating: int | None
+    max_rating: int | None
     wins: int
     losses: int
     streak: int

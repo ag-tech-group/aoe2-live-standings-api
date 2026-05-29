@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
@@ -429,23 +429,35 @@ async def get_standings(
 ) -> ListEnvelope[StandingRow]:
     """The tournament's players, ranked by current rating on its leaderboard.
 
-    Scoped two ways: to the tournament's roster (``TournamentPlayer``) and
-    to its ``leaderboard_id``. ``recent_results`` and live-match status are
-    folded in by two further queries over the same standing set.
+    Scoped to the tournament's roster (``TournamentPlayer``) and joined left
+    to ``PlayerRating`` on its ``leaderboard_id`` — a roster member without
+    a rating row on that leaderboard (typically a brand-new account that
+    hasn't played its first ranked match) still surfaces, with null rating
+    fields and a zero record, sorted to the tail. ``recent_results`` and
+    live-match status are folded in by further queries over the same set.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
     roster = select(TournamentPlayer.profile_id).where(
         TournamentPlayer.tournament_id == tournament.id
     )
+    # The leaderboard filter lives in the join condition, not the WHERE
+    # clause — putting it in WHERE would undo the outer-join and drop
+    # roster members without a rating on this leaderboard.
     stmt = (
         select(Player, PlayerRating)
-        .join(PlayerRating, PlayerRating.profile_id == Player.profile_id)
-        .where(
-            PlayerRating.leaderboard_id == tournament.leaderboard_id,
-            Player.profile_id.in_(roster),
+        .outerjoin(
+            PlayerRating,
+            and_(
+                PlayerRating.profile_id == Player.profile_id,
+                PlayerRating.leaderboard_id == tournament.leaderboard_id,
+            ),
         )
-        .order_by(PlayerRating.current_rating.desc())
+        .where(Player.profile_id.in_(roster))
+        .order_by(
+            PlayerRating.current_rating.desc().nulls_last(),
+            Player.profile_id.asc(),
+        )
     )
     rows = (await session.execute(stmt)).all()
 
@@ -469,24 +481,24 @@ async def get_standings(
                 country=player.country,
                 team=teams_by_profile.get(player.profile_id),
                 presentation=presentations.get(player.profile_id, {}),
-                current_rating=rating.current_rating,
-                max_rating=rating.max_rating,
-                wins=rating.wins,
-                losses=rating.losses,
-                streak=rating.streak,
+                current_rating=rating.current_rating if rating else None,
+                max_rating=rating.max_rating if rating else None,
+                wins=rating.wins if rating else 0,
+                losses=rating.losses if rating else 0,
+                streak=rating.streak if rating else 0,
                 recent_results=recent_results.get(player.profile_id, []),
                 tournament_record=tournament_records[player.profile_id],
-                rank=rating.rank,
-                rank_total=rating.rank_total,
+                rank=rating.rank if rating else None,
+                rank_total=rating.rank_total if rating else None,
                 in_match=player.profile_id in live_match_ids,
                 live_match_id=live_match_ids.get(player.profile_id),
                 stream_live=player.profile_id in stream_live_profiles,
-                last_match_at=rating.last_match_at,
-                updated_at=rating.updated_at,
+                last_match_at=rating.last_match_at if rating else None,
+                updated_at=rating.updated_at if rating else player.updated_at,
             )
         )
         timestamps.append(player.updated_at)
-        timestamps.append(rating.updated_at)
+        timestamps.append(rating.updated_at if rating else None)
 
     return ListEnvelope[StandingRow](
         last_polled_at=compute_last_polled_at(timestamps),
