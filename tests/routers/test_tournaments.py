@@ -81,6 +81,13 @@ class TestGetTournamentDetail:
         body = (await client.get("/v1/tournaments/cup")).json()
         assert body["grand_finals_date"].startswith("2026-06-15T18")
 
+    async def test_prize_pool_cents_round_trips(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup", prize_pool_cents=512750))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["prize_pool_cents"] == 512750
+
     async def test_unknown_slug_returns_404(self, client: AsyncClient):
         assert (await client.get("/v1/tournaments/nope")).status_code == 404
 
@@ -712,6 +719,47 @@ class TestUpdateTournament:
         assert response.status_code == 200
         assert response.json()["grand_finals_date"] is None
 
+    async def test_can_set_prize_pool_cents(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={"prize_pool_cents": 512750},
+        )
+        assert response.status_code == 200
+        assert response.json()["prize_pool_cents"] == 512750
+
+    async def test_can_clear_prize_pool_cents_with_null(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                prize_pool_cents=512750,
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"prize_pool_cents": None})
+        assert response.status_code == 200
+        assert response.json()["prize_pool_cents"] is None
+
+    async def test_negative_prize_pool_cents_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"prize_pool_cents": -1})
+        assert response.status_code == 422
+
     async def test_empty_body_is_a_noop(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", name="Unchanged", owner_ids=[DEFAULT_TEST_USER_ID]))
@@ -801,6 +849,27 @@ class TestCreateTournament:
         body = response.json()
         assert body["start_date"].startswith("2026-06-01")
         assert body["grand_finals_date"].startswith("2026-06-15T18")
+
+    async def test_optional_prize_pool_cents_round_trips(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={**self._BODY, "prize_pool_cents": 512750},
+        )
+        assert response.status_code == 201
+        assert response.json()["prize_pool_cents"] == 512750
+
+    async def test_negative_prize_pool_cents_on_create_returns_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={**self._BODY, "prize_pool_cents": -1},
+        )
+        assert response.status_code == 422
 
     async def test_duplicate_slug_returns_409(
         self, client: AsyncClient, session: AsyncSession, auth_as

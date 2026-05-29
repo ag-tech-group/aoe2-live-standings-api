@@ -149,6 +149,7 @@ async def create_tournament(
         leaderboard_id=payload.leaderboard_id,
         start_date=payload.start_date,
         grand_finals_date=payload.grand_finals_date,
+        prize_pool_cents=payload.prize_pool_cents,
     )
     tournament.owners = [TournamentOwner(user_id=user_id)]
     session.add(tournament)

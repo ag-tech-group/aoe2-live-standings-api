@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -32,6 +32,12 @@ class Tournament(Base):
     # there's no separate `end_date` anymore (dropped in #76).
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     grand_finals_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Tournament's prize pool in **minor currency units** (e.g. cents) — a
+    # mutable owner-edited amount the consumer renders. Integer to avoid
+    # float money bugs. No currency code: which currency it's denominated
+    # in is fixed per event and stays in the consumer's per-tournament
+    # config, keeping this API currency-agnostic.
+    prize_pool_cents: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
