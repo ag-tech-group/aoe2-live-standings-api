@@ -261,6 +261,78 @@ class TestTournamentStandings:
         assert rows[2]["presentation"] == {}
 
 
+class TestStandingsUnratedRoster:
+    """Roster members without a rating on the tournament's leaderboard still surface."""
+
+    async def test_unrated_member_appears_in_tail_with_null_fields(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # One rated player + one rosterless-rating player. The unrated one
+        # surfaces after the rated one with current_rating / max_rating null,
+        # zero wins/losses/streak, empty recent_results, and a zero record.
+        rated = make_player(1, alias="rated")
+        rated.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(rated)
+        session.add(make_player(2, alias="newbie"))
+        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["profile_id"] for row in items] == [1, 2]
+        newbie = items[1]
+        assert newbie["current_rating"] is None
+        assert newbie["max_rating"] is None
+        assert newbie["wins"] == 0
+        assert newbie["losses"] == 0
+        assert newbie["streak"] == 0
+        assert newbie["recent_results"] == []
+        assert newbie["tournament_record"] == {
+            "games_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "streak": 0,
+        }
+        assert newbie["rank"] is None
+        assert newbie["rank_total"] is None
+        assert newbie["last_match_at"] is None
+        # Derived fields fall out correctly for the zero case.
+        assert newbie["games"] == 0
+        assert newbie["win_pct"] is None
+
+    async def test_only_rating_on_other_leaderboard_is_unrated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A roster member with a rating on a *different* leaderboard than the
+        # tournament's still surfaces on this standings as unrated — not
+        # silently dropped, and not borrowing the other leaderboard's rating.
+        player = make_player(1, alias="solo")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=4))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert len(items) == 1
+        assert items[0]["profile_id"] == 1
+        assert items[0]["current_rating"] is None
+
+    async def test_unrated_tail_sorted_by_profile_id(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Three unrated members + one rated. The unrated tail is ordered by
+        # profile_id ASC so the public list is deterministic across requests.
+        rated = make_player(50, alias="rated")
+        rated.ratings.append(make_player_rating(50, leaderboard_id=3, current_rating=2000))
+        session.add(rated)
+        for profile_id in (30, 10, 20):
+            session.add(make_player(profile_id, alias=f"p{profile_id}"))
+        session.add(make_tournament("cup", profile_ids=[10, 20, 30, 50], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["profile_id"] for row in items] == [50, 10, 20, 30]
+
+
 class TestStandingsDerivedFields:
     """games / win_pct: derived server-side from each row's lifetime wins/losses."""
 
