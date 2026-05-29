@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 
 from app.models.match import MatchOutcome
 
@@ -102,3 +102,20 @@ class StandingRow(BaseModel):
     live_match_id: int | None
     last_match_at: datetime | None
     updated_at: datetime
+
+    # Derived from the lifetime-ladder wins/losses above (not the
+    # tournament_record). Computed server-side so every consumer agrees on
+    # the figure; the frontend still decides precision/formatting.
+    @computed_field
+    @property
+    def games(self) -> int:
+        return self.wins + self.losses
+
+    @computed_field
+    @property
+    def win_pct(self) -> float | None:
+        """Win percentage (0–100, 1 dp), or null when the player has no games."""
+        total = self.wins + self.losses
+        if total == 0:
+            return None
+        return round(self.wins / total * 100, 1)

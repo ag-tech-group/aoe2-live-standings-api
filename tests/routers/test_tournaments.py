@@ -253,6 +253,39 @@ class TestTournamentStandings:
         assert rows[2]["presentation"] == {}
 
 
+class TestStandingsDerivedFields:
+    """games / win_pct: derived server-side from each row's lifetime wins/losses."""
+
+    async def test_games_and_win_pct_derived_from_wins_losses(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # 2-1 record: games = 3, win_pct = 66.666… rounded to 1 dp = 66.7.
+        player = make_player(1, alias="p1")
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=2000, wins=2, losses=1)
+        )
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["games"] == 3
+        assert row["win_pct"] == 66.7
+
+    async def test_win_pct_null_when_no_games(self, client: AsyncClient, session: AsyncSession):
+        # A rostered player who hasn't played: games = 0, win_pct = null
+        # (rather than a misleading 0.0) so the consumer can render "—".
+        player = make_player(1, alias="p1")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=0))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["games"] == 0
+        assert row["win_pct"] is None
+
+
 class TestStandingsRecentResults:
     """recent_results: per-player recent win/loss form on the standings row."""
 
