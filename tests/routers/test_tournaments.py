@@ -901,9 +901,7 @@ class TestDeleteTournament:
 class TestProgression:
     """GET /{slug}/progression: per-player rating-over-time series."""
 
-    async def test_per_player_series_oldest_first(
-        self, client: AsyncClient, session: AsyncSession
-    ):
+    async def test_per_player_series_oldest_first(self, client: AsyncClient, session: AsyncSession):
         player = make_player(1, alias="hera")
         player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=1530))
         session.add(player)
