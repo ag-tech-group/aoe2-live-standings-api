@@ -69,6 +69,12 @@ variable "budget_monthly_usd" {
   default     = 100
 }
 
+variable "twitch_client_id" {
+  description = "Twitch application Client ID for broadcast-live detection (#112). Not a secret — Twitch exposes it in client-side calls — so it lives here as a committed default, like cors_origins. Its sensitive counterpart, the Client Secret, is deliberately NOT a variable: it lives in the `twitch-client-secret` Secret Manager secret and is referenced by Cloud Run via secret_key_ref (same pattern as sentry-dsn, see secrets.tf), so an apply can't silently wipe it. Empty disables detection."
+  type        = string
+  default     = "5le2v95z52178pcmqqkq1p59moevqo"
+}
+
 # `sentry_dsn` variable removed — the DSN now lives in Secret Manager
 # (see `data "google_secret_manager_secret" "sentry_dsn"` in secrets.tf)
 # and is referenced by Cloud Run via `secret_key_ref` in run.tf. This
