@@ -22,6 +22,7 @@ from app.database import get_async_session
 from app.limiting import limiter
 from app.models import (
     LiveMatchPlayer,
+    LiveStream,
     Match,
     MatchOutcome,
     MatchPlayer,
@@ -305,6 +306,22 @@ async def _live_match_by_profile(
     return dict(result.all())
 
 
+async def _stream_live_by_profile(
+    session: AsyncSession,
+    profile_ids: list[int],
+) -> set[int]:
+    """Return the profiles broadcasting live now (any platform).
+
+    Reads the ``live_streams`` snapshot the broadcast-live pollers rewrite
+    each cycle; a profile with a row on any platform is live. Backs the
+    ``stream_live`` flag on the standings row. Empty when detection is off.
+    """
+    if not profile_ids:
+        return set()
+    stmt = select(LiveStream.profile_id).where(LiveStream.profile_id.in_(profile_ids)).distinct()
+    return set((await session.execute(stmt)).scalars().all())
+
+
 async def _tournament_record_by_profile(
     session: AsyncSession,
     tournament: Tournament,
@@ -439,6 +456,7 @@ async def get_standings(
     tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
     teams_by_profile = await _team_by_profile(session, tournament.id)
     presentations = await _presentation_by_profile(session, tournament.id)
+    stream_live_profiles = await _stream_live_by_profile(session, profile_ids)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
@@ -461,6 +479,7 @@ async def get_standings(
                 rank_total=rating.rank_total,
                 in_match=player.profile_id in live_match_ids,
                 live_match_id=live_match_ids.get(player.profile_id),
+                stream_live=player.profile_id in stream_live_profiles,
                 last_match_at=rating.last_match_at,
                 updated_at=rating.updated_at,
             )

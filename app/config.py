@@ -91,6 +91,21 @@ class Settings(BaseSettings):
     # to point at a locally-run auth-api on another port.
     auth_api_base_url: str = "https://auth-api.criticalbit.gg"
 
+    # Twitch broadcast-live detection (#112). Both empty disables it
+    # entirely — the safe default in dev/test and before the Twitch app
+    # exists. The client id is not sensitive (Twitch exposes it in
+    # client-side calls); the secret is supplied in prod from the
+    # `twitch-client-secret` Secret Manager secret, mirroring `sentry_dsn`.
+    twitch_client_id: str = ""
+    twitch_client_secret: str = ""
+
+    # YouTube broadcast-live detection (#112). Empty disables it. Quota is
+    # the real constraint, not the credential: the Data API's free 10k
+    # units/day vs. search.list at 100 units/call means only a handful of
+    # channels can be polled, on a slow cadence (see run_youtube_live_poller).
+    # Supplied in prod from the `youtube-api-key` Secret Manager secret.
+    youtube_api_key: str = ""
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

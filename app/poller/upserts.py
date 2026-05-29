@@ -30,7 +30,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Leaderboard, LiveMatchPlayer, Match, MatchPlayer, Player, PlayerRating
+from app.models import (
+    Leaderboard,
+    LiveMatchPlayer,
+    LiveStream,
+    Match,
+    MatchPlayer,
+    Player,
+    PlayerRating,
+)
 
 
 def dialect_insert(session: AsyncSession):
@@ -173,4 +181,25 @@ async def replace_live_match_players(session: AsyncSession, rows: list[dict[str,
     insert = dialect_insert(session)
     stmt = insert(LiveMatchPlayer).values(rows)
     stmt = stmt.on_conflict_do_nothing(index_elements=["match_id", "profile_id"])
+    await session.execute(stmt)
+
+
+async def replace_live_streams(
+    session: AsyncSession, platform: str, profile_ids: list[int]
+) -> None:
+    """Clear one platform's rows in ``live_streams`` and rewrite the snapshot.
+
+    Mirrors ``replace_live_match_players`` but scoped to a single
+    ``platform`` (``DELETE WHERE platform = …``), so the Twitch and YouTube
+    pollers replace only their own rows and never clobber each other. Empty
+    ``profile_ids`` just clears the platform's rows (nobody live there now).
+    """
+    await session.execute(delete(LiveStream).where(LiveStream.platform == platform))
+    if not profile_ids:
+        return
+    insert = dialect_insert(session)
+    stmt = insert(LiveStream).values(
+        [{"profile_id": pid, "platform": platform} for pid in profile_ids]
+    )
+    stmt = stmt.on_conflict_do_nothing(index_elements=["profile_id", "platform"])
     await session.execute(stmt)

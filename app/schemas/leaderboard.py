@@ -100,6 +100,12 @@ class StandingRow(BaseModel):
     # id when `in_match` is true, else null — for linking through to it.
     in_match: bool
     live_match_id: int | None
+    # True when the player's stream (Twitch, or YouTube as a fallback) is
+    # broadcasting right now, as of the last broadcast-live poll. Distinct
+    # from `in_match`: a player can be streaming without being in a tracked
+    # match, or vice-versa. False when detection is off or the channel is
+    # offline/unknown.
+    stream_live: bool
     last_match_at: datetime | None
     updated_at: datetime
 
