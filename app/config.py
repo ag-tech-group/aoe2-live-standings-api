@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     # to point at a locally-run auth-api on another port.
     auth_api_base_url: str = "https://auth-api.criticalbit.gg"
 
+    # Twitch broadcast-live detection (#112). Both empty disables it
+    # entirely — the safe default in dev/test and before the Twitch app
+    # exists. The client id is not sensitive (Twitch exposes it in
+    # client-side calls); the secret is supplied in prod from the
+    # `twitch-client-secret` Secret Manager secret, mirroring `sentry_dsn`.
+    twitch_client_id: str = ""
+    twitch_client_secret: str = ""
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"
