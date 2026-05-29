@@ -119,3 +119,25 @@ class StandingRow(BaseModel):
         if total == 0:
             return None
         return round(self.wins / total * 100, 1)
+
+
+class RatingPoint(BaseModel):
+    """One rating observation: the player's post-match rating and when that match finished."""
+
+    completed_at: datetime
+    rating: int
+
+
+class PlayerProgression(BaseModel):
+    """A single player's rating-over-time series for a tournament.
+
+    ``points`` are completed-match rating observations on the tournament's
+    leaderboard, oldest-first — the consumer plots ``rating`` against
+    ``completed_at`` for a by-date view, or against point index for a
+    by-games-played view. A player with no completed-match history on the
+    leaderboard is omitted from the series list entirely.
+    """
+
+    profile_id: int
+    alias: str
+    points: list[RatingPoint]

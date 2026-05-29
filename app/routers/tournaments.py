@@ -36,6 +36,8 @@ from app.models import (
 )
 from app.schemas import (
     ListEnvelope,
+    PlayerProgression,
+    RatingPoint,
     StandingRow,
     StandingTeam,
     TeamMemberRead,
@@ -469,6 +471,59 @@ async def get_standings(
     return ListEnvelope[StandingRow](
         last_polled_at=compute_last_polled_at(timestamps),
         items=items,
+    )
+
+
+@router.get("/{tournament_slug}/progression")
+async def get_progression(
+    request: Request,
+    response: Response,
+    tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
+) -> ListEnvelope[PlayerProgression]:
+    """Per-player rating-over-time for the tournament's roster.
+
+    One series per roster player who has completed-match history on the
+    tournament's leaderboard: a list of ``(completed_at, rating)`` points
+    oldest-first, where ``rating`` is the post-match value. The consumer
+    plots rating against ``completed_at`` for a by-date view, or against
+    point index for a by-games-played view. Players with no such history
+    are omitted, and points reach back only as far as the poller's match
+    record — not a player's whole career.
+    """
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
+
+    roster = select(TournamentPlayer.profile_id).where(
+        TournamentPlayer.tournament_id == tournament.id
+    )
+    stmt = (
+        select(Player.profile_id, Player.alias, Match.completed_at, MatchPlayer.new_rating)
+        .join(MatchPlayer, MatchPlayer.profile_id == Player.profile_id)
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Player.profile_id.in_(roster),
+            Match.leaderboard_id == tournament.leaderboard_id,
+            Match.completed_at.is_not(None),
+            MatchPlayer.new_rating.is_not(None),
+        )
+        # Alpha by alias for a stable legend; chronological within a player.
+        .order_by(Player.alias, Player.profile_id, Match.completed_at, Match.match_id)
+    )
+    rows = (await session.execute(stmt)).all()
+
+    series: dict[int, PlayerProgression] = {}
+    timestamps: list[datetime | None] = []
+    for profile_id, alias, completed_at, rating in rows:
+        player_series = series.get(profile_id)
+        if player_series is None:
+            player_series = PlayerProgression(profile_id=profile_id, alias=alias, points=[])
+            series[profile_id] = player_series
+        player_series.points.append(RatingPoint(completed_at=completed_at, rating=rating))
+        timestamps.append(completed_at)
+
+    return ListEnvelope[PlayerProgression](
+        last_polled_at=compute_last_polled_at(timestamps),
+        items=list(series.values()),
     )
 
 

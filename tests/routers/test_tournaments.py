@@ -896,3 +896,95 @@ class TestDeleteTournament:
         assert (await session.execute(select(Team))).first() is None
         assert (await session.execute(select(TeamMember))).first() is None
         assert (await session.execute(select(TournamentOwner))).first() is None
+
+
+class TestProgression:
+    """GET /{slug}/progression: per-player rating-over-time series."""
+
+    async def test_per_player_series_oldest_first(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1, alias="hera")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=1530))
+        session.add(player)
+        # Three completed matches, ascending dates and post-match ratings.
+        for match_id, day, rating in ((101, 1, 1490), (102, 2, 1510), (103, 3, 1530)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 5, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/progression")).json()
+        assert len(body["items"]) == 1
+        series = body["items"][0]
+        assert series["profile_id"] == 1
+        assert series["alias"] == "hera"
+        assert [p["rating"] for p in series["points"]] == [1490, 1510, 1530]
+        # ISO-8601 UTC strings sort lexicographically = chronologically.
+        completed = [p["completed_at"] for p in series["points"]]
+        assert completed == sorted(completed)
+        assert body["last_polled_at"] is not None
+
+    async def test_scoped_to_tournament_leaderboard(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A match on another leaderboard contributes no points.
+        player = make_player(1, alias="hera")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=1500))
+        session.add(player)
+        on = make_match(201, leaderboard_id=3)
+        on.players.append(make_match_player(201, profile_id=1, new_rating=1500))
+        off = make_match(202, leaderboard_id=4)
+        off.players.append(make_match_player(202, profile_id=1, new_rating=1234))
+        session.add_all([on, off])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        series = (await client.get("/v1/tournaments/cup/progression")).json()["items"][0]
+        assert [p["rating"] for p in series["points"]] == [1500]
+
+    async def test_scoped_to_roster(self, client: AsyncClient, session: AsyncSession):
+        # Player 2 has history on the leaderboard but is not on the roster.
+        for pid in (1, 2):
+            p = make_player(pid, alias=f"p{pid}")
+            p.ratings.append(make_player_rating(pid, leaderboard_id=3, current_rating=1500))
+            session.add(p)
+            match = make_match(300 + pid, leaderboard_id=3)
+            match.players.append(make_match_player(300 + pid, profile_id=pid, new_rating=1500))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/progression")).json()["items"]
+        assert [s["profile_id"] for s in items] == [1]
+
+    async def test_excludes_in_progress_matches(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1, alias="hera")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=1500))
+        session.add(player)
+        done = make_match(401, leaderboard_id=3)
+        done.players.append(make_match_player(401, profile_id=1, new_rating=1500))
+        # In-progress: no completion time, no settled rating — not a point.
+        live = make_match(402, leaderboard_id=3, state=MatchState.IN_PROGRESS, completed_at=None)
+        live.players.append(make_match_player(402, profile_id=1, outcome=None, new_rating=None))
+        session.add_all([done, live])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        series = (await client.get("/v1/tournaments/cup/progression")).json()["items"][0]
+        assert [p["rating"] for p in series["points"]] == [1500]
+
+    async def test_empty_when_no_history(self, client: AsyncClient, session: AsyncSession):
+        # Rostered player with no matches → omitted; empty list overall.
+        player = make_player(1, alias="hera")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=1500))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/progression")).json()
+        assert body == {"last_polled_at": None, "items": []}
