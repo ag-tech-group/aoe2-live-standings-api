@@ -22,6 +22,7 @@ class TournamentRead(BaseModel):
     leaderboard_id: int
     start_date: datetime | None
     grand_finals_date: datetime | None
+    prize_pool_cents: int | None
     created_at: datetime
 
 
@@ -45,6 +46,7 @@ class TournamentCreate(BaseModel):
     leaderboard_id: int = Field(gt=0)
     start_date: datetime | None = None
     grand_finals_date: datetime | None = None
+    prize_pool_cents: int | None = Field(default=None, ge=0)
 
 
 class TournamentUpdate(BaseModel):
@@ -64,6 +66,7 @@ class TournamentUpdate(BaseModel):
     leaderboard_id: int | None = Field(default=None, gt=0)
     start_date: datetime | None = None
     grand_finals_date: datetime | None = None
+    prize_pool_cents: int | None = Field(default=None, ge=0)
 
     @field_validator("name", "leaderboard_id")
     @classmethod
