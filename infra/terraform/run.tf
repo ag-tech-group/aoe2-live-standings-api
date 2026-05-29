@@ -286,6 +286,35 @@ resource "google_cloud_run_v2_service" "worker" {
         }
       }
 
+      # Broadcast-live detection (#112) — Twitch + YouTube poller
+      # credentials. Worker only: the api service reads results from the DB,
+      # never calls Twitch/YouTube. The Client ID is non-secret (a var); the
+      # two secrets come from Secret Manager (see secrets.tf). Each poller is
+      # a no-op until its credential is set, so an unset key disables only
+      # that platform.
+      env {
+        name  = "TWITCH_CLIENT_ID"
+        value = var.twitch_client_id
+      }
+      env {
+        name = "TWITCH_CLIENT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = data.google_secret_manager_secret.twitch_client_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "YOUTUBE_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = data.google_secret_manager_secret.youtube_api_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+
       # OpenTelemetry tracing — same config as the api service. The
       # worker's poll-tick spans are exported alongside the api's
       # request spans into the same Cloud Trace project.

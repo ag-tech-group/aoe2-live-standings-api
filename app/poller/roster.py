@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Tournament, TournamentPlayer
+from app.poller.broadcast import extract_stream_urls
 
 logger = structlog.get_logger(__name__)
 
@@ -51,3 +52,20 @@ async def get_tracked_profile_ids(session: AsyncSession) -> list[int]:
     """Return the union of every tournament's tracked profile IDs."""
     rows = await session.execute(select(TournamentPlayer.profile_id).distinct())
     return list(rows.scalars().all())
+
+
+async def get_stream_urls_by_profile(session: AsyncSession) -> dict[int, list[str]]:
+    """Map each tracked profile to the stream URLs in its presentation bag(s).
+
+    A profile can sit on several tournament rosters; its URLs are the union
+    across them (deduped, order-preserving). Profiles with no stream URLs
+    are omitted. Feeds the broadcast-live pollers.
+    """
+    rows = await session.execute(select(TournamentPlayer.profile_id, TournamentPlayer.presentation))
+    by_profile: dict[int, list[str]] = {}
+    for profile_id, presentation in rows.all():
+        for url in extract_stream_urls(presentation or {}):
+            bucket = by_profile.setdefault(profile_id, [])
+            if url not in bucket:
+                bucket.append(url)
+    return by_profile

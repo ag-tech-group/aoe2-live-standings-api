@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     twitch_client_id: str = ""
     twitch_client_secret: str = ""
 
+    # YouTube broadcast-live detection (#112). Empty disables it. Quota is
+    # the real constraint, not the credential: the Data API's free 10k
+    # units/day vs. search.list at 100 units/call means only a handful of
+    # channels can be polled, on a slow cadence (see run_youtube_live_poller).
+    # Supplied in prod from the `youtube-api-key` Secret Manager secret.
+    youtube_api_key: str = ""
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

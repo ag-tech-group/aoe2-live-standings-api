@@ -69,3 +69,30 @@ resource "google_secret_manager_secret_version" "database_url" {
 data "google_secret_manager_secret" "sentry_dsn" {
   secret_id = "sentry-dsn"
 }
+
+# --- Broadcast-live credentials (#112) ------------------------------------
+#
+# Externally managed, same model as SENTRY_DSN: the worker references these
+# via `secret_key_ref` in run.tf, and the project-level secretAccessor IAM
+# (iam.tf) makes them readable without per-secret grants. Both must exist
+# before `tofu apply` (the `data` lookups resolve at plan time). The Twitch
+# Client ID is *not* here — it's non-secret and lives in var.twitch_client_id.
+#
+# Seeding recipe (one-time, per secret):
+#
+#   gcloud --account=<email> --project=aoe2-live-standings-api \
+#     secrets create twitch-client-secret --replication-policy=automatic
+#   echo -n "<secret value>" \
+#     | gcloud --account=<email> --project=aoe2-live-standings-api \
+#         secrets versions add twitch-client-secret --data-file=-
+#
+# (same for youtube-api-key). Rotation: add a new version; the next revision
+# roll picks up `version = "latest"`.
+
+data "google_secret_manager_secret" "twitch_client_secret" {
+  secret_id = "twitch-client-secret"
+}
+
+data "google_secret_manager_secret" "youtube_api_key" {
+  secret_id = "youtube-api-key"
+}

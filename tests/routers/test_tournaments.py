@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     LiveMatchPlayer,
+    LiveStream,
     MatchOutcome,
     MatchState,
     Team,
@@ -988,3 +989,26 @@ class TestProgression:
 
         body = (await client.get("/v1/tournaments/cup/progression")).json()
         assert body == {"last_polled_at": None, "items": []}
+
+
+class TestStandingsStreamLive:
+    """stream_live: folded onto the standings row from the live_streams snapshot."""
+
+    async def test_reflects_live_streams_table(self, client: AsyncClient, session: AsyncSession):
+        for profile_id in (1, 2):
+            player = make_player(profile_id, alias=f"p{profile_id}")
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=2000 - profile_id)
+            )
+            session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3))
+        # Profile 1 is live (on any platform); profile 2 is not.
+        session.add(LiveStream(profile_id=1, platform="twitch"))
+        await session.commit()
+
+        rows = {
+            row["profile_id"]: row
+            for row in (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        }
+        assert rows[1]["stream_live"] is True
+        assert rows[2]["stream_live"] is False

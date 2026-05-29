@@ -32,9 +32,15 @@ from fastapi import FastAPI
 from app.config import settings
 from app.database import async_session_maker
 from app.events import listen_for_nudges
+from app.poller.broadcast import (
+    TwitchLiveClient,
+    YouTubeLiveClient,
+    build_broadcast_http_client,
+)
 from app.poller.client import build_upstream_client
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import run_live_matches_poller
+from app.poller.live_streams import run_twitch_live_poller, run_youtube_live_poller
 from app.poller.player_stats import run_player_stats_poller
 from app.poller.recent_matches import run_recent_matches_poller
 from app.poller.roster import ensure_seed_tournament
@@ -47,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Boot the listener and/or pollers per settings; tear them down on shutdown."""
     tasks: list[asyncio.Task] = []
     client = None
+    broadcast_http = None
 
     if settings.listener_enabled:
         tasks.append(
@@ -78,6 +85,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ),
             ]
         )
+        # Broadcast-live detection (#112) is opt-in per platform: each task
+        # starts only when its credentials are set, so a deploy without them
+        # (and local dev) simply runs no stream detection. Twitch and YouTube
+        # share one httpx client, built lazily on first use.
+        if settings.twitch_client_id and settings.twitch_client_secret:
+            broadcast_http = build_broadcast_http_client()
+            twitch = TwitchLiveClient(
+                settings.twitch_client_id, settings.twitch_client_secret, broadcast_http
+            )
+            tasks.append(
+                asyncio.create_task(
+                    run_twitch_live_poller(twitch, async_session_maker),
+                    name="poll_twitch_live",
+                )
+            )
+        if settings.youtube_api_key:
+            broadcast_http = broadcast_http or build_broadcast_http_client()
+            youtube = YouTubeLiveClient(settings.youtube_api_key, broadcast_http)
+            tasks.append(
+                asyncio.create_task(
+                    run_youtube_live_poller(youtube, async_session_maker),
+                    name="poll_youtube_live",
+                )
+            )
         logger.info("polling_starting")
 
     if not tasks:
@@ -96,3 +127,5 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.gather(*tasks, return_exceptions=True)
         if client is not None:
             await client.aclose()
+        if broadcast_http is not None:
+            await broadcast_http.aclose()
