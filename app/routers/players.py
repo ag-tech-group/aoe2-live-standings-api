@@ -67,10 +67,22 @@ async def list_players(
     )
     players = (await session.execute(stmt)).scalars().all()
 
+    # Fold in each player's presentation bag (stored on `tournament_players`,
+    # not `Player`) so the admin roster view can read/edit current values.
+    presentation_rows = (
+        await session.execute(
+            select(TournamentPlayer.profile_id, TournamentPlayer.presentation).where(
+                TournamentPlayer.tournament_id == tournament.id,
+            )
+        )
+    ).all()
+    presentations = dict(presentation_rows)
+
     items: list[PlayerRead] = []
     timestamps: list[datetime | None] = []
     for player in players:
         player_read = PlayerRead.model_validate(player)
+        player_read.presentation = presentations.get(player.profile_id, {})
         if leaderboard_id is not None:
             player_read.ratings = [
                 r for r in player_read.ratings if r.leaderboard_id == leaderboard_id
@@ -106,15 +118,15 @@ async def get_player(
     """
     apply_live_cache_control(request, response, cdn_seconds=_PLAYERS_CDN_SECONDS)
 
-    in_roster = (
+    roster_entry = (
         await session.execute(
-            select(TournamentPlayer.profile_id).where(
+            select(TournamentPlayer).where(
                 TournamentPlayer.tournament_id == tournament.id,
                 TournamentPlayer.profile_id == profile_id,
             )
         )
-    ).first()
-    if in_roster is None:
+    ).scalar_one_or_none()
+    if roster_entry is None:
         raise HTTPException(status_code=404, detail="Player not found in this tournament")
 
     player_stmt = (
@@ -144,6 +156,7 @@ async def get_player(
         update={
             "last_polled_at": compute_last_polled_at(timestamps),
             "recent_matches": recent_matches,
+            "presentation": roster_entry.presentation,
         }
     )
 
@@ -232,13 +245,13 @@ async def update_roster_player(
     actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    """Edit a roster entry's curated fields — owner-gated.
+    """Replace a roster entry's presentation bag — owner-gated.
 
-    Currently just ``stream_url``: the player's official stream link, shown
-    in the standings "Watch Live" column. Pass a URL to set it, or ``null``
-    to clear it. 404 if the profile isn't on this tournament's roster. The
-    polled ``Player`` / rating rows are untouched — this writes only the
-    organizer-curated roster row.
+    ``presentation`` is opaque per-player display data (stream links, bio,
+    etc.) the consumer renders; the whole object is replaced (read-modify-
+    write to change one key). 404 if the profile isn't on this tournament's
+    roster. The polled ``Player`` / rating rows are untouched — this writes
+    only the organizer-curated roster row.
     """
     entry = (
         await session.execute(
@@ -251,7 +264,7 @@ async def update_roster_player(
     if entry is None:
         raise HTTPException(status_code=404, detail="Player not found in this tournament")
 
-    entry.stream_url = payload.stream_url
+    entry.presentation = payload.presentation
     await session.commit()
     audit(
         AuditAction.ROSTER_UPDATE,
@@ -259,5 +272,5 @@ async def update_roster_player(
         tournament_slug=tournament.slug,
         tournament_id=tournament.id,
         target_profile_id=profile_id,
-        stream_url=payload.stream_url,
+        presentation_keys=sorted(payload.presentation),
     )

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from urllib.parse import urlparse
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -44,6 +45,10 @@ class PlayerRead(BaseModel):
     region_id: int
     clan_name: str | None
     updated_at: datetime
+    # Per-tournament presentation bag, folded in by the tournament-scoped
+    # roster endpoints (it lives on `tournament_players`, not `Player`).
+    # Empty object when unset.
+    presentation: dict = Field(default_factory=dict)
     ratings: list[PlayerRatingRead]
 
 
@@ -67,26 +72,26 @@ class RosterPlayerCreate(BaseModel):
     profile_id: int = Field(gt=0)
 
 
-class RosterPlayerUpdate(BaseModel):
-    """Owner edit for a roster entry's curated fields.
+_MAX_PRESENTATION_BYTES = 8192
 
-    Currently just the player's official stream link, shown in the
-    standings "Watch Live" column. ``stream_url`` is required in the body
-    but nullable: pass an ``http(s)`` URL to set it, or ``null`` to clear it.
+
+class RosterPlayerUpdate(BaseModel):
+    """Owner edit for a roster entry's presentation data.
+
+    ``presentation`` is an opaque per-player bag the consumer renders —
+    stream links, bio text, whatever the frontend defines. The API stores
+    it verbatim and never interprets its keys. The body must include it (an
+    empty object clears the bag); the whole object is replaced, so callers
+    read-modify-write.
     """
 
-    stream_url: str | None = Field(max_length=2048)
+    presentation: dict[str, Any]
 
-    @field_validator("stream_url")
+    @field_validator("presentation")
     @classmethod
-    def _validate_stream_url(cls, value: str | None) -> str | None:
-        # A null clears the link; any non-null value must be an absolute
-        # http(s) URL. urlparse also rejects scheme-only strings like
-        # `javascript:...`, since those have no netloc.
-        if value is None:
-            return None
-        candidate = value.strip()
-        parsed = urlparse(candidate)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise ValueError("stream_url must be an absolute http(s) URL")
-        return candidate
+    def _within_size_limit(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Bound the serialized size so one roster row can't bloat every
+        # standings response. The API doesn't otherwise inspect the bag.
+        if len(json.dumps(value).encode()) > _MAX_PRESENTATION_BYTES:
+            raise ValueError(f"presentation must serialize to <= {_MAX_PRESENTATION_BYTES} bytes")
+        return value
