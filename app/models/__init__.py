@@ -8,7 +8,6 @@ from app.models.tournament import (
     TeamMember,
     Tournament,
     TournamentOwner,
-    TournamentPlaceholderPlayer,
     TournamentPlayer,
 )
 
@@ -27,6 +26,5 @@ __all__ = [
     "TeamMember",
     "Tournament",
     "TournamentOwner",
-    "TournamentPlaceholderPlayer",
     "TournamentPlayer",
 ]

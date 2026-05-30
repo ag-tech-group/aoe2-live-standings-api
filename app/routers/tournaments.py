@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
@@ -33,7 +33,6 @@ from app.models import (
     TeamMember,
     Tournament,
     TournamentOwner,
-    TournamentPlaceholderPlayer,
     TournamentPlayer,
 )
 from app.schemas import (
@@ -428,25 +427,28 @@ async def get_standings(
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
 ) -> ListEnvelope[StandingRow]:
-    """The tournament's players, ranked by current rating on its leaderboard.
+    """The tournament's roster — polled identities ranked, placeholders at tail.
 
-    Scoped to the tournament's roster (``TournamentPlayer``) and joined left
-    to ``PlayerRating`` on its ``leaderboard_id`` — a roster member without
-    a rating row on that leaderboard (typically a brand-new account that
-    hasn't played its first ranked match) still surfaces, with null rating
-    fields and a zero record, sorted to the tail. ``recent_results`` and
-    live-match status are folded in by further queries over the same set.
+    One query over ``tournament_players`` left-joined to ``Player`` (the
+    polled identity, when one exists) and ``PlayerRating`` (when the
+    polled identity has a rating on the tournament's leaderboard). Three
+    row shapes fall out of the same SELECT, ordered by:
+
+    1. ranked polled rows first, by current_rating DESC (NULLS LAST);
+    2. unrated polled rows next, by profile_id ASC;
+    3. placeholder rows last, by name ASC.
+
+    The leaderboard filter lives in the join condition, not the WHERE
+    clause — putting it in WHERE would re-filter the outer-join right
+    back to inner-join behaviour. The outer filter keeps a real entry
+    visible only once its ``Player`` row has been polled (no half-state
+    where a newly-added profile_id surfaces without an alias).
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
-    roster = select(TournamentPlayer.profile_id).where(
-        TournamentPlayer.tournament_id == tournament.id
-    )
-    # The leaderboard filter lives in the join condition, not the WHERE
-    # clause — putting it in WHERE would undo the outer-join and drop
-    # roster members without a rating on this leaderboard.
     stmt = (
-        select(Player, PlayerRating)
+        select(TournamentPlayer, Player, PlayerRating)
+        .outerjoin(Player, TournamentPlayer.profile_id == Player.profile_id)
         .outerjoin(
             PlayerRating,
             and_(
@@ -454,90 +456,83 @@ async def get_standings(
                 PlayerRating.leaderboard_id == tournament.leaderboard_id,
             ),
         )
-        .where(Player.profile_id.in_(roster))
+        .where(
+            TournamentPlayer.tournament_id == tournament.id,
+            # Polled-row visibility gate (see docstring): a real entry
+            # only surfaces once its ``Player`` row exists. Placeholder
+            # rows pass through this OR via the right disjunct.
+            or_(Player.profile_id.is_not(None), TournamentPlayer.profile_id.is_(None)),
+        )
         .order_by(
             PlayerRating.current_rating.desc().nulls_last(),
-            Player.profile_id.asc(),
+            TournamentPlayer.profile_id.asc().nulls_last(),
+            TournamentPlayer.name.asc(),
         )
     )
     rows = (await session.execute(stmt)).all()
 
-    profile_ids = [player.profile_id for player, _ in rows]
+    profile_ids = [entry.profile_id for entry, _, _ in rows if entry.profile_id is not None]
     recent_results = await _recent_results_by_profile(
         session, tournament.leaderboard_id, profile_ids
     )
     live_match_ids = await _live_match_by_profile(session, profile_ids)
     tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
     teams_by_profile = await _team_by_profile(session, tournament.id)
-    presentations = await _presentation_by_profile(session, tournament.id)
     stream_live_profiles = await _stream_live_by_profile(session, profile_ids)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
-    for player, rating in rows:
-        items.append(
-            StandingRow(
-                profile_id=player.profile_id,
-                alias=player.alias,
-                country=player.country,
-                team=teams_by_profile.get(player.profile_id),
-                presentation=presentations.get(player.profile_id, {}),
-                current_rating=rating.current_rating if rating else None,
-                max_rating=rating.max_rating if rating else None,
-                wins=rating.wins if rating else 0,
-                losses=rating.losses if rating else 0,
-                streak=rating.streak if rating else 0,
-                recent_results=recent_results.get(player.profile_id, []),
-                tournament_record=tournament_records[player.profile_id],
-                rank=rating.rank if rating else None,
-                rank_total=rating.rank_total if rating else None,
-                in_match=player.profile_id in live_match_ids,
-                live_match_id=live_match_ids.get(player.profile_id),
-                stream_live=player.profile_id in stream_live_profiles,
-                last_match_at=rating.last_match_at if rating else None,
-                updated_at=rating.updated_at if rating else player.updated_at,
+    for entry, player, rating in rows:
+        if player is not None:
+            items.append(
+                StandingRow(
+                    profile_id=player.profile_id,
+                    alias=player.alias,
+                    country=player.country,
+                    team=teams_by_profile.get(player.profile_id),
+                    presentation=entry.presentation,
+                    current_rating=rating.current_rating if rating else None,
+                    max_rating=rating.max_rating if rating else None,
+                    wins=rating.wins if rating else 0,
+                    losses=rating.losses if rating else 0,
+                    streak=rating.streak if rating else 0,
+                    recent_results=recent_results.get(player.profile_id, []),
+                    tournament_record=tournament_records[player.profile_id],
+                    rank=rating.rank if rating else None,
+                    rank_total=rating.rank_total if rating else None,
+                    in_match=player.profile_id in live_match_ids,
+                    live_match_id=live_match_ids.get(player.profile_id),
+                    stream_live=player.profile_id in stream_live_profiles,
+                    last_match_at=rating.last_match_at if rating else None,
+                    updated_at=rating.updated_at if rating else player.updated_at,
+                )
             )
-        )
-        timestamps.append(player.updated_at)
-        timestamps.append(rating.updated_at if rating else None)
-
-    # Append announced placeholder rows at the tail, ordered by name. These
-    # are roster slots without a `profile_id` yet (typically streamers who
-    # haven't played their first ranked match — there's no Steam→profile
-    # lookup, so they enter as named placeholders until the id mints). The
-    # row carries the placeholder's display name as `alias`, the same
-    # opaque presentation bag a real roster entry would, and null on
-    # everything that requires a polled identity.
-    placeholders_stmt = (
-        select(TournamentPlaceholderPlayer.name, TournamentPlaceholderPlayer.presentation)
-        .where(TournamentPlaceholderPlayer.tournament_id == tournament.id)
-        .order_by(TournamentPlaceholderPlayer.name.asc())
-    )
-    placeholders = (await session.execute(placeholders_stmt)).all()
-    for name, presentation in placeholders:
-        items.append(
-            StandingRow(
-                profile_id=None,
-                alias=name,
-                country=None,
-                team=None,
-                presentation=presentation,
-                current_rating=None,
-                max_rating=None,
-                wins=0,
-                losses=0,
-                streak=0,
-                recent_results=[],
-                tournament_record=TournamentRecord(games_played=0, wins=0, losses=0, streak=0),
-                rank=None,
-                rank_total=None,
-                in_match=False,
-                live_match_id=None,
-                stream_live=False,
-                last_match_at=None,
-                updated_at=None,
+            timestamps.append(player.updated_at)
+            timestamps.append(rating.updated_at if rating else None)
+        else:
+            items.append(
+                StandingRow(
+                    profile_id=None,
+                    alias=entry.name or "",
+                    country=None,
+                    team=None,
+                    presentation=entry.presentation,
+                    current_rating=None,
+                    max_rating=None,
+                    wins=0,
+                    losses=0,
+                    streak=0,
+                    recent_results=[],
+                    tournament_record=TournamentRecord(games_played=0, wins=0, losses=0, streak=0),
+                    rank=None,
+                    rank_total=None,
+                    in_match=False,
+                    live_match_id=None,
+                    stream_live=False,
+                    last_match_at=None,
+                    updated_at=None,
+                )
             )
-        )
 
     return ListEnvelope[StandingRow](
         last_polled_at=compute_last_polled_at(timestamps),

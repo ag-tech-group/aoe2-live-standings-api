@@ -1,6 +1,16 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -47,10 +57,6 @@ class Tournament(Base):
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
-    placeholder_players: Mapped[list["TournamentPlaceholderPlayer"]] = relationship(
-        back_populates="tournament",
-        cascade="all, delete-orphan",
-    )
     teams: Mapped[list["Team"]] = relationship(
         back_populates="tournament",
         cascade="all, delete-orphan",
@@ -62,20 +68,31 @@ class Tournament(Base):
 
 
 class TournamentPlayer(Base):
-    """A profile tracked by a tournament — the poller's per-tournament roster.
+    """A roster entry — either a polled identity or an announced placeholder.
 
-    No FK to ``players``: a profile is added to a tournament as *input* to
-    the poller, before any ``Player`` row exists for it. Mirrors the
-    FK-free ``profile_id`` on ``MatchPlayer`` / ``LiveMatchPlayer``.
+    A row carries EITHER a ``profile_id`` (a real polled identity — the
+    poller fetches its data from worldsedgelink each cycle) OR a ``name``
+    (an announced placeholder whose ``profile_id`` hasn't minted yet —
+    streamers on a host's announced roster who haven't played their first
+    ranked match). XOR enforced at the schema level by a check constraint;
+    the surrogate ``id`` PK lets promotion from placeholder → real player
+    happen via PATCH on a stable URL (the host sets ``profile_id`` and
+    the row's ``name`` is cleared in the same transaction).
+
+    No FK to ``players``: a profile is added as *input* to the poller,
+    before any ``Player`` row exists for it; placeholder rows have no
+    ``Player`` at all. Mirrors the FK-free ``profile_id`` on
+    ``MatchPlayer`` / ``LiveMatchPlayer``.
     """
 
     __tablename__ = "tournament_players"
 
+    id: Mapped[int] = mapped_column(primary_key=True)
     tournament_id: Mapped[int] = mapped_column(
         ForeignKey("tournaments.id", ondelete="CASCADE"),
-        primary_key=True,
     )
-    profile_id: Mapped[int] = mapped_column(primary_key=True)
+    profile_id: Mapped[int | None] = mapped_column(nullable=True)
+    name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Opaque per-player presentation data for this tournament — stream
     # links, bio text, etc. — set by an owner via PATCH and rendered by the
     # consumer. The API stores it but never interprets it (a pass-through
@@ -86,39 +103,28 @@ class TournamentPlayer(Base):
     tournament: Mapped[Tournament] = relationship(back_populates="tracked_players")
 
     __table_args__ = (
+        # Exactly one of profile_id / name is set per row.
+        CheckConstraint(
+            "(profile_id IS NULL) <> (name IS NULL)",
+            name="ck_tournament_players_profile_id_xor_name",
+        ),
+        # Unique within a tournament. Postgres treats NULL as distinct in
+        # UNIQUE, so multiple placeholder rows (NULL profile_id) coexist
+        # and multiple polled rows (NULL name) coexist — the XOR check
+        # above keeps NULL paired with a non-null sibling on every row.
+        UniqueConstraint(
+            "tournament_id",
+            "profile_id",
+            name="uq_tournament_players_tournament_id_profile_id",
+        ),
+        UniqueConstraint(
+            "tournament_id",
+            "name",
+            name="uq_tournament_players_tournament_id_name",
+        ),
         # Find every tournament a profile belongs to.
         Index("ix_tournament_players_profile_id", "profile_id"),
     )
-
-
-class TournamentPlaceholderPlayer(Base):
-    """An announced-but-unjoined roster slot — a named placeholder.
-
-    Some streamers on a host's announced roster don't yet have an aoe2
-    profile (a ``profile_id`` mints only after a first ranked match, and
-    there's no Steam→profile lookup). They can't be represented in
-    ``tournament_players`` — that table's PK requires ``profile_id`` —
-    but the host still wants them visible on the public standings/players
-    page as "rostered but no data yet". Placeholder rows live here.
-
-    A placeholder carries only a display name and the same opaque
-    ``presentation`` bag tournament_players uses (so flag/streamUrls work
-    identically); it does not get polled, and cannot be assigned to a
-    team (team membership keys on ``profile_id``). When the player mints
-    a ``profile_id``, the host removes the placeholder and adds a real
-    ``TournamentPlayer``, carrying over the presentation bag.
-    """
-
-    __tablename__ = "tournament_placeholder_players"
-
-    tournament_id: Mapped[int] = mapped_column(
-        ForeignKey("tournaments.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    name: Mapped[str] = mapped_column(String(64), primary_key=True)
-    presentation: Mapped[dict] = mapped_column(JSON, default=dict)
-
-    tournament: Mapped[Tournament] = relationship(back_populates="placeholder_players")
 
 
 class TournamentOwner(Base):

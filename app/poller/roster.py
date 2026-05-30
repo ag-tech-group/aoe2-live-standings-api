@@ -49,8 +49,17 @@ async def ensure_seed_tournament(session: AsyncSession) -> None:
 
 
 async def get_tracked_profile_ids(session: AsyncSession) -> list[int]:
-    """Return the union of every tournament's tracked profile IDs."""
-    rows = await session.execute(select(TournamentPlayer.profile_id).distinct())
+    """Return the union of every tournament's tracked profile IDs.
+
+    Placeholder roster rows (``profile_id IS NULL``) are skipped — by
+    design they're announced-but-unjoined entrants the poller can't
+    fetch anything for. They appear once the host promotes them.
+    """
+    rows = await session.execute(
+        select(TournamentPlayer.profile_id)
+        .where(TournamentPlayer.profile_id.is_not(None))
+        .distinct()
+    )
     return list(rows.scalars().all())
 
 
@@ -59,9 +68,15 @@ async def get_stream_urls_by_profile(session: AsyncSession) -> dict[int, list[st
 
     A profile can sit on several tournament rosters; its URLs are the union
     across them (deduped, order-preserving). Profiles with no stream URLs
-    are omitted. Feeds the broadcast-live pollers.
+    are omitted. Feeds the broadcast-live pollers. Placeholder rows
+    (``profile_id IS NULL``) are skipped here for the same reason as in
+    ``get_tracked_profile_ids``.
     """
-    rows = await session.execute(select(TournamentPlayer.profile_id, TournamentPlayer.presentation))
+    rows = await session.execute(
+        select(TournamentPlayer.profile_id, TournamentPlayer.presentation).where(
+            TournamentPlayer.profile_id.is_not(None)
+        )
+    )
     by_profile: dict[int, list[str]] = {}
     for profile_id, presentation in rows.all():
         for url in extract_stream_urls(presentation or {}):
