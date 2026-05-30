@@ -95,3 +95,56 @@ class RosterPlayerUpdate(BaseModel):
         if len(json.dumps(value).encode()) > _MAX_PRESENTATION_BYTES:
             raise ValueError(f"presentation must serialize to <= {_MAX_PRESENTATION_BYTES} bytes")
         return value
+
+
+class RosterPlaceholderRead(BaseModel):
+    """An announced placeholder roster slot — read shape.
+
+    Streamers on a host's announced roster whose ``profile_id`` hasn't
+    minted yet (no first ranked match) live as named placeholders.
+    See ``TournamentPlaceholderPlayer`` in the model layer for the
+    architectural rationale.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    presentation: dict = Field(default_factory=dict)
+
+
+class RosterPlaceholderCreate(BaseModel):
+    """Request body for adding a placeholder roster slot.
+
+    ``name`` is the public display name (the placeholder's ``alias`` on
+    the standings row); ``presentation`` is the same opaque bag a real
+    roster entry carries — pass it now and the standings page renders
+    flag/streamUrls/displayName from day one.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    presentation: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("presentation")
+    @classmethod
+    def _within_size_limit(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(json.dumps(value).encode()) > _MAX_PRESENTATION_BYTES:
+            raise ValueError(f"presentation must serialize to <= {_MAX_PRESENTATION_BYTES} bytes")
+        return value
+
+
+class RosterPlaceholderUpdate(BaseModel):
+    """Owner edit for a placeholder's presentation bag.
+
+    Same replace-whole-object semantics as ``RosterPlayerUpdate``; the
+    placeholder's ``name`` is immutable (it's the routing key — delete +
+    re-create to rename).
+    """
+
+    presentation: dict[str, Any]
+
+    @field_validator("presentation")
+    @classmethod
+    def _within_size_limit(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(json.dumps(value).encode()) > _MAX_PRESENTATION_BYTES:
+            raise ValueError(f"presentation must serialize to <= {_MAX_PRESENTATION_BYTES} bytes")
+        return value
