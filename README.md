@@ -188,12 +188,6 @@ Configure via `LOG_LEVEL` env var (default: `INFO`).
 
 OpenTelemetry tracing is included but disabled by default. To enable, set `OTEL_ENABLED=true` and point `OTEL_EXPORTER_ENDPOINT` at your collector (e.g. Jaeger, Grafana Tempo). FastAPI is auto-instrumented — no code changes needed.
 
-### Analytics
-
-`app/analytics.py` provides an `AnalyticsBackend` protocol with `track()` and `identify()` methods. The default `LogAnalyticsBackend` writes events to structlog. Swap it out by replacing the `analytics` module-level instance with your own implementation (e.g. Segment, PostHog).
-
-Use the `get_analytics()` FastAPI dependency to access it in route handlers.
-
 ### Feature Flags
 
 Feature flags are read from `FEATURE_*` environment variables at startup (no database required). Set `FEATURE_<NAME>=true` or `false` in your `.env`.
@@ -293,7 +287,6 @@ aoe2-live-standings-api/
 │   ├── models/                # SQLAlchemy models
 │   ├── routers/               # FastAPI routers, mounted under /v1
 │   ├── schemas/               # Pydantic request/response schemas
-│   ├── analytics.py           # Analytics event abstraction
 │   ├── config.py              # Settings (env-backed) + production validation
 │   ├── database.py            # Async SQLAlchemy setup
 │   ├── features.py            # Feature flags (env-var backed) + /v1/flags
