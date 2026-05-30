@@ -190,7 +190,9 @@ OpenTelemetry tracing is included but disabled by default. To enable, set `OTEL_
 
 ### Monitoring
 
-Cloud Monitoring covers the prod deployment. Alert policies live in [`infra/terraform/monitoring.tf`](infra/terraform/monitoring.tf) (poller silent-failure, upstream rate-limit) and [`infra/terraform/capacity_alerts.tf`](infra/terraform/capacity_alerts.tf) (Cloud Run concurrency, SQL CPU/connections). A single-pane event-day dashboard is defined in [`infra/terraform/dashboard.tf`](infra/terraform/dashboard.tf); the deploy outputs its URL as `event_day_dashboard_url`.
+Cloud Monitoring covers the prod deployment. Alert policies live in [`infra/terraform/monitoring.tf`](infra/terraform/monitoring.tf) (poller silent-failure, upstream rate-limit) and [`infra/terraform/capacity_alerts.tf`](infra/terraform/capacity_alerts.tf) (Cloud Run concurrency, SQL CPU/connections).
+
+A single-pane event-day dashboard (request rate, latency percentiles, instance counts, Postgres connections + CPU, poller per-task ok rate, upstream 429s) is defined in [`infra/terraform/dashboard.tf`](infra/terraform/dashboard.tf) and lives at [console.cloud.google.com/monitoring/dashboards/builder/8926650c-e0a2-45e6-bb1a-d2f0d02f04bc](https://console.cloud.google.com/monitoring/dashboards/builder/8926650c-e0a2-45e6-bb1a-d2f0d02f04bc?project=aoe2-live-standings-api). The deploy also outputs this URL as `event_day_dashboard_url` so it survives a destroy-recreate without manual lookup.
 
 ### Feature Flags
 

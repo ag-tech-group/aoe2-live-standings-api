@@ -22,6 +22,7 @@ infra/
 │   ├── uptime.tf           # Uptime checks on the read surface + alert
 │   ├── alerts_sentry.tf    # Pub/Sub topic + Cloud Function + channel: alerts → Sentry
 │   ├── capacity_alerts.tf  # Event-window capacity alerts (SQL CPU/conns, Run instances)
+│   ├── dashboard.tf        # Event-day Cloud Monitoring dashboard (single-pane health)
 │   └── outputs.tf
 ├── functions/
 │   └── cloud-monitoring-to-sentry/   # Cloud Function source (forwards alerts to Sentry)
