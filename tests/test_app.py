@@ -32,6 +32,13 @@ class TestSecurityTxt:
         body = response.text
         assert "Contact:" in body
         assert "Expires:" in body
+        # Canonical field per RFC 9116 — pins this URL so the file can't be
+        # claimed by a third party serving a copy elsewhere.
+        assert "Canonical:" in body
+        # Regression guard: the file shipped with `security@example.com`
+        # as a placeholder and was served live for a stretch before being
+        # caught. Don't let that happen again.
+        assert "example.com" not in body
 
 
 class TestRateLimitExemptions:

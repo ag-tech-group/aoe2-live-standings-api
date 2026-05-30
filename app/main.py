@@ -231,12 +231,19 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# Per https://securitytxt.org/ — security researchers and automated scanners
-# look for this file to find a disclosure contact. Replace the contact before
-# deploying and bump Expires before the date below.
+# Per RFC 9116 / https://securitytxt.org/ — security researchers and
+# automated scanners look for this file to find a disclosure contact.
+#
+# - `Contact` can be swapped for a dedicated `security@` alias if one
+#   gets provisioned; currently routes to the project owner directly.
+# - `Canonical` pins this URL as the authoritative location so the file
+#   can't be claimed by a third party who served a copy elsewhere.
+# - `Expires` must be in the future at all times — bump it before the
+#   date below. RFC 9116 recommends keeping it within ~12 months.
 SECURITY_TXT = """\
-Contact: mailto:security@example.com
-Expires: 2027-05-12T00:00:00.000Z
+Contact: mailto:amr@agtechgroup.solutions
+Expires: 2027-05-30T00:00:00.000Z
+Canonical: https://aoe2-live-standings-api.criticalbit.gg/.well-known/security.txt
 Preferred-Languages: en
 """
 
