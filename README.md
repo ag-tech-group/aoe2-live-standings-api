@@ -188,6 +188,10 @@ Configure via `LOG_LEVEL` env var (default: `INFO`).
 
 OpenTelemetry tracing is included but disabled by default. To enable, set `OTEL_ENABLED=true` and point `OTEL_EXPORTER_ENDPOINT` at your collector (e.g. Jaeger, Grafana Tempo). FastAPI is auto-instrumented — no code changes needed.
 
+### Monitoring
+
+Cloud Monitoring covers the prod deployment. Alert policies live in [`infra/terraform/monitoring.tf`](infra/terraform/monitoring.tf) (poller silent-failure, upstream rate-limit) and [`infra/terraform/capacity_alerts.tf`](infra/terraform/capacity_alerts.tf) (Cloud Run concurrency, SQL CPU/connections). A single-pane event-day dashboard is defined in [`infra/terraform/dashboard.tf`](infra/terraform/dashboard.tf); the deploy outputs its URL as `event_day_dashboard_url`.
+
 ### Feature Flags
 
 Feature flags are read from `FEATURE_*` environment variables at startup (no database required). Set `FEATURE_<NAME>=true` or `false` in your `.env`.
