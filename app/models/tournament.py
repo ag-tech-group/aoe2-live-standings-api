@@ -47,6 +47,10 @@ class Tournament(Base):
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
+    placeholder_players: Mapped[list["TournamentPlaceholderPlayer"]] = relationship(
+        back_populates="tournament",
+        cascade="all, delete-orphan",
+    )
     teams: Mapped[list["Team"]] = relationship(
         back_populates="tournament",
         cascade="all, delete-orphan",
@@ -85,6 +89,36 @@ class TournamentPlayer(Base):
         # Find every tournament a profile belongs to.
         Index("ix_tournament_players_profile_id", "profile_id"),
     )
+
+
+class TournamentPlaceholderPlayer(Base):
+    """An announced-but-unjoined roster slot — a named placeholder.
+
+    Some streamers on a host's announced roster don't yet have an aoe2
+    profile (a ``profile_id`` mints only after a first ranked match, and
+    there's no Steam→profile lookup). They can't be represented in
+    ``tournament_players`` — that table's PK requires ``profile_id`` —
+    but the host still wants them visible on the public standings/players
+    page as "rostered but no data yet". Placeholder rows live here.
+
+    A placeholder carries only a display name and the same opaque
+    ``presentation`` bag tournament_players uses (so flag/streamUrls work
+    identically); it does not get polled, and cannot be assigned to a
+    team (team membership keys on ``profile_id``). When the player mints
+    a ``profile_id``, the host removes the placeholder and adds a real
+    ``TournamentPlayer``, carrying over the presentation bag.
+    """
+
+    __tablename__ = "tournament_placeholder_players"
+
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    presentation: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    tournament: Mapped[Tournament] = relationship(back_populates="placeholder_players")
 
 
 class TournamentOwner(Base):

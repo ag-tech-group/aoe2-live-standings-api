@@ -67,12 +67,23 @@ class StandingRow(BaseModel):
     within the tournament's date window; ``in_match`` / ``live_match_id``
     are current live-match status. Sorted by ``current_rating`` desc, with
     unrated roster members (no rating row on the tournament's leaderboard
-    — typically brand-new accounts) at the tail, ordered by ``profile_id``.
+    — typically brand-new accounts) next by ``profile_id``, and announced
+    placeholder roster slots last by ``alias`` (their display name).
+
+    Placeholder rows surface announced-but-unjoined entrants — streamers
+    whose ``profile_id`` hasn't minted yet. ``profile_id`` is null on
+    these rows (no detail page to link to), ``alias`` carries their
+    display name, ``presentation`` carries their bag (so flag/streamUrls
+    work identically), and every other field is null/zero. ``updated_at``
+    is null too — no polled refresh signal applies.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
-    profile_id: int
+    # Null on placeholder rows (announced-but-unjoined streamers without
+    # a ``profile_id`` yet — see class docstring). Non-null on every
+    # rated and unrated roster row.
+    profile_id: int | None
     alias: str
     country: str | None
     # The player's team in this tournament, or null when they're on no
@@ -85,9 +96,9 @@ class StandingRow(BaseModel):
     presentation: dict
     # Null when the roster member has no rating row on this tournament's
     # leaderboard yet (e.g. a brand-new account that hasn't played its
-    # first ranked match). The other lifetime-ladder fields below are 0
-    # in that case, and ``recent_results`` / ``tournament_record`` are
-    # empty/zero.
+    # first ranked match), and on placeholder rows. The other lifetime-
+    # ladder fields below are 0 in those cases, and ``recent_results`` /
+    # ``tournament_record`` are empty/zero.
     current_rating: int | None
     max_rating: int | None
     wins: int
@@ -114,7 +125,9 @@ class StandingRow(BaseModel):
     # offline/unknown.
     stream_live: bool
     last_match_at: datetime | None
-    updated_at: datetime
+    # Null on placeholder rows (no polled refresh applies); the row's
+    # ``last_polled_at`` envelope simply doesn't consider these.
+    updated_at: datetime | None
 
     # Derived from the lifetime-ladder wins/losses above (not the
     # tournament_record). Computed server-side so every consumer agrees on

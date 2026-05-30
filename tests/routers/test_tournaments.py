@@ -15,6 +15,7 @@ from app.models import (
     TeamMember,
     Tournament,
     TournamentOwner,
+    TournamentPlaceholderPlayer,
     TournamentPlayer,
 )
 from app.routers.tournaments import _RECENT_RESULTS_LIMIT
@@ -331,6 +332,90 @@ class TestStandingsUnratedRoster:
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
         assert [row["profile_id"] for row in items] == [50, 10, 20, 30]
+
+
+class TestStandingsPlaceholderTail:
+    """Announced placeholder roster slots appear at the standings tail."""
+
+    async def test_placeholder_appears_after_rated_and_unrated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Rated + unrated + placeholder, all on the same tournament. Order:
+        # rated first (by rating DESC), unrated next (by profile_id ASC),
+        # placeholder last with profile_id null + alias = its name.
+        rated = make_player(10, alias="rated")
+        rated.ratings.append(make_player_rating(10, leaderboard_id=3, current_rating=2000))
+        session.add(rated)
+        session.add(make_player(20, alias="newbie"))
+        tournament = make_tournament("cup", profile_ids=[10, 20], leaderboard_id=3)
+        tournament.placeholder_players = [
+            TournamentPlaceholderPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        ]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["rated", "newbie", "iyouxin"]
+        ghost = items[2]
+        assert ghost["profile_id"] is None
+        assert ghost["alias"] == "iyouxin"
+        assert ghost["country"] is None
+        assert ghost["team"] is None
+        assert ghost["presentation"] == {"flag": "🇺🇦"}
+        assert ghost["current_rating"] is None
+        assert ghost["max_rating"] is None
+        assert ghost["wins"] == 0
+        assert ghost["losses"] == 0
+        assert ghost["streak"] == 0
+        assert ghost["recent_results"] == []
+        assert ghost["tournament_record"] == {
+            "games_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "streak": 0,
+        }
+        assert ghost["rank"] is None
+        assert ghost["rank_total"] is None
+        assert ghost["in_match"] is False
+        assert ghost["live_match_id"] is None
+        assert ghost["stream_live"] is False
+        assert ghost["last_match_at"] is None
+        assert ghost["updated_at"] is None
+        assert ghost["games"] == 0
+        assert ghost["win_pct"] is None
+
+    async def test_placeholder_tail_sorted_alphabetically(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Three placeholders, no real players. Tail is name-sorted ASC.
+        tournament = make_tournament("cup")
+        tournament.placeholder_players = [
+            TournamentPlaceholderPlayer(name="Zeke"),
+            TournamentPlaceholderPlayer(name="Alice"),
+            TournamentPlaceholderPlayer(name="Marco"),
+        ]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["Alice", "Marco", "Zeke"]
+
+    async def test_placeholder_only_returns_three_rows(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A tournament with placeholders but no real roster members still
+        # renders a populated standings — important for the "announced before
+        # anyone plays" announcement-window state.
+        tournament = make_tournament("cup")
+        tournament.placeholder_players = [
+            TournamentPlaceholderPlayer(name=n) for n in ("iyouxin", "Jabo", "Gunnar")
+        ]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert len(items) == 3
+        assert all(row["profile_id"] is None for row in items)
 
 
 class TestStandingsDerivedFields:

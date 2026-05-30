@@ -42,6 +42,10 @@ class AuditAction(StrEnum):
     ROSTER_REMOVE = "roster_remove"
     ROSTER_UPDATE = "roster_update"
 
+    PLACEHOLDER_ADD = "placeholder_add"
+    PLACEHOLDER_REMOVE = "placeholder_remove"
+    PLACEHOLDER_UPDATE = "placeholder_update"
+
     TEAM_CREATE = "team_create"
     TEAM_UPDATE = "team_update"
     TEAM_DELETE = "team_delete"
@@ -59,6 +63,7 @@ def audit(
     target_user_id: str | None = None,
     target_profile_id: int | None = None,
     target_team_id: int | None = None,
+    target_placeholder_name: str | None = None,
     **extra: Any,
 ) -> None:
     """Emit one audit event.
@@ -85,6 +90,8 @@ def audit(
         payload["target_profile_id"] = target_profile_id
     if target_team_id is not None:
         payload["target_team_id"] = target_team_id
+    if target_placeholder_name is not None:
+        payload["target_placeholder_name"] = target_placeholder_name
     payload.update(extra)
 
     _logger.info(action.value, **payload)

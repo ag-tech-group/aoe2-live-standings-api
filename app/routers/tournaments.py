@@ -33,6 +33,7 @@ from app.models import (
     TeamMember,
     Tournament,
     TournamentOwner,
+    TournamentPlaceholderPlayer,
     TournamentPlayer,
 )
 from app.schemas import (
@@ -499,6 +500,44 @@ async def get_standings(
         )
         timestamps.append(player.updated_at)
         timestamps.append(rating.updated_at if rating else None)
+
+    # Append announced placeholder rows at the tail, ordered by name. These
+    # are roster slots without a `profile_id` yet (typically streamers who
+    # haven't played their first ranked match — there's no Steam→profile
+    # lookup, so they enter as named placeholders until the id mints). The
+    # row carries the placeholder's display name as `alias`, the same
+    # opaque presentation bag a real roster entry would, and null on
+    # everything that requires a polled identity.
+    placeholders_stmt = (
+        select(TournamentPlaceholderPlayer.name, TournamentPlaceholderPlayer.presentation)
+        .where(TournamentPlaceholderPlayer.tournament_id == tournament.id)
+        .order_by(TournamentPlaceholderPlayer.name.asc())
+    )
+    placeholders = (await session.execute(placeholders_stmt)).all()
+    for name, presentation in placeholders:
+        items.append(
+            StandingRow(
+                profile_id=None,
+                alias=name,
+                country=None,
+                team=None,
+                presentation=presentation,
+                current_rating=None,
+                max_rating=None,
+                wins=0,
+                losses=0,
+                streak=0,
+                recent_results=[],
+                tournament_record=TournamentRecord(games_played=0, wins=0, losses=0, streak=0),
+                rank=None,
+                rank_total=None,
+                in_match=False,
+                live_match_id=None,
+                stream_live=False,
+                last_match_at=None,
+                updated_at=None,
+            )
+        )
 
     return ListEnvelope[StandingRow](
         last_polled_at=compute_last_polled_at(timestamps),
