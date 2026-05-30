@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# TODO: one-line summary of what this script does, e.g.
+# "Backfills tournament_players.presentation.profileUrl on polled roster
+#  rows with each player's canonical aoe2insights URL."
+#
+# TODO: notes on the dynamic computation source — what API/parse/transform
+# happens per row, what counts as a confident match, what skipping looks
+# like. The point is that someone reading this in a year understands what
+# the script intended *without* running it.
+#
+# Dry-run-by-default; APPLY=1 commits:
+#   ./prod-<name>.sh            # dry run, prod unchanged
+#   APPLY=1 ./prod-<name>.sh    # commit
+#
+# TODO: if the Python child caches lookups to /tmp/<name>-cache.json so
+# a follow-up APPLY=1 run re-uses the dry-run's results, mention it here
+# (and how to invalidate: delete the cache file).
+
+set -euo pipefail
+
+ACCOUNT="amr@agtechgroup.solutions"
+PROJECT="aoe2-live-standings-api"
+INSTANCE_CONN="${PROJECT}:us-central1:aoe2-standings-db"
+DB_USER="aoe2_app"
+DB_NAME="aoe2_live_standings"
+PORT=15432
+PROXY_LOG="/tmp/csql-proxy-$$.log"
+REPO_DIR="/home/amr/code/aoe2/aoe2-live-standings-api"
+# TODO: set this to the Python child you wrote alongside this script.
+PY_CHILD="/tmp/prod-<name>.py"
+
+if [[ "${APPLY:-0}" == "1" ]]; then
+  MODE="APPLY (commits to prod)"
+else
+  MODE="DRY RUN (rolls back; prod unchanged)"
+fi
+echo "Mode: $MODE"
+echo
+
+command -v cloud-sql-proxy >/dev/null \
+  || { echo "error: cloud-sql-proxy not found on PATH" >&2; exit 1; }
+gcloud auth list --format="value(account)" --filter="account=$ACCOUNT" \
+  | grep -q "$ACCOUNT" \
+  || { echo "error: $ACCOUNT is not authenticated" >&2; exit 1; }
+[[ -f "$PY_CHILD" ]] \
+  || { echo "error: $PY_CHILD missing — write it next to this script" >&2; exit 1; }
+
+DATABASE_URL=$(gcloud secrets versions access latest \
+  --secret=database-url --account="$ACCOUNT" --project="$PROJECT")
+DB_PASS=$(printf '%s' "$DATABASE_URL" \
+  | sed -E 's|^[^:]+://[^:]+:([^@]+)@.*|\1|')
+
+echo "Starting cloud-sql-proxy on :$PORT..."
+cloud-sql-proxy "$INSTANCE_CONN" --port "$PORT" \
+  --token "$(gcloud auth print-access-token --account="$ACCOUNT")" \
+  >"$PROXY_LOG" 2>&1 &
+PROXY_PID=$!
+trap 'kill $PROXY_PID 2>/dev/null || true; rm -f "$PROXY_LOG"' EXIT
+
+for _ in $(seq 1 30); do
+  if PGCONNECT_TIMEOUT=2 PGPASSWORD="$DB_PASS" \
+       psql -h 127.0.0.1 -p "$PORT" -U "$DB_USER" -d "$DB_NAME" -c '\q' \
+       >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+
+# The Python child reads DB_DSN + APPLY from the env, runs the whole plan
+# in a single asyncpg transaction, and rolls back unless APPLY=1.
+export DB_DSN="postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:${PORT}/${DB_NAME}"
+export APPLY="${APPLY:-0}"
+
+cd "$REPO_DIR"
+uv run python "$PY_CHILD"
+
+echo
+echo "Done. Mode was: $MODE"
+if [[ "${APPLY:-0}" != "1" ]]; then
+  echo "Re-run with APPLY=1 to actually commit the updates."
+fi

@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""TODO: one-line summary matching the shell wrapper's header.
+
+Invoked by /tmp/prod-<name>.sh which sets DB_DSN, APPLY, and (via the
+proxy) routes asyncpg at the Cloud SQL prod instance.
+
+TODO: explain *why* this needs to be dynamic — what per-row computation
+is happening, and why it can't be expressed as plain SQL. The reader
+should be able to tell, just from this docstring, what would happen if
+they re-ran the script in six months.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+
+import asyncpg
+
+# TODO: replace with your throttle / cache path / external-service base.
+# Drop the curl shim entirely if this script doesn't do third-party HTTP.
+# Polite UA: identify the script and provide a contact channel for the
+# upstream site's owner if they need to reach you.
+UA = "aoe2-live-standings-api <task> (contact: TODO)"
+THROTTLE_SECONDS = 1.0
+CACHE_PATH = "/tmp/prod-<name>-cache.json"
+
+# ---- Optional: third-party HTTP via curl ------------------------------
+# Cloudflare TLS-fingerprints Python's urllib/requests and returns the
+# "Just a moment..." 403 challenge. curl negotiates HTTP/2 with a browser-
+# shaped TLS profile and passes. Two parsing gotchas: HTTP/2 returns
+# **lowercase** header names (`location`, not `Location`) and the Location
+# header is sometimes a **relative** path — resolve against the request base.
+_CURL = shutil.which("curl") or "/usr/bin/curl"
+
+
+def _http_get(url: str, *, follow_redirects: bool = False) -> tuple[int, dict[str, str], bytes]:
+    max_redirs = "50" if follow_redirects else "0"
+    follow_flag = ["-L"] if follow_redirects else []
+    with tempfile.NamedTemporaryFile() as body_f, tempfile.NamedTemporaryFile() as hdr_f:
+        proc = subprocess.run(
+            [
+                _CURL, "-sS", *follow_flag, "--max-redirs", max_redirs,
+                "-A", UA, "-o", body_f.name, "-D", hdr_f.name,
+                "-w", "%{http_code}", "--max-time", "15", url,
+            ],
+            capture_output=True, check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"curl failed ({proc.returncode}): {proc.stderr.decode(errors='replace').strip()}")
+        code = int(proc.stdout.decode().strip() or 0)
+        body = body_f.read()
+        hdr_text = hdr_f.read().decode("latin-1")
+    blocks = [b for b in hdr_text.split("\r\n\r\n") if b.strip()]
+    last_block = blocks[-1] if blocks else hdr_text
+    headers: dict[str, str] = {}
+    for line in last_block.split("\r\n"):
+        if ":" in line and not line.startswith("HTTP/"):
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()  # lowercase per HTTP/2
+    return code, headers, body
+# ---- end Optional ----------------------------------------------------
+
+
+@dataclass
+class Lookup:
+    # TODO: shape this to whatever per-row decision you're making.
+    # Keep skip_reason as a free-text field so the dry-run output explains
+    # *why* each unmatched row was skipped.
+    key: int
+    matched_value: str | None
+    skip_reason: str | None
+
+
+def _do_lookup(key: int) -> Lookup:
+    # TODO: per-row computation. If it's a third-party fetch, call _http_get.
+    # If it's a parse / transform / cross-table read, do that instead.
+    # Return a Lookup with skip_reason set on any case you're not confident
+    # about — "wrong link on a public broadcast page is worse than no link"
+    # generalises: prefer skipping over guessing.
+    raise NotImplementedError
+
+
+def _load_cache() -> dict[str, dict]:
+    try:
+        with open(CACHE_PATH) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def _save_cache(cache: dict[str, dict]) -> None:
+    with open(CACHE_PATH, "w") as f:
+        json.dump(cache, f, indent=2, sort_keys=True)
+
+
+def _resolve_lookups(keys: list[int]) -> dict[int, Lookup]:
+    """Cache the lookup results so APPLY=1 re-uses the dry-run's mapping."""
+    cache = _load_cache()
+    lookups: dict[int, Lookup] = {}
+    fetched_this_run = 0
+    for i, k in enumerate(keys, start=1):
+        ck = str(k)
+        if ck in cache:
+            e = cache[ck]
+            lookups[k] = Lookup(k, e.get("matched_value"), e.get("skip_reason"))
+            tag = "CACHED"
+        else:
+            if fetched_this_run > 0:
+                time.sleep(THROTTLE_SECONDS)
+            lk = _do_lookup(k)
+            lookups[k] = lk
+            cache[ck] = {"matched_value": lk.matched_value, "skip_reason": lk.skip_reason}
+            fetched_this_run += 1
+            tag = "FETCH "
+        lk = lookups[k]
+        status = "OK   " if lk.matched_value else "SKIP "
+        info = lk.matched_value or lk.skip_reason
+        print(f"  [{i:>3}/{len(keys)}] {tag} {k:>10}  {status}{info}")
+    _save_cache(cache)
+    return lookups
+
+
+class _DryRunRollback(BaseException):
+    """Sentinel to roll back the asyncpg transaction at the end of a dry-run."""
+    pass
+
+
+async def main() -> int:
+    dsn = os.environ["DB_DSN"]
+    apply_changes = os.environ.get("APPLY", "0") == "1"
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        # TODO: SELECT the rows you want to touch. Join in any context
+        # columns you need for human-readable dry-run output (slug, alias).
+        rows = await conn.fetch(
+            """
+            SELECT id, /* TODO: columns you need */ presentation
+              FROM tournament_players
+             WHERE /* TODO: filter */
+             ORDER BY id
+            """
+        )
+
+        # TODO: extract the keys you'll look up. If lookups are per-row and
+        # rows can share a key (e.g. same profile_id across tournaments),
+        # de-dup first to be polite to the upstream service.
+        unique_keys = sorted({r["id"] for r in rows})
+        print(f"Rows: {len(rows)}; unique keys to look up: {len(unique_keys)}")
+        print()
+        print("=== Lookups ===")
+        lookups = _resolve_lookups(unique_keys)
+
+        print()
+        print("=== Per-row plan ===")
+        to_update: list[tuple] = []
+        unchanged = 0
+        skipped = 0
+        for r in rows:
+            lk = lookups[r["id"]]
+            if lk.matched_value is None:
+                print(f"  SKIP  id={r['id']}  reason: {lk.skip_reason}")
+                skipped += 1
+                continue
+            # TODO: read-modify-write for a JSON column, or build the
+            # UPDATE values for whatever you're writing. Always preserve
+            # any fields you aren't explicitly changing — same contract
+            # as the API's PATCH endpoints.
+            #
+            # For a JSON bag (presentation), the read-modify-write looks like:
+            #   raw = r["presentation"]
+            #   pres = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+            #   if pres.get("<key>") == lk.matched_value:
+            #       print(f"  KEEP  id={r['id']}  already set")
+            #       unchanged += 1
+            #       continue
+            #   new_pres = dict(pres)
+            #   new_pres["<key>"] = lk.matched_value
+            #   to_update.append((r["id"], new_pres))
+            pass
+
+        print()
+        print(f"Plan: {len(to_update)} updates, {unchanged} already-correct, {skipped} skipped")
+        if not to_update:
+            print("No changes needed.")
+            return 0
+
+        try:
+            async with conn.transaction():
+                for tp_id, new_pres in to_update:
+                    # TODO: the actual UPDATE. Cast to ::json (the column
+                    # type in this project) — NOT ::jsonb.
+                    await conn.execute(
+                        "UPDATE tournament_players SET presentation = $2::json WHERE id = $1",
+                        tp_id, json.dumps(new_pres),
+                    )
+                if not apply_changes:
+                    print()
+                    print("DRY RUN: rolling back transaction.")
+                    raise _DryRunRollback
+            print()
+            print(f"COMMITTED {len(to_update)} updates to prod.")
+        except _DryRunRollback:
+            pass
+        return 0
+    finally:
+        await conn.close()
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
