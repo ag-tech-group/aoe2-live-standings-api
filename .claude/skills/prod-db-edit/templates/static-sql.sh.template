@@ -57,6 +57,11 @@ done
 
 PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p "$PORT" -U "$DB_USER" -d "$DB_NAME" \
   -v ON_ERROR_STOP=1 <<SQL
+-- Heredoc is intentionally unquoted so \$TRAILER expands. Side effect:
+-- bash interprets BACKTICKS here as command substitution, even inside
+-- SQL comments. Do not use backticks anywhere below — use 'straight
+-- quotes' or plain words instead. (See SKILL.md "No backticks in SQL
+-- comments" gotcha.)
 BEGIN;
 
 \\echo '--- pre-state ---'
