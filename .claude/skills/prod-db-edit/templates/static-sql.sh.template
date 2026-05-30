@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# TODO: one-line summary of what this script does, e.g.
+# "Grants tournament_owner rows to <user_id> for the <slug> tournament."
+#
+# TODO: notes on idempotency — typically a sentence like
+# "Re-runnable: UPDATE on a unique key is naturally idempotent."
+# or "INSERT uses ON CONFLICT DO NOTHING to no-op on re-run."
+#
+# Dry-run-by-default; APPLY=1 commits:
+#   ./prod-<name>.sh            # dry run, prod unchanged
+#   APPLY=1 ./prod-<name>.sh    # commit
+
+set -euo pipefail
+
+ACCOUNT="amr@agtechgroup.solutions"
+PROJECT="aoe2-live-standings-api"
+INSTANCE_CONN="${PROJECT}:us-central1:aoe2-standings-db"
+DB_USER="aoe2_app"
+DB_NAME="aoe2_live_standings"
+PORT=15432
+PROXY_LOG="/tmp/csql-proxy-$$.log"
+
+if [[ "${APPLY:-0}" == "1" ]]; then
+  MODE="APPLY (commits to prod)"
+  TRAILER="COMMIT;"
+else
+  MODE="DRY RUN (rolls back; prod unchanged)"
+  TRAILER="ROLLBACK;"
+fi
+echo "Mode: $MODE"
+echo
+
+command -v cloud-sql-proxy >/dev/null \
+  || { echo "error: cloud-sql-proxy not found on PATH" >&2; exit 1; }
+gcloud auth list --format="value(account)" --filter="account=$ACCOUNT" \
+  | grep -q "$ACCOUNT" \
+  || { echo "error: $ACCOUNT is not authenticated" >&2; exit 1; }
+
+DATABASE_URL=$(gcloud secrets versions access latest \
+  --secret=database-url --account="$ACCOUNT" --project="$PROJECT")
+DB_PASS=$(printf '%s' "$DATABASE_URL" \
+  | sed -E 's|^[^:]+://[^:]+:([^@]+)@.*|\1|')
+
+echo "Starting cloud-sql-proxy on :$PORT..."
+cloud-sql-proxy "$INSTANCE_CONN" --port "$PORT" \
+  --token "$(gcloud auth print-access-token --account="$ACCOUNT")" \
+  >"$PROXY_LOG" 2>&1 &
+PROXY_PID=$!
+trap 'kill $PROXY_PID 2>/dev/null || true; rm -f "$PROXY_LOG"' EXIT
+
+for _ in $(seq 1 30); do
+  if PGCONNECT_TIMEOUT=2 PGPASSWORD="$DB_PASS" \
+       psql -h 127.0.0.1 -p "$PORT" -U "$DB_USER" -d "$DB_NAME" -c '\q' \
+       >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+
+PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p "$PORT" -U "$DB_USER" -d "$DB_NAME" \
+  -v ON_ERROR_STOP=1 <<SQL
+-- Heredoc is intentionally unquoted so \$TRAILER expands. Side effect:
+-- bash interprets BACKTICKS here as command substitution, even inside
+-- SQL comments. Do not use backticks anywhere below — use 'straight
+-- quotes' or plain words instead. (See SKILL.md "No backticks in SQL
+-- comments" gotcha.)
+BEGIN;
+
+\\echo '--- pre-state ---'
+-- TODO: replace with a SELECT that captures the relevant counts/rows
+-- BEFORE the write, so the dry-run output shows what's about to change.
+-- Example:
+-- SELECT COUNT(*) AS empty_presentation_count
+--   FROM tournament_players
+--   WHERE tournament_id = 1 AND presentation::text = '{}';
+
+-- TODO: the actual write(s). Examples:
+-- UPDATE tournament_players SET presentation = '{...}'::json
+--   WHERE tournament_id = 1 AND profile_id = 12345;
+-- INSERT INTO tournament_owners (tournament_id, user_id) VALUES (1, '...')
+--   ON CONFLICT DO NOTHING;
+-- DELETE FROM team_members WHERE team_id = 99 AND profile_id = 12345;
+
+\\echo '--- post-state (inside txn) ---'
+-- TODO: same shape as the pre-state SELECT — re-run it so the diff is
+-- obvious in the dry-run output.
+
+\\echo '--- sample rows ---'
+-- TODO: SELECT a few affected rows to eyeball-verify the write shape.
+
+$TRAILER
+SQL
+
+echo
+echo "Done. Mode was: $MODE"
+if [[ "${APPLY:-0}" != "1" ]]; then
+  echo "Re-run with APPLY=1 to actually commit the updates."
+fi
