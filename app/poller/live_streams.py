@@ -103,12 +103,17 @@ async def tick_twitch_live(
     stream_urls: dict[int, list[str]],
     session_maker: async_sessionmaker,
 ) -> None:
-    """One Twitch cycle: resolve live logins, fold to profiles, persist on change."""
+    """One Twitch cycle: resolve live logins, fold to profiles, persist + nudge on change.
+
+    Emits ``poll_twitch_live_ok`` per tick (not just on change) so a
+    Cloud Monitoring ``condition_absent`` alert can detect a wedged
+    poller — matches the per-cycle heartbeat the other pollers emit.
+    """
     by_login = _twitch_logins_by_profile(stream_urls)
     live_logins = await twitch.get_live_logins(list(by_login)) if by_login else set()
     live_profiles = {pid for login in live_logins for pid in by_login[login]}
-    if await _apply_live_set(session_maker, PLATFORM_TWITCH, live_profiles):
-        logger.info("poll_twitch_live_ok", live=len(live_profiles))
+    await _apply_live_set(session_maker, PLATFORM_TWITCH, live_profiles)
+    logger.info("poll_twitch_live_ok", live=len(live_profiles))
 
 
 async def tick_youtube_live(
@@ -116,12 +121,17 @@ async def tick_youtube_live(
     stream_urls: dict[int, list[str]],
     session_maker: async_sessionmaker,
 ) -> None:
-    """One YouTube cycle: check Twitch-less channels, persist on change."""
+    """One YouTube cycle: check Twitch-less channels, persist + nudge on change.
+
+    Emits ``poll_youtube_live_ok`` per tick (not just on change) so a
+    Cloud Monitoring ``condition_absent`` alert can detect a wedged
+    poller — matches the per-cycle heartbeat the other pollers emit.
+    """
     by_ref = _youtube_refs_by_profile(stream_urls)
     live_refs = await youtube.get_live_refs(list(by_ref)) if by_ref else set()
     live_profiles = {pid for ref in live_refs for pid in by_ref[ref]}
-    if await _apply_live_set(session_maker, PLATFORM_YOUTUBE, live_profiles):
-        logger.info("poll_youtube_live_ok", live=len(live_profiles))
+    await _apply_live_set(session_maker, PLATFORM_YOUTUBE, live_profiles)
+    logger.info("poll_youtube_live_ok", live=len(live_profiles))
 
 
 async def run_twitch_live_poller(

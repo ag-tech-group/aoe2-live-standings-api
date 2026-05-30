@@ -43,8 +43,9 @@
 
 locals {
   # Each entry: the task's poll cadence (informational only — the
-  # absence-duration is uniform across tasks). Duration must be a
-  # whole-minute multiple per Cloud Monitoring (10m = 600s = ✓).
+  # absence-duration is per-task, since the broadcast pollers run at
+  # very different cadences than the main three). Duration must be a
+  # whole-minute multiple per Cloud Monitoring.
   poller_tasks = {
     live_matches = {
       cadence_seconds  = 15
@@ -57,6 +58,19 @@ locals {
     recent_matches = {
       cadence_seconds  = 60
       absence_duration = "600s" # 10× cadence
+    }
+    twitch_live = {
+      cadence_seconds  = 60
+      absence_duration = "600s" # 10× cadence
+    }
+    # YouTube polls at 30-min cadence (quota-bound — see
+    # app/poller/live_streams.py:_YOUTUBE_INTERVAL_SECONDS). Tighten this
+    # only if more YouTube-only players land on the roster and the
+    # 90-min absence buffer becomes uncomfortable; 3× cadence absorbs the
+    # occasional skipped tick without false-firing.
+    youtube_live = {
+      cadence_seconds  = 1800
+      absence_duration = "5400s" # 3× cadence
     }
   }
 
@@ -86,16 +100,29 @@ resource "google_logging_metric" "poll_ok" {
   }
 }
 
-# Bridge the freshly-created metrics into a queryable state before the
+# Bridge freshly-created metrics into a queryable state before any
 # alert policy references them. Cloud Monitoring takes up to a few
 # minutes to make a new log-based metric resolvable by `metric.type=`,
 # and `google_monitoring_alert_policy` validates that filter at create
 # time — so on a clean apply, the policy races the metrics and fails
-# with 404. This wait runs only on the *first* apply (when this
-# resource itself is being created); subsequent applies skip it.
+# with 404. The `triggers` block re-runs the sleep whenever the
+# universe of metrics changes (new poller task added, or a new
+# sibling metric like `upstream_rate_limited`), so a "just adding one
+# more metric" apply gets the same propagation window as the first
+# apply did.
 resource "time_sleep" "wait_for_metric_propagation" {
-  depends_on      = [google_logging_metric.poll_ok]
+  depends_on = [
+    google_logging_metric.poll_ok,
+    google_logging_metric.upstream_rate_limited,
+  ]
   create_duration = "180s"
+
+  triggers = {
+    metric_set = join(",", concat(
+      keys(google_logging_metric.poll_ok),
+      [google_logging_metric.upstream_rate_limited.name],
+    ))
+  }
 }
 
 # Email notification channel. Created in unverified state — Google
@@ -150,6 +177,56 @@ resource "google_monitoring_alert_policy" "poller_stalled" {
 
   documentation {
     content   = "The polling worker hasn't emitted a `poll_<task>_ok` event within the expected cadence window. The poller task may have died, the Cloud Run instance may be wedged, or the process may be otherwise stuck. Check Cloud Run revision status on `aoe2-live-standings-api-worker`; a forced revision roll (push a new image, or `gcloud run services update --update-env-vars=DUMMY=now`) typically clears wedges. If absence persists across a fresh revision, the bug is in the poller code."
+    mime_type = "text/markdown"
+  }
+}
+
+# Upstream worldsedgelink rate-limit signal (#120). The poller's HTTP
+# client logs a distinct `upstream_rate_limited` event on every 429
+# response; this metric counts them, the alert fires when they sustain.
+#
+# Routed to the Sentry channel — this is an actionable infra signal
+# (knob to adjust: poll cadence or upstream coordination), not a
+# silent-failure absence, so it doesn't share the UI-only treatment of
+# the silent-failure alert above.
+resource "google_logging_metric" "upstream_rate_limited" {
+  name        = "upstream_rate_limited"
+  description = "Upstream worldsedgelink 429 responses logged by the worker poller."
+  filter      = "${local.worker_log_filter} AND jsonPayload.event=\"upstream_rate_limited\""
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_monitoring_alert_policy" "upstream_rate_limited" {
+  display_name = "Upstream worldsedgelink — sustained rate-limit responses"
+  combiner     = "OR"
+  severity     = "WARNING"
+
+  depends_on = [time_sleep.wait_for_metric_propagation]
+
+  notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
+
+  conditions {
+    display_name = "upstream_rate_limited > 5 in any 3-min window"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.upstream_rate_limited.name}\" AND resource.type=\"cloud_run_revision\""
+      duration        = "180s" # 3 minutes (whole-minute required)
+      comparison      = "COMPARISON_GT"
+      threshold_value = 5
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+    }
+  }
+
+  documentation {
+    content   = "The worker's HTTP client is getting 429s from worldsedgelink at a sustained rate (>5 in the last 3 minutes). A transient burst is absorbed by the window; sustained 429s typically mean (a) upstream tightened their rate limit, (b) our poll cadence is too aggressive for the current roster size, or (c) a runaway retry loop. Check the per-task interval constants in `app/poller/*` and the HTTP client config in `app/poller/client.py`. If 429s persist across a cadence reduction, coordinate with the upstream operator."
     mime_type = "text/markdown"
   }
 }
