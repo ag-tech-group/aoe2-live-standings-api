@@ -365,3 +365,206 @@ class TestUpdateRosterPlayer:
             json={"presentation": {"bio": "hi"}},
         )
         assert response.status_code == 403
+
+
+class TestPlaceholderRosterCRUD:
+    """Placeholder lifecycle in the unified roster: add / list / promote / delete."""
+
+    async def test_add_placeholder_with_name(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "iyouxin", "presentation": {"flag": "🇺🇦"}},
+        )
+        assert response.status_code == 204
+
+        row = (await session.execute(select(TournamentPlayer))).scalar_one()
+        assert row.profile_id is None
+        assert row.name == "iyouxin"
+        assert row.presentation == {"flag": "🇺🇦"}
+
+    async def test_add_with_both_profile_id_and_name_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"profile_id": 199325, "name": "iyouxin"},
+        )
+        assert response.status_code == 422
+
+    async def test_add_with_neither_profile_id_nor_name_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={})
+        assert response.status_code == 422
+
+    async def test_add_with_numeric_name_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The polymorphic URL dispatch needs names to be non-numeric so
+        # `/players/12345` is unambiguously a profile_id.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={"name": "12345"})
+        assert response.status_code == 422
+
+    async def test_add_duplicate_placeholder_name_is_409(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        session.add(tournament)
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={"name": "iyouxin"})
+        assert response.status_code == 409
+
+    async def test_list_includes_placeholders_interleaved_by_alpha(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The unified list sorts by display name regardless of row type.
+        for profile_id, alias in ((1, "Marco"), (2, "Zeke")):
+            session.add(make_player(profile_id, alias=alias))
+        tournament = make_tournament("cup", profile_ids=[1, 2])
+        tournament.tracked_players.append(TournamentPlayer(name="Alice"))
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/players")).json()["items"]
+        assert [p["alias"] for p in items] == ["Alice", "Marco", "Zeke"]
+        alice = next(p for p in items if p["alias"] == "Alice")
+        assert alice["profile_id"] is None
+        assert alice["updated_at"] is None
+        assert alice["ratings"] == []
+
+    async def test_patch_placeholder_promotes_when_profile_id_set(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # PATCH /players/iyouxin with profile_id atomically swaps the
+        # row's identity from placeholder → polled and clears `name`.
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.tracked_players.append(
+            TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        )
+        session.add(tournament)
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/iyouxin",
+            json={"profile_id": 12345},
+        )
+        assert response.status_code == 204
+
+        session.expire_all()
+        row = (await session.execute(select(TournamentPlayer))).scalar_one()
+        assert row.profile_id == 12345
+        assert row.name is None
+        # Presentation carries through unchanged.
+        assert row.presentation == {"flag": "🇺🇦"}
+
+    async def test_patch_promote_carries_new_presentation_when_supplied(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.tracked_players.append(
+            TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        )
+        session.add(tournament)
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/iyouxin",
+            json={"profile_id": 12345, "presentation": {"bio": "fresh"}},
+        )
+        assert response.status_code == 204
+
+        session.expire_all()
+        row = (await session.execute(select(TournamentPlayer))).scalar_one()
+        assert row.profile_id == 12345
+        assert row.presentation == {"bio": "fresh"}
+
+    async def test_patch_real_player_with_profile_id_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # profile_id is immutable on a polled-identity row; promotion only
+        # applies to placeholders.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/199325",
+            json={"profile_id": 12345},
+        )
+        assert response.status_code == 422
+
+    async def test_promote_to_existing_profile_id_is_409(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        session.add(tournament)
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup/players/iyouxin",
+            json={"profile_id": 199325},
+        )
+        assert response.status_code == 409
+
+    async def test_delete_placeholder_by_name(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        session.add(tournament)
+        await session.commit()
+
+        response = await client.delete("/v1/tournaments/cup/players/iyouxin")
+        assert response.status_code == 204
+        assert (await session.execute(select(TournamentPlayer))).scalars().all() == []
+
+    async def test_get_player_detail_is_404_for_placeholder(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The detail endpoint is profile_id-only; there's no detail to
+        # show for a placeholder.
+        tournament = make_tournament("cup")
+        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        session.add(tournament)
+        await session.commit()
+
+        # Numeric paths look up by profile_id; a placeholder won't be found.
+        response = await client.get("/v1/tournaments/cup/players/99999")
+        assert response.status_code == 404
+
+    async def test_placeholder_excluded_from_poller_tracked_ids(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        tournament = make_tournament("cup", profile_ids=[199325])
+        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        session.add(tournament)
+        await session.commit()
+
+        tracked = await get_tracked_profile_ids(session)
+        assert tracked == [199325]

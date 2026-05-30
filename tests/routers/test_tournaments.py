@@ -15,7 +15,6 @@ from app.models import (
     TeamMember,
     Tournament,
     TournamentOwner,
-    TournamentPlaceholderPlayer,
     TournamentPlayer,
 )
 from app.routers.tournaments import _RECENT_RESULTS_LIMIT
@@ -348,9 +347,9 @@ class TestStandingsPlaceholderTail:
         session.add(rated)
         session.add(make_player(20, alias="newbie"))
         tournament = make_tournament("cup", profile_ids=[10, 20], leaderboard_id=3)
-        tournament.placeholder_players = [
-            TournamentPlaceholderPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
-        ]
+        tournament.tracked_players.append(
+            TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        )
         session.add(tournament)
         await session.commit()
 
@@ -389,10 +388,10 @@ class TestStandingsPlaceholderTail:
     ):
         # Three placeholders, no real players. Tail is name-sorted ASC.
         tournament = make_tournament("cup")
-        tournament.placeholder_players = [
-            TournamentPlaceholderPlayer(name="Zeke"),
-            TournamentPlaceholderPlayer(name="Alice"),
-            TournamentPlaceholderPlayer(name="Marco"),
+        tournament.tracked_players = [
+            TournamentPlayer(name="Zeke"),
+            TournamentPlayer(name="Alice"),
+            TournamentPlayer(name="Marco"),
         ]
         session.add(tournament)
         await session.commit()
@@ -407,8 +406,8 @@ class TestStandingsPlaceholderTail:
         # renders a populated standings — important for the "announced before
         # anyone plays" announcement-window state.
         tournament = make_tournament("cup")
-        tournament.placeholder_players = [
-            TournamentPlaceholderPlayer(name=n) for n in ("iyouxin", "Jabo", "Gunnar")
+        tournament.tracked_players = [
+            TournamentPlayer(name=n) for n in ("iyouxin", "Jabo", "Gunnar")
         ]
         session.add(tournament)
         await session.commit()

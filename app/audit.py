@@ -41,10 +41,11 @@ class AuditAction(StrEnum):
     ROSTER_ADD = "roster_add"
     ROSTER_REMOVE = "roster_remove"
     ROSTER_UPDATE = "roster_update"
-
-    PLACEHOLDER_ADD = "placeholder_add"
-    PLACEHOLDER_REMOVE = "placeholder_remove"
-    PLACEHOLDER_UPDATE = "placeholder_update"
+    # Placeholder → real player transition. Distinct from ROSTER_UPDATE so
+    # downstream queries can isolate "this row's identity changed" from
+    # "this row's presentation changed" — the two have very different
+    # consumer implications.
+    ROSTER_PROMOTE = "roster_promote"
 
     TEAM_CREATE = "team_create"
     TEAM_UPDATE = "team_update"

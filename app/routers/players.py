@@ -1,11 +1,24 @@
-"""Player endpoints, scoped to a tournament: list, detail, and roster edits."""
+"""Player endpoints, scoped to a tournament: list, detail, and roster edits.
+
+The roster is a single table (``tournament_players``) carrying two row
+types under one schema: real polled identities (``profile_id`` set,
+``name`` null) and announced placeholders (``profile_id`` null, ``name``
+set — streamers whose ``profile_id`` hasn't minted yet). Routing handles
+both with polymorphic URL dispatch on PATCH/DELETE — a numeric path
+segment looks up by ``profile_id``; anything else looks up by ``name``.
+
+Promotion (placeholder → real player) is a PATCH on the same URL: setting
+``profile_id`` in the body atomically moves the row from the placeholder
+state to the polled state, carrying the ``presentation`` bag through. URL
+identity becomes the new ``profile_id`` after promotion.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -36,6 +49,52 @@ router = APIRouter(prefix="/tournaments/{tournament_slug}/players", tags=["playe
 _PLAYERS_CDN_SECONDS = 15
 
 
+def _placeholder_player_read(entry: TournamentPlayer) -> PlayerRead:
+    """Build a PlayerRead for a placeholder row (no polled identity).
+
+    Every polled field is null/empty; ``alias`` carries the host-given
+    ``name`` so the consumer can render the row identically to a polled
+    one (FE renders ``presentation.displayName ?? alias``).
+    """
+    return PlayerRead(
+        profile_id=None,
+        alias=entry.name or "",
+        country=None,
+        steam_id=None,
+        level=None,
+        xp=None,
+        region_id=None,
+        clan_name=None,
+        updated_at=None,
+        presentation=entry.presentation,
+        ratings=[],
+    )
+
+
+async def _find_roster_entry(
+    session: AsyncSession,
+    tournament_id: int,
+    lookup: str,
+) -> TournamentPlayer | None:
+    """Resolve a polymorphic URL lookup to a roster row, or None.
+
+    Numeric lookup → ``profile_id`` match; non-numeric → ``name`` match.
+    ``RosterPlayerCreate`` rejects all-digit names so the dispatch can't
+    alias.
+    """
+    if lookup.isdigit():
+        stmt = select(TournamentPlayer).where(
+            TournamentPlayer.tournament_id == tournament_id,
+            TournamentPlayer.profile_id == int(lookup),
+        )
+    else:
+        stmt = select(TournamentPlayer).where(
+            TournamentPlayer.tournament_id == tournament_id,
+            TournamentPlayer.name == lookup,
+        )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 @router.get("")
 async def list_players(
     request: Request,
@@ -44,52 +103,47 @@ async def list_players(
     session: AsyncSession = Depends(get_async_session),
     leaderboard_id: int | None = Query(
         default=None,
-        description="If set, each player's ratings are filtered to this leaderboard only.",
+        description="If set, each polled player's ratings are filtered to this leaderboard only.",
     ),
 ) -> ListEnvelope[PlayerRead]:
-    """The tournament's roster, with embedded ratings, alphabetical by alias.
+    """The tournament's roster — polled identities and placeholders interleaved.
 
-    Players are returned regardless of whether they have a rating on the
-    requested leaderboard (their ``ratings`` list may be empty). That keeps
-    the response shape stable as a player's leaderboard participation
-    changes.
+    Sorted alphabetically by the row's display name (``alias`` for polled
+    rows, ``name`` for placeholders). Placeholders carry empty ``ratings``
+    and null polled fields; the ``leaderboard_id`` filter is a no-op on
+    them. Real entries whose poller hasn't fetched the ``Player`` row yet
+    (newly added, < one polling cycle old) are hidden — same as before
+    the unification.
     """
     apply_live_cache_control(request, response, cdn_seconds=_PLAYERS_CDN_SECONDS)
 
-    roster = select(TournamentPlayer.profile_id).where(
-        TournamentPlayer.tournament_id == tournament.id
-    )
     stmt = (
-        select(Player)
-        .where(Player.profile_id.in_(roster))
-        .options(selectinload(Player.ratings))
-        .order_by(Player.alias)
-    )
-    players = (await session.execute(stmt)).scalars().all()
-
-    # Fold in each player's presentation bag (stored on `tournament_players`,
-    # not `Player`) so the admin roster view can read/edit current values.
-    presentation_rows = (
-        await session.execute(
-            select(TournamentPlayer.profile_id, TournamentPlayer.presentation).where(
-                TournamentPlayer.tournament_id == tournament.id,
-            )
+        select(TournamentPlayer, Player)
+        .outerjoin(Player, TournamentPlayer.profile_id == Player.profile_id)
+        .where(
+            TournamentPlayer.tournament_id == tournament.id,
+            or_(Player.profile_id.is_not(None), TournamentPlayer.profile_id.is_(None)),
         )
-    ).all()
-    presentations = dict(presentation_rows)
+        .options(selectinload(Player.ratings))
+        .order_by(func.coalesce(Player.alias, TournamentPlayer.name))
+    )
+    rows = (await session.execute(stmt)).all()
 
     items: list[PlayerRead] = []
     timestamps: list[datetime | None] = []
-    for player in players:
-        player_read = PlayerRead.model_validate(player)
-        player_read.presentation = presentations.get(player.profile_id, {})
-        if leaderboard_id is not None:
-            player_read.ratings = [
-                r for r in player_read.ratings if r.leaderboard_id == leaderboard_id
-            ]
+    for entry, player in rows:
+        if player is not None:
+            player_read = PlayerRead.model_validate(player)
+            player_read.presentation = entry.presentation
+            if leaderboard_id is not None:
+                player_read.ratings = [
+                    r for r in player_read.ratings if r.leaderboard_id == leaderboard_id
+                ]
+            timestamps.append(player_read.updated_at)
+            timestamps.extend(r.updated_at for r in player_read.ratings)
+        else:
+            player_read = _placeholder_player_read(entry)
         items.append(player_read)
-        timestamps.append(player_read.updated_at)
-        timestamps.extend(r.updated_at for r in player_read.ratings)
 
     return ListEnvelope[PlayerRead](
         last_polled_at=compute_last_polled_at(timestamps),
@@ -111,10 +165,13 @@ async def get_player(
         description="Max recent matches to include (1-100, default 20).",
     ),
 ) -> PlayerDetail:
-    """A roster player's profile + ratings + most recent matches.
+    """A polled roster player's profile + ratings + most recent matches.
 
-    404 if the profile isn't on this tournament's roster. Matches are
-    joined via ``MatchPlayer.profile_id`` (no FK back to ``Player``).
+    Only addressable by ``profile_id`` (a positive integer in the path) —
+    placeholder rows aren't shown here because there's no polled data to
+    surface. 404 if the profile isn't on this tournament's roster or if
+    it is, but as a placeholder. Matches are joined via
+    ``MatchPlayer.profile_id`` (no FK back to ``Player``).
     """
     apply_live_cache_control(request, response, cdn_seconds=_PLAYERS_CDN_SECONDS)
 
@@ -170,24 +227,36 @@ async def add_roster_player(
     actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    """Add a profile to the tournament's roster — owner-gated.
+    """Add a roster entry — owner-gated.
 
-    409 if the profile is already on the roster. The polling worker picks
-    the new profile up on its next cycle, so the edit takes effect without
-    a redeploy.
+    Body carries either ``profile_id`` (a polled identity that the
+    poller will pick up next cycle) or ``name`` (an announced
+    placeholder). 409 if the identifier is already on the roster.
     """
-    existing = (
-        await session.execute(
-            select(TournamentPlayer).where(
-                TournamentPlayer.tournament_id == tournament.id,
-                TournamentPlayer.profile_id == payload.profile_id,
-            )
+    if payload.profile_id is not None:
+        existing_stmt = select(TournamentPlayer).where(
+            TournamentPlayer.tournament_id == tournament.id,
+            TournamentPlayer.profile_id == payload.profile_id,
         )
-    ).scalar_one_or_none()
+        conflict_detail = "Player already on the roster"
+    else:
+        existing_stmt = select(TournamentPlayer).where(
+            TournamentPlayer.tournament_id == tournament.id,
+            TournamentPlayer.name == payload.name,
+        )
+        conflict_detail = "Placeholder already on the roster"
+    existing = (await session.execute(existing_stmt)).scalar_one_or_none()
     if existing is not None:
-        raise HTTPException(status_code=409, detail="Player already on the roster")
+        raise HTTPException(status_code=409, detail=conflict_detail)
 
-    session.add(TournamentPlayer(tournament_id=tournament.id, profile_id=payload.profile_id))
+    session.add(
+        TournamentPlayer(
+            tournament_id=tournament.id,
+            profile_id=payload.profile_id,
+            name=payload.name,
+            presentation=payload.presentation,
+        )
+    )
     await session.commit()
     audit(
         AuditAction.ROSTER_ADD,
@@ -195,35 +264,32 @@ async def add_roster_player(
         tournament_slug=tournament.slug,
         tournament_id=tournament.id,
         target_profile_id=payload.profile_id,
+        target_placeholder_name=payload.name,
     )
 
 
-@router.delete("/{profile_id}", status_code=204)
+@router.delete("/{lookup}", status_code=204)
 @limiter.limit("20/minute")
 async def remove_roster_player(
     request: Request,
-    profile_id: int,
+    lookup: str,
     tournament: Tournament = Depends(require_tournament_owner),
     actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    """Remove a profile from the tournament's roster — owner-gated.
+    """Remove a roster entry — owner-gated.
 
-    404 if the profile isn't on the roster. The polled ``Player`` and
-    rating rows are left untouched: the profile may still belong to
-    another tournament's roster.
+    Polymorphic lookup: numeric path segment is a ``profile_id``,
+    non-numeric is a placeholder ``name``. 404 if no matching entry.
+    The polled ``Player`` and rating rows are left untouched: the
+    profile may still belong to another tournament's roster.
     """
-    entry = (
-        await session.execute(
-            select(TournamentPlayer).where(
-                TournamentPlayer.tournament_id == tournament.id,
-                TournamentPlayer.profile_id == profile_id,
-            )
-        )
-    ).scalar_one_or_none()
+    entry = await _find_roster_entry(session, tournament.id, lookup)
     if entry is None:
         raise HTTPException(status_code=404, detail="Player not found in this tournament")
 
+    target_profile_id = entry.profile_id
+    target_name = entry.name
     await session.delete(entry)
     await session.commit()
     audit(
@@ -231,46 +297,88 @@ async def remove_roster_player(
         actor_user_id=actor_user_id,
         tournament_slug=tournament.slug,
         tournament_id=tournament.id,
-        target_profile_id=profile_id,
+        target_profile_id=target_profile_id,
+        target_placeholder_name=target_name,
     )
 
 
-@router.patch("/{profile_id}", status_code=204)
+@router.patch("/{lookup}", status_code=204)
 @limiter.limit("20/minute")
 async def update_roster_player(
     request: Request,
-    profile_id: int,
+    lookup: str,
     payload: RosterPlayerUpdate,
     tournament: Tournament = Depends(require_tournament_owner),
     actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    """Replace a roster entry's presentation bag — owner-gated.
+    """Edit a roster entry's presentation, or promote a placeholder — owner-gated.
 
-    ``presentation`` is opaque per-player display data (stream links, bio,
-    etc.) the consumer renders; the whole object is replaced (read-modify-
-    write to change one key). 404 if the profile isn't on this tournament's
-    roster. The polled ``Player`` / rating rows are untouched — this writes
-    only the organizer-curated roster row.
+    Polymorphic lookup: numeric path segment is a ``profile_id``,
+    non-numeric is a placeholder ``name``. 404 if no matching entry.
+
+    Body fields are both optional:
+    - ``presentation``: replaces the whole bag (read-modify-write).
+    - ``profile_id``: only valid against a placeholder row, where it
+      **promotes** the row to a polled identity in the same transaction
+      (the ``name`` is cleared, ``profile_id`` is set; the
+      ``presentation`` bag carries through unless the body also sets it).
+      422 if the entry is already a polled identity (``profile_id`` is
+      immutable on a real-player row); 409 if the target ``profile_id``
+      is already on the roster.
     """
-    entry = (
-        await session.execute(
-            select(TournamentPlayer).where(
-                TournamentPlayer.tournament_id == tournament.id,
-                TournamentPlayer.profile_id == profile_id,
-            )
-        )
-    ).scalar_one_or_none()
+    entry = await _find_roster_entry(session, tournament.id, lookup)
     if entry is None:
         raise HTTPException(status_code=404, detail="Player not found in this tournament")
 
-    entry.presentation = payload.presentation
+    promoted_to: int | None = None
+    if payload.profile_id is not None:
+        if entry.profile_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="profile_id is immutable on a polled-identity roster row",
+            )
+        existing = (
+            await session.execute(
+                select(TournamentPlayer).where(
+                    TournamentPlayer.tournament_id == tournament.id,
+                    TournamentPlayer.profile_id == payload.profile_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Player {payload.profile_id} already on the roster",
+            )
+        promoted_to = payload.profile_id
+        entry.profile_id = payload.profile_id
+        entry.name = None
+
+    if payload.presentation is not None:
+        entry.presentation = payload.presentation
+
     await session.commit()
-    audit(
-        AuditAction.ROSTER_UPDATE,
-        actor_user_id=actor_user_id,
-        tournament_slug=tournament.slug,
-        tournament_id=tournament.id,
-        target_profile_id=profile_id,
-        presentation_keys=sorted(payload.presentation),
-    )
+
+    if promoted_to is not None:
+        audit(
+            AuditAction.ROSTER_PROMOTE,
+            actor_user_id=actor_user_id,
+            tournament_slug=tournament.slug,
+            tournament_id=tournament.id,
+            target_profile_id=promoted_to,
+            target_placeholder_name=lookup if not lookup.isdigit() else None,
+            presentation_keys=(
+                sorted(payload.presentation) if payload.presentation is not None else None
+            ),
+        )
+    elif payload.presentation is not None:
+        audit(
+            AuditAction.ROSTER_UPDATE,
+            actor_user_id=actor_user_id,
+            tournament_slug=tournament.slug,
+            tournament_id=tournament.id,
+            target_profile_id=entry.profile_id,
+            target_placeholder_name=entry.name,
+            presentation_keys=sorted(payload.presentation),
+        )

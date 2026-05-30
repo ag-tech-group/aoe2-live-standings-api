@@ -3,7 +3,6 @@ from app.routers.live import router as live_router
 from app.routers.matches import router as matches_router
 from app.routers.me import router as me_router
 from app.routers.owners import router as owners_router
-from app.routers.placeholders import router as placeholders_router
 from app.routers.players import router as players_router
 from app.routers.stream import router as stream_router
 from app.routers.teams import router as teams_router
@@ -15,7 +14,6 @@ __all__ = [
     "matches_router",
     "me_router",
     "owners_router",
-    "placeholders_router",
     "players_router",
     "stream_router",
     "teams_router",
