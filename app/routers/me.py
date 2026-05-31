@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user_id
 from app.database import get_async_session
 from app.models import Tournament, TournamentOwner
+from app.routers.tournaments import _host_stream_live_tournaments, _serialize_tournament
 from app.schemas.me import MeRead
-from app.schemas.tournament import TournamentRead
 
 router = APIRouter(prefix="/me", tags=["me"])
 
@@ -64,7 +64,8 @@ async def get_me(
         .order_by(Tournament.created_at.desc())
     )
     tournaments = (await session.execute(stmt)).scalars().all()
+    live_hosts = await _host_stream_live_tournaments(session, [t.id for t in tournaments])
     return MeRead(
         user_id=user_id,
-        owned_tournaments=[TournamentRead.model_validate(t) for t in tournaments],
+        owned_tournaments=[_serialize_tournament(t, live_hosts) for t in tournaments],
     )

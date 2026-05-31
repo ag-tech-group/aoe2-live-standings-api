@@ -4,6 +4,27 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
+class HostLiveStream(Base):
+    """A tournament host's channel broadcasting live right now, per platform.
+
+    Sibling of ``LiveStream`` but keyed on ``tournament_id`` because the
+    host isn't a roster row — they're tournament metadata (#149). Same
+    snapshot semantics: the broadcast-live pollers fully rewrite their
+    platform's rows each cycle, and a row's presence means the host's
+    configured channel for that platform was live as of the last poll.
+    Backs the ``host_stream_live`` flag on ``TournamentRead``.
+    """
+
+    __tablename__ = "host_live_streams"
+
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # "twitch" | "youtube" (see app.poller.broadcast platform constants).
+    platform: Mapped[str] = mapped_column(primary_key=True)
+
+
 class LiveStream(Base):
     """A roster row whose channel is broadcasting live right now, per platform.
 

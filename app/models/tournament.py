@@ -48,6 +48,13 @@ class Tournament(Base):
     # in is fixed per event and stays in the consumer's per-tournament
     # config, keeping this API currency-agnostic.
     prize_pool_cents: Mapped[int | None] = mapped_column(Integer)
+    # URLs of the tournament host's broadcast channels (Twitch / YouTube).
+    # The frontend renders the host promo card from its own build config;
+    # this list exists server-side only so the broadcast-live pollers can
+    # resolve `host_stream_live` (#149). Typical: one Twitch + one YouTube.
+    # An empty list (the default) means host-live detection is off and
+    # `host_stream_live` always reports false.
+    host_stream_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

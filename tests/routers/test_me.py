@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import HostLiveStream
 from tests.conftest import DEFAULT_TEST_USER_ID, make_tournament
 
 OTHER_USER_ID = "00000000-0000-0000-0000-0000000000bb"
@@ -93,6 +94,25 @@ class TestGetMe:
         assert cup["start_date"].startswith("2026-06-01")
         # grand_finals_date is part of TournamentRead (post-#44).
         assert "grand_finals_date" in cup
+
+    async def test_owned_tournament_carries_host_stream_live(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        """#149: the owner dashboard sees host_stream_live just like the public read."""
+        tournament = make_tournament(
+            "cup",
+            host_stream_urls=["https://twitch.tv/host"],
+            owner_ids=[DEFAULT_TEST_USER_ID],
+        )
+        session.add(tournament)
+        await session.flush()
+        session.add(HostLiveStream(tournament_id=tournament.id, platform="twitch"))
+        await session.commit()
+
+        auth_as(DEFAULT_TEST_USER_ID)
+        cup = (await client.get("/v1/me")).json()["owned_tournaments"][0]
+        assert cup["host_stream_urls"] == ["https://twitch.tv/host"]
+        assert cup["host_stream_live"] is True
 
     async def test_cache_control_is_private_no_store(
         self, client: AsyncClient, session: AsyncSession, auth_as
