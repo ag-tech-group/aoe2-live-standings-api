@@ -307,19 +307,24 @@ async def _live_match_by_profile(
     return dict(result.all())
 
 
-async def _stream_live_by_profile(
+async def _stream_live_roster_rows(
     session: AsyncSession,
-    profile_ids: list[int],
+    tournament_player_ids: list[int],
 ) -> set[int]:
-    """Return the profiles broadcasting live now (any platform).
+    """Return the roster rows broadcasting live now (any platform).
 
     Reads the ``live_streams`` snapshot the broadcast-live pollers rewrite
-    each cycle; a profile with a row on any platform is live. Backs the
-    ``stream_live`` flag on the standings row. Empty when detection is off.
+    each cycle; a roster row with an entry on any platform is live. Backs
+    the ``stream_live`` flag on the standings row for both polled and
+    placeholder rows (#147). Empty when detection is off.
     """
-    if not profile_ids:
+    if not tournament_player_ids:
         return set()
-    stmt = select(LiveStream.profile_id).where(LiveStream.profile_id.in_(profile_ids)).distinct()
+    stmt = (
+        select(LiveStream.tournament_player_id)
+        .where(LiveStream.tournament_player_id.in_(tournament_player_ids))
+        .distinct()
+    )
     return set((await session.execute(stmt)).scalars().all())
 
 
@@ -472,13 +477,14 @@ async def get_standings(
     rows = (await session.execute(stmt)).all()
 
     profile_ids = [entry.profile_id for entry, _, _ in rows if entry.profile_id is not None]
+    roster_row_ids = [entry.id for entry, _, _ in rows]
     recent_results = await _recent_results_by_profile(
         session, tournament.leaderboard_id, profile_ids
     )
     live_match_ids = await _live_match_by_profile(session, profile_ids)
     tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
     teams_by_profile = await _team_by_profile(session, tournament.id)
-    stream_live_profiles = await _stream_live_by_profile(session, profile_ids)
+    stream_live_rows = await _stream_live_roster_rows(session, roster_row_ids)
 
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
@@ -502,7 +508,7 @@ async def get_standings(
                     rank_total=rating.rank_total if rating else None,
                     in_match=player.profile_id in live_match_ids,
                     live_match_id=live_match_ids.get(player.profile_id),
-                    stream_live=player.profile_id in stream_live_profiles,
+                    stream_live=entry.id in stream_live_rows,
                     last_match_at=rating.last_match_at if rating else None,
                     updated_at=rating.updated_at if rating else player.updated_at,
                 )
@@ -528,7 +534,7 @@ async def get_standings(
                     rank_total=None,
                     in_match=False,
                     live_match_id=None,
-                    stream_live=False,
+                    stream_live=entry.id in stream_live_rows,
                     last_match_at=None,
                     updated_at=None,
                 )

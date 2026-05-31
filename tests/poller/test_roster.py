@@ -6,7 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Tournament, TournamentPlayer
-from app.poller.roster import ensure_seed_tournament, get_tracked_profile_ids
+from app.poller.roster import (
+    ensure_seed_tournament,
+    get_stream_urls_by_roster_row,
+    get_tracked_profile_ids,
+)
 
 
 @pytest.fixture
@@ -65,3 +69,24 @@ class TestGetTrackedProfileIds:
 
     async def test_empty_when_no_tournaments(self, session: AsyncSession):
         assert await get_tracked_profile_ids(session) == []
+
+
+class TestGetStreamUrlsByRosterRow:
+    async def test_includes_polled_and_placeholder_rows(self, session: AsyncSession):
+        """#147: placeholder rows participate in broadcast-live detection."""
+        tournament = Tournament(slug="cup", name="Cup", leaderboard_id=3)
+        polled = TournamentPlayer(
+            profile_id=1, presentation={"streamUrls": ["https://twitch.tv/p1"]}
+        )
+        placeholder = TournamentPlayer(
+            name="iyouxin", presentation={"streamUrls": ["https://twitch.tv/iyouxin"]}
+        )
+        tournament.tracked_players = [polled, placeholder]
+        session.add(tournament)
+        await session.commit()
+
+        by_row = await get_stream_urls_by_roster_row(session)
+        assert by_row == {
+            polled.id: ["https://twitch.tv/p1"],
+            placeholder.id: ["https://twitch.tv/iyouxin"],
+        }

@@ -185,21 +185,23 @@ async def replace_live_match_players(session: AsyncSession, rows: list[dict[str,
 
 
 async def replace_live_streams(
-    session: AsyncSession, platform: str, profile_ids: list[int]
+    session: AsyncSession, platform: str, tournament_player_ids: list[int]
 ) -> None:
     """Clear one platform's rows in ``live_streams`` and rewrite the snapshot.
 
     Mirrors ``replace_live_match_players`` but scoped to a single
     ``platform`` (``DELETE WHERE platform = …``), so the Twitch and YouTube
     pollers replace only their own rows and never clobber each other. Empty
-    ``profile_ids`` just clears the platform's rows (nobody live there now).
+    ``tournament_player_ids`` just clears the platform's rows (nobody live
+    there now). Keyed on ``TournamentPlayer.id`` so placeholder rows
+    participate too (#147).
     """
     await session.execute(delete(LiveStream).where(LiveStream.platform == platform))
-    if not profile_ids:
+    if not tournament_player_ids:
         return
     insert = dialect_insert(session)
     stmt = insert(LiveStream).values(
-        [{"profile_id": pid, "platform": platform} for pid in profile_ids]
+        [{"tournament_player_id": row_id, "platform": platform} for row_id in tournament_player_ids]
     )
-    stmt = stmt.on_conflict_do_nothing(index_elements=["profile_id", "platform"])
+    stmt = stmt.on_conflict_do_nothing(index_elements=["tournament_player_id", "platform"])
     await session.execute(stmt)
