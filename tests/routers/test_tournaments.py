@@ -1226,9 +1226,12 @@ class TestStandingsStreamLive:
                 make_player_rating(profile_id, leaderboard_id=3, current_rating=2000 - profile_id)
             )
             session.add(player)
-        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3))
-        # Profile 1 is live (on any platform); profile 2 is not.
-        session.add(LiveStream(profile_id=1, platform="twitch"))
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.flush()
+        # Roster row for profile 1 is live (on any platform); row 2 is not.
+        row1 = next(p for p in tournament.tracked_players if p.profile_id == 1)
+        session.add(LiveStream(tournament_player_id=row1.id, platform="twitch"))
         await session.commit()
 
         rows = {
@@ -1237,3 +1240,25 @@ class TestStandingsStreamLive:
         }
         assert rows[1]["stream_live"] is True
         assert rows[2]["stream_live"] is False
+
+    async def test_placeholder_row_can_be_live(self, client: AsyncClient, session: AsyncSession):
+        """#147: a placeholder row (profile_id IS NULL) reports stream_live too.
+
+        The broadcast-live snapshot is keyed on TournamentPlayer.id, so a
+        placeholder's surrogate row id is a first-class participant.
+        """
+        tournament = make_tournament("cup")
+        placeholder = TournamentPlayer(
+            name="iyouxin", presentation={"streamUrls": ["https://twitch.tv/iyouxin"]}
+        )
+        tournament.tracked_players = [placeholder]
+        session.add(tournament)
+        await session.flush()
+        session.add(LiveStream(tournament_player_id=placeholder.id, platform="twitch"))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert len(items) == 1
+        assert items[0]["profile_id"] is None
+        assert items[0]["alias"] == "iyouxin"
+        assert items[0]["stream_live"] is True

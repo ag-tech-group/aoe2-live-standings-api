@@ -63,24 +63,21 @@ async def get_tracked_profile_ids(session: AsyncSession) -> list[int]:
     return list(rows.scalars().all())
 
 
-async def get_stream_urls_by_profile(session: AsyncSession) -> dict[int, list[str]]:
-    """Map each tracked profile to the stream URLs in its presentation bag(s).
+async def get_stream_urls_by_roster_row(session: AsyncSession) -> dict[int, list[str]]:
+    """Map each roster row's ``TournamentPlayer.id`` to its stream URLs.
 
-    A profile can sit on several tournament rosters; its URLs are the union
-    across them (deduped, order-preserving). Profiles with no stream URLs
-    are omitted. Feeds the broadcast-live pollers. Placeholder rows
-    (``profile_id IS NULL``) are skipped here for the same reason as in
-    ``get_tracked_profile_ids``.
+    Both polled and placeholder rows are included — broadcast-live detection
+    only needs a stable identity per roster entry, and the surrogate ``id``
+    PK gives us one even when ``profile_id`` is null (#147). Rows with no
+    stream URLs are omitted. A single polled profile that sits on several
+    tournament rosters appears once per row here; per-row keying keeps each
+    tournament's snapshot independent. URLs are deduped, order-preserving.
     """
-    rows = await session.execute(
-        select(TournamentPlayer.profile_id, TournamentPlayer.presentation).where(
-            TournamentPlayer.profile_id.is_not(None)
-        )
-    )
-    by_profile: dict[int, list[str]] = {}
-    for profile_id, presentation in rows.all():
+    rows = await session.execute(select(TournamentPlayer.id, TournamentPlayer.presentation))
+    by_row: dict[int, list[str]] = {}
+    for row_id, presentation in rows.all():
         for url in extract_stream_urls(presentation or {}):
-            bucket = by_profile.setdefault(profile_id, [])
+            bucket = by_row.setdefault(row_id, [])
             if url not in bucket:
                 bucket.append(url)
-    return by_profile
+    return by_row
