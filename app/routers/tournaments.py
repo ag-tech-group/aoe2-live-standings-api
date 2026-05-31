@@ -21,6 +21,7 @@ from app.cache import apply_live_cache_control
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import (
+    HostLiveStream,
     LiveMatchPlayer,
     LiveStream,
     Match,
@@ -108,7 +109,8 @@ async def list_tournaments(
     response.headers["Cache-Control"] = _TOURNAMENT_CONFIG_CACHE_CONTROL
     stmt = select(Tournament).order_by(Tournament.created_at.desc())
     tournaments = (await session.execute(stmt)).scalars().all()
-    return [TournamentRead.model_validate(t) for t in tournaments]
+    live_hosts = await _host_stream_live_tournaments(session, [t.id for t in tournaments])
+    return [_serialize_tournament(t, live_hosts) for t in tournaments]
 
 
 @router.post("", status_code=201)
@@ -150,6 +152,7 @@ async def create_tournament(
         start_date=payload.start_date,
         grand_finals_date=payload.grand_finals_date,
         prize_pool_cents=payload.prize_pool_cents,
+        host_stream_urls=payload.host_stream_urls,
     )
     tournament.owners = [TournamentOwner(user_id=user_id)]
     session.add(tournament)
@@ -160,17 +163,21 @@ async def create_tournament(
         tournament_slug=tournament.slug,
         tournament_id=tournament.id,
     )
-    return TournamentRead.model_validate(tournament)
+    # A brand-new tournament can't already be in host_live_streams, so the
+    # live set is empty — saves a round trip.
+    return _serialize_tournament(tournament, set())
 
 
 @router.get("/{tournament_slug}")
 async def get_tournament_detail(
     response: Response,
     tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
 ) -> TournamentRead:
     """A single tournament's metadata."""
     response.headers["Cache-Control"] = _TOURNAMENT_CONFIG_CACHE_CONTROL
-    return TournamentRead.model_validate(tournament)
+    live_hosts = await _host_stream_live_tournaments(session, [tournament.id])
+    return _serialize_tournament(tournament, live_hosts)
 
 
 @router.patch("/{tournament_slug}")
@@ -212,7 +219,8 @@ async def update_tournament(
         tournament_id=tournament.id,
         changes=changes,
     )
-    return TournamentRead.model_validate(tournament)
+    live_hosts = await _host_stream_live_tournaments(session, [tournament.id])
+    return _serialize_tournament(tournament, live_hosts)
 
 
 @router.delete("/{tournament_slug}", status_code=204)
@@ -305,6 +313,41 @@ async def _live_match_by_profile(
     )
     result = await session.execute(stmt)
     return dict(result.all())
+
+
+def _serialize_tournament(
+    tournament: Tournament, live_host_tournaments: set[int]
+) -> TournamentRead:
+    """Build a TournamentRead, splicing in the derived ``host_stream_live``.
+
+    The flag lives outside the ORM model — it's a per-request fold from
+    the broadcast-live snapshot. Attaching it as a transient attribute
+    keeps ``from_attributes=True`` on the schema working uniformly.
+    """
+    tournament.host_stream_live = tournament.id in live_host_tournaments
+    return TournamentRead.model_validate(tournament)
+
+
+async def _host_stream_live_tournaments(
+    session: AsyncSession,
+    tournament_ids: list[int],
+) -> set[int]:
+    """Return tournaments whose host channel is broadcasting now (any platform).
+
+    Reads the ``host_live_streams`` snapshot the broadcast-live pollers
+    rewrite each cycle (#149); a tournament with an entry on any platform
+    is live. Backs ``host_stream_live`` on the tournament resource. Empty
+    when no hosts are live, when the list is empty, or when detection
+    is off for every tournament queried.
+    """
+    if not tournament_ids:
+        return set()
+    stmt = (
+        select(HostLiveStream.tournament_id)
+        .where(HostLiveStream.tournament_id.in_(tournament_ids))
+        .distinct()
+    )
+    return set((await session.execute(stmt)).scalars().all())
 
 
 async def _stream_live_roster_rows(

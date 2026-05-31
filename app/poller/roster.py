@@ -63,6 +63,27 @@ async def get_tracked_profile_ids(session: AsyncSession) -> list[int]:
     return list(rows.scalars().all())
 
 
+async def get_host_stream_urls_by_tournament(session: AsyncSession) -> dict[int, list[str]]:
+    """Map each tournament's ``id`` to its host channel URLs.
+
+    Feeds the broadcast-live pollers' host detection (#149). Tournaments
+    with an empty ``host_stream_urls`` list are omitted, so detection is
+    off by default and only the tournaments whose hosts have URLs
+    configured cost any Helix quota. URLs are deduped, order-preserving.
+    """
+    rows = await session.execute(select(Tournament.id, Tournament.host_stream_urls))
+    by_tournament: dict[int, list[str]] = {}
+    for tournament_id, urls in rows.all():
+        if not urls:
+            continue
+        bucket: list[str] = []
+        for url in urls:
+            if url not in bucket:
+                bucket.append(url)
+        by_tournament[tournament_id] = bucket
+    return by_tournament
+
+
 async def get_stream_urls_by_roster_row(session: AsyncSession) -> dict[int, list[str]]:
     """Map each roster row's ``TournamentPlayer.id`` to its stream URLs.
 

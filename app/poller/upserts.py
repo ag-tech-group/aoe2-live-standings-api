@@ -31,6 +31,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    HostLiveStream,
     Leaderboard,
     LiveMatchPlayer,
     LiveStream,
@@ -204,4 +205,25 @@ async def replace_live_streams(
         [{"tournament_player_id": row_id, "platform": platform} for row_id in tournament_player_ids]
     )
     stmt = stmt.on_conflict_do_nothing(index_elements=["tournament_player_id", "platform"])
+    await session.execute(stmt)
+
+
+async def replace_host_live_streams(
+    session: AsyncSession, platform: str, tournament_ids: list[int]
+) -> None:
+    """Clear one platform's rows in ``host_live_streams`` and rewrite the snapshot.
+
+    Sibling of ``replace_live_streams`` (#149): the broadcast-live pollers
+    write the host's per-tournament live state here, partitioned by platform
+    so Twitch and YouTube replace only their own rows. Empty
+    ``tournament_ids`` just clears the platform's rows (no host live there now).
+    """
+    await session.execute(delete(HostLiveStream).where(HostLiveStream.platform == platform))
+    if not tournament_ids:
+        return
+    insert = dialect_insert(session)
+    stmt = insert(HostLiveStream).values(
+        [{"tournament_id": tid, "platform": platform} for tid in tournament_ids]
+    )
+    stmt = stmt.on_conflict_do_nothing(index_elements=["tournament_id", "platform"])
     await session.execute(stmt)

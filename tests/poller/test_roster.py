@@ -8,6 +8,7 @@ from app.config import settings
 from app.models import Tournament, TournamentPlayer
 from app.poller.roster import (
     ensure_seed_tournament,
+    get_host_stream_urls_by_tournament,
     get_stream_urls_by_roster_row,
     get_tracked_profile_ids,
 )
@@ -90,3 +91,40 @@ class TestGetStreamUrlsByRosterRow:
             polled.id: ["https://twitch.tv/p1"],
             placeholder.id: ["https://twitch.tv/iyouxin"],
         }
+
+
+class TestGetHostStreamUrlsByTournament:
+    async def test_returns_each_tournaments_host_urls(self, session: AsyncSession):
+        """#149: per-tournament host URLs feed broadcast-live detection."""
+        with_host = Tournament(
+            slug="hosted",
+            name="Hosted",
+            leaderboard_id=3,
+            host_stream_urls=["https://twitch.tv/host", "https://youtube.com/@host"],
+        )
+        without_host = Tournament(slug="quiet", name="Quiet", leaderboard_id=3)
+        session.add_all([with_host, without_host])
+        await session.commit()
+
+        by_tournament = await get_host_stream_urls_by_tournament(session)
+        assert by_tournament == {
+            with_host.id: ["https://twitch.tv/host", "https://youtube.com/@host"],
+        }
+        # Tournaments with no host URLs are omitted (host detection off).
+        assert without_host.id not in by_tournament
+
+    async def test_dedupes_within_a_tournament(self, session: AsyncSession):
+        tournament = Tournament(
+            slug="dup",
+            name="Dup",
+            leaderboard_id=3,
+            host_stream_urls=[
+                "https://twitch.tv/host",
+                "https://twitch.tv/host",
+            ],
+        )
+        session.add(tournament)
+        await session.commit()
+
+        by_tournament = await get_host_stream_urls_by_tournament(session)
+        assert by_tournament == {tournament.id: ["https://twitch.tv/host"]}

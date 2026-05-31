@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    HostLiveStream,
     LiveMatchPlayer,
     LiveStream,
     MatchOutcome,
@@ -55,6 +56,23 @@ class TestListTournaments:
             response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
         )
 
+    async def test_host_stream_live_set_per_tournament(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        """#149: each listed tournament's host_stream_live reflects only its own host."""
+        live = make_tournament("live-cup", host_stream_urls=["https://twitch.tv/host"])
+        quiet = make_tournament("quiet-cup")
+        session.add(live)
+        session.add(quiet)
+        await session.flush()
+        session.add(HostLiveStream(tournament_id=live.id, platform="twitch"))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments")).json()
+        by_slug = {t["slug"]: t for t in items}
+        assert by_slug["live-cup"]["host_stream_live"] is True
+        assert by_slug["quiet-cup"]["host_stream_live"] is False
+
 
 class TestGetTournamentDetail:
     async def test_returns_metadata(self, client: AsyncClient, session: AsyncSession):
@@ -87,6 +105,32 @@ class TestGetTournamentDetail:
 
         body = (await client.get("/v1/tournaments/cup")).json()
         assert body["prize_pool_cents"] == 512750
+
+    async def test_host_stream_urls_default_empty(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup"))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["host_stream_urls"] == []
+        # No URLs configured → never live.
+        assert body["host_stream_live"] is False
+
+    async def test_host_stream_live_reflects_host_live_streams_table(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        """#149: host_stream_live = any row for this tournament in host_live_streams."""
+        tournament = make_tournament(
+            "cup",
+            host_stream_urls=["https://twitch.tv/hostchan"],
+        )
+        session.add(tournament)
+        await session.flush()
+        session.add(HostLiveStream(tournament_id=tournament.id, platform="twitch"))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["host_stream_urls"] == ["https://twitch.tv/hostchan"]
+        assert body["host_stream_live"] is True
 
     async def test_unknown_slug_returns_404(self, client: AsyncClient):
         assert (await client.get("/v1/tournaments/nope")).status_code == 404
@@ -916,6 +960,80 @@ class TestUpdateTournament:
         response = await client.patch("/v1/tournaments/cup", json={"prize_pool_cents": -1})
         assert response.status_code == 422
 
+    async def test_can_set_host_stream_urls(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={
+                "host_stream_urls": [
+                    "https://twitch.tv/host",
+                    "https://youtube.com/@host",
+                ]
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["host_stream_urls"] == [
+            "https://twitch.tv/host",
+            "https://youtube.com/@host",
+        ]
+
+    async def test_can_clear_host_stream_urls_with_empty_list(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # Empty list is the "host detection off" state — distinct from
+        # explicit null (which is rejected; this isn't a nullable column).
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                host_stream_urls=["https://twitch.tv/host"],
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"host_stream_urls": []})
+        assert response.status_code == 200
+        assert response.json()["host_stream_urls"] == []
+
+    async def test_explicit_null_host_stream_urls_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"host_stream_urls": None})
+        assert response.status_code == 422
+
+    async def test_too_many_host_stream_urls_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={"host_stream_urls": [f"https://twitch.tv/h{i}" for i in range(6)]},
+        )
+        assert response.status_code == 422
+
+    async def test_empty_host_stream_url_string_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"host_stream_urls": [""]})
+        assert response.status_code == 422
+
     async def test_empty_body_is_a_noop(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", name="Unchanged", owner_ids=[DEFAULT_TEST_USER_ID]))
@@ -1024,6 +1142,40 @@ class TestCreateTournament:
         response = await client.post(
             "/v1/tournaments",
             json={**self._BODY, "prize_pool_cents": -1},
+        )
+        assert response.status_code == 422
+
+    async def test_optional_host_stream_urls_round_trips(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                **self._BODY,
+                "host_stream_urls": ["https://twitch.tv/host"],
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["host_stream_urls"] == ["https://twitch.tv/host"]
+        # Brand-new tournament can't be in host_live_streams yet.
+        assert body["host_stream_live"] is False
+
+    async def test_host_stream_urls_default_to_empty_on_create(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 201
+        assert response.json()["host_stream_urls"] == []
+
+    async def test_too_many_host_stream_urls_on_create_returns_422(
+        self, client: AsyncClient, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                **self._BODY,
+                "host_stream_urls": [f"https://twitch.tv/h{i}" for i in range(6)],
+            },
         )
         assert response.status_code == 422
 

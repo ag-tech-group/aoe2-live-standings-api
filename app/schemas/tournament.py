@@ -6,12 +6,43 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# A handful of URLs is plenty for a real host (typically one Twitch
+# + one YouTube); the cap keeps the broadcast-live poller's quota
+# footprint per tournament bounded.
+_MAX_HOST_STREAM_URLS = 5
+# Enough for typical Twitch / YouTube URLs (vanity + handle paths);
+# keeps the JSON payload tight.
+_MAX_HOST_STREAM_URL_LENGTH = 256
+
+
+def _validated_host_stream_urls(urls: list[str]) -> list[str]:
+    """Each entry must be a non-empty string within the length cap.
+
+    No URL-syntax validation: the platform parsers in
+    ``app.poller.broadcast`` already return ``None`` for non-twitch /
+    non-youtube strings, so garbage is filtered downstream without
+    ever costing a Helix call. Matches the posture on the roster's
+    ``presentation.streamUrls``.
+    """
+    for url in urls:
+        if not url:
+            raise ValueError("host_stream_urls entries may not be empty")
+        if len(url) > _MAX_HOST_STREAM_URL_LENGTH:
+            raise ValueError(
+                f"host_stream_urls entries must be at most {_MAX_HOST_STREAM_URL_LENGTH} chars"
+            )
+    return urls
+
 
 class TournamentRead(BaseModel):
     """A tournament — a named roster of players tracked on one leaderboard.
 
     Configuration rather than polled data: a tournament's standings,
     matches, and live state are served under ``/v1/tournaments/{slug}/...``.
+    The one exception is ``host_stream_live`` (#149) — a derived flag the
+    router computes from the broadcast-live snapshot before serializing,
+    so a host channel going live transitions the card within one poll
+    cycle. The standings ``live`` SSE nudge already invalidates this query.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -23,6 +54,10 @@ class TournamentRead(BaseModel):
     start_date: datetime | None
     grand_finals_date: datetime | None
     prize_pool_cents: int | None
+    host_stream_urls: list[str]
+    # Derived: any host channel currently broadcasting on any platform.
+    # False when no host URLs are configured.
+    host_stream_live: bool = False
     created_at: datetime
 
 
@@ -47,6 +82,15 @@ class TournamentCreate(BaseModel):
     start_date: datetime | None = None
     grand_finals_date: datetime | None = None
     prize_pool_cents: int | None = Field(default=None, ge=0)
+    host_stream_urls: list[str] = Field(
+        default_factory=list,
+        max_length=_MAX_HOST_STREAM_URLS,
+    )
+
+    @field_validator("host_stream_urls")
+    @classmethod
+    def _validate_host_stream_urls(cls, value: list[str]) -> list[str]:
+        return _validated_host_stream_urls(value)
 
 
 class TournamentUpdate(BaseModel):
@@ -67,8 +111,9 @@ class TournamentUpdate(BaseModel):
     start_date: datetime | None = None
     grand_finals_date: datetime | None = None
     prize_pool_cents: int | None = Field(default=None, ge=0)
+    host_stream_urls: list[str] | None = Field(default=None, max_length=_MAX_HOST_STREAM_URLS)
 
-    @field_validator("name", "leaderboard_id")
+    @field_validator("name", "leaderboard_id", "host_stream_urls")
     @classmethod
     def _reject_explicit_null(cls, value: object) -> object:
         # A field-validator runs only for fields actually present in the
@@ -77,6 +122,13 @@ class TournamentUpdate(BaseModel):
         if value is None:
             raise ValueError("may not be null")
         return value
+
+    @field_validator("host_stream_urls")
+    @classmethod
+    def _validate_host_stream_urls(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        return _validated_host_stream_urls(value)
 
 
 class TournamentOwnerRead(BaseModel):
