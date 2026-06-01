@@ -673,6 +673,7 @@ async def get_team_standings(
             Player.country,
             PlayerRating.current_rating,
             PlayerRating.updated_at,
+            TeamMember.is_captain,
         )
         .join(Team, Team.id == TeamMember.team_id)
         .join(Player, Player.profile_id == TeamMember.profile_id)
@@ -692,7 +693,7 @@ async def get_team_standings(
 
     members_by_team: dict[int, list[TeamMemberRead]] = {}
     timestamps: list[datetime | None] = []
-    for team_id, profile_id, alias, country, rating, updated_at in member_rows:
+    for team_id, profile_id, alias, country, rating, updated_at, is_captain in member_rows:
         members_by_team.setdefault(team_id, []).append(
             TeamMemberRead(
                 profile_id=profile_id,
@@ -701,6 +702,7 @@ async def get_team_standings(
                 current_rating=rating,
                 in_match=profile_id in live_match_ids,
                 live_match_id=live_match_ids.get(profile_id),
+                is_captain=is_captain,
             )
         )
         timestamps.append(updated_at)

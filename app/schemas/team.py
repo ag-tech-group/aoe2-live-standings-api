@@ -26,6 +26,9 @@ class TeamMemberRead(BaseModel):
     # match's id when ``in_match`` is true, else null.
     in_match: bool
     live_match_id: int | None
+    # True when this member is the team's captain. At most one captain per
+    # team; a team may also have no captain (all members ``false``).
+    is_captain: bool
 
 
 class TeamStandingRow(BaseModel):
@@ -91,5 +94,15 @@ class TeamUpdate(BaseModel):
 
 class TeamMemberCreate(BaseModel):
     """Request body for adding a profile to a team."""
+
+    profile_id: int = Field(gt=0)
+
+
+class TeamCaptainSet(BaseModel):
+    """Request body for ``PUT /teams/{team_id}/captain`` — designates the captain.
+
+    The profile must already be a member of the team; the endpoint
+    atomically clears any existing captain on the team and sets this one.
+    """
 
     profile_id: int = Field(gt=0)

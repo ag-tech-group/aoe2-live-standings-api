@@ -9,7 +9,9 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    false,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -213,10 +215,26 @@ class TeamMember(Base):
         primary_key=True,
     )
     profile_id: Mapped[int] = mapped_column(primary_key=True)
+    is_captain: Mapped[bool] = mapped_column(server_default=false())
 
     team: Mapped[Team] = relationship(back_populates="members")
 
     __table_args__ = (
         # Find every team a profile belongs to.
         Index("ix_team_members_profile_id", "profile_id"),
+        # At most one captain per team — partial unique index on team_id
+        # filtered to ``is_captain``. The endpoint also clears any current
+        # captain before setting a new one, so the app-level write path is
+        # correct even without the DB constraint; the index is
+        # belt-and-suspenders for the prod path and catches buggy callers.
+        # SQLite (test path via ``metadata.create_all``) needs its own
+        # ``sqlite_where`` — without it, SQLAlchemy emits a plain UNIQUE
+        # INDEX on ``team_id`` and rejects every team with 2+ members.
+        Index(
+            "uq_team_members_captain",
+            "team_id",
+            unique=True,
+            postgresql_where=text("is_captain"),
+            sqlite_where=text("is_captain"),
+        ),
     )

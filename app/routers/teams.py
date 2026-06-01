@@ -8,8 +8,8 @@ gated by ``require_tournament_owner``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
@@ -17,7 +17,7 @@ from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import Team, TeamMember, Tournament
-from app.schemas import TeamCreate, TeamMemberCreate, TeamRead, TeamUpdate
+from app.schemas import TeamCaptainSet, TeamCreate, TeamMemberCreate, TeamRead, TeamUpdate
 
 router = APIRouter(prefix="/tournaments/{tournament_slug}/teams", tags=["teams"])
 
@@ -191,3 +191,102 @@ async def remove_team_member(
         target_team_id=team.id,
         target_profile_id=profile_id,
     )
+
+
+@router.put("/{team_id}/captain", status_code=204)
+@limiter.limit("20/minute")
+async def set_team_captain(
+    request: Request,
+    payload: TeamCaptainSet,
+    team: Team = Depends(get_owned_team),
+    actor_user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
+) -> Response:
+    """Designate a team member as the team's captain — owner-gated.
+
+    Atomic: clears any existing captain on the team, then sets the new
+    one. The target profile must already be a member of the team (404
+    otherwise). Idempotent — re-PUTting the current captain is a 204
+    no-op with no audit event.
+    """
+    member = (
+        await session.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team.id,
+                TeamMember.profile_id == payload.profile_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if member is None:
+        raise HTTPException(status_code=404, detail="Player not found on this team")
+
+    if member.is_captain:
+        return Response(status_code=204)
+
+    previous_captain_profile_id: int | None = (
+        await session.execute(
+            select(TeamMember.profile_id).where(
+                TeamMember.team_id == team.id,
+                TeamMember.is_captain.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+
+    # Clear-then-set in one transaction. The DB partial unique index would
+    # reject "two captains" on Postgres, but the explicit clear keeps the
+    # write valid even before the index sees the new row.
+    await session.execute(
+        update(TeamMember)
+        .where(TeamMember.team_id == team.id, TeamMember.is_captain.is_(True))
+        .values(is_captain=False)
+    )
+    member.is_captain = True
+    await session.commit()
+    audit(
+        AuditAction.TEAM_CAPTAIN_SET,
+        actor_user_id=actor_user_id,
+        tournament_id=team.tournament_id,
+        target_team_id=team.id,
+        target_profile_id=payload.profile_id,
+        previous_captain_profile_id=previous_captain_profile_id,
+    )
+    return Response(status_code=204)
+
+
+@router.delete("/{team_id}/captain", status_code=204)
+@limiter.limit("20/minute")
+async def clear_team_captain(
+    request: Request,
+    team: Team = Depends(get_owned_team),
+    actor_user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
+) -> Response:
+    """Clear the team's captain — owner-gated.
+
+    204 even when no captain was set (no-op with no audit event).
+    """
+    previous_captain_profile_id: int | None = (
+        await session.execute(
+            select(TeamMember.profile_id).where(
+                TeamMember.team_id == team.id,
+                TeamMember.is_captain.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if previous_captain_profile_id is None:
+        return Response(status_code=204)
+
+    await session.execute(
+        update(TeamMember)
+        .where(TeamMember.team_id == team.id, TeamMember.is_captain.is_(True))
+        .values(is_captain=False)
+    )
+    await session.commit()
+    audit(
+        AuditAction.TEAM_CAPTAIN_UNSET,
+        actor_user_id=actor_user_id,
+        tournament_id=team.tournament_id,
+        target_team_id=team.id,
+        target_profile_id=previous_captain_profile_id,
+    )
+    return Response(status_code=204)
