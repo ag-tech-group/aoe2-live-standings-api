@@ -186,22 +186,81 @@ class TestTeamStandings:
         assert row["combined_rating_average"] == 0.0
         assert row["members"] == []
 
-    async def test_member_without_leaderboard_rating_is_omitted(
+    async def test_member_without_leaderboard_rating_is_listed_with_null_ratings(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # Player 1 has a rating; player 2 has none on the tournament's leaderboard.
+        # Player 1 has a rating on the tournament's leaderboard; player 2
+        # has a polled identity but no rating row there yet (linked
+        # account that hasn't played a ranked game). Both must surface
+        # under ``members`` — player 2 with null rating fields — and the
+        # unrated one is excluded from the combined aggregates (#166).
         rated = make_player(1)
-        rated.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        rated.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=2000, max_rating=2200)
+        )
         session.add(rated)
-        session.add(make_player(2))
+        session.add(make_player(2, alias="newbie", country="us"))
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
         tournament.teams = [make_team("Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
         row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
-        assert row["member_count"] == 1
-        assert [m["profile_id"] for m in row["members"]] == [1]
+        assert row["member_count"] == 2
+        # Unrated member is excluded from the peak-based aggregates.
+        assert row["combined_rating_sum"] == 2200
+        assert row["combined_rating_average"] == 2200.0
+        # Both members surface; the unrated one is sorted to the tail
+        # (max_rating null → NULLS LAST in the member sort).
+        by_pid = {m["profile_id"]: m for m in row["members"]}
+        assert [m["profile_id"] for m in row["members"]] == [1, 2]
+        assert by_pid[2]["alias"] == "newbie"
+        assert by_pid[2]["country"] == "us"
+        assert by_pid[2]["current_rating"] is None
+        assert by_pid[2]["max_rating"] is None
+
+    async def test_member_without_polled_player_is_listed_with_null_alias(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # ``TeamMember`` with a profile_id whose ``Player`` row hasn't
+        # been written by the poller yet — the standings query
+        # left-joins ``Player`` so the row surfaces with null
+        # alias/country rather than vanishing.
+        rated = make_player(1)
+        rated.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(rated)
+        tournament = make_tournament("cup", profile_ids=[1, 999], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1, 999])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        assert row["member_count"] == 2
+        by_pid = {m["profile_id"]: m for m in row["members"]}
+        assert by_pid[999]["alias"] is None
+        assert by_pid[999]["country"] is None
+        assert by_pid[999]["current_rating"] is None
+        assert by_pid[999]["max_rating"] is None
+
+    async def test_unrated_only_team_returns_zero_aggregate_with_members_listed(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A team whose every member is linked-but-unrated still surfaces
+        # its roster — combined sum/average stay 0 (no peaks to average)
+        # and the FE can render the team. Guards the average's
+        # zero-division path (#166).
+        session.add(make_player(1, alias="a"))
+        session.add(make_player(2, alias="b"))
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team("Newcomers", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        assert row["member_count"] == 2
+        assert row["combined_rating_sum"] == 0
+        assert row["combined_rating_average"] == 0.0
+        assert {m["alias"] for m in row["members"]} == {"a", "b"}
 
     async def test_cache_control_header_unauthenticated(
         self, client: AsyncClient, session: AsyncSession

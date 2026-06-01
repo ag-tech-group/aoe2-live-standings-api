@@ -16,15 +16,23 @@ class TeamMemberRead(BaseModel):
     """
 
     profile_id: int
-    alias: str
+    # Null when the poller hasn't picked the profile up yet — the
+    # team-mgmt query left-joins ``Player``, so a linked-but-not-polled
+    # member surfaces here without an alias rather than vanishing.
+    alias: str | None
     # ISO 3166-1 alpha-2, lowercase — same shape as ``StandingRow.country``.
-    # Nullable: upstream sometimes returns players without a country set.
+    # Null when upstream returns no country, or when ``Player`` hasn't
+    # been polled yet (see ``alias``).
     country: str | None
-    current_rating: int
+    # Null when the member has no rating row on the tournament's
+    # leaderboard yet (e.g. linked profile that hasn't played a ranked
+    # game). The team-mgmt query left-joins ``PlayerRating`` so such a
+    # member is listed under ``members`` rather than dropped (#166).
+    current_rating: int | None
     # Lifetime peak on this leaderboard. Drives the team-standings
     # ``combined_rating_*`` aggregates (see ``TeamStandingRow``). Null
-    # when the rating row has no recorded peak (brand-new account with a
-    # rating row but no max yet).
+    # when the rating row has no recorded peak, or when the rating row
+    # itself doesn't exist yet (see ``current_rating``).
     max_rating: int | None
     # True while the member is in a live (staging / in-progress) match,
     # as of the last live poll (~15s cadence). ``live_match_id`` is that
@@ -42,11 +50,11 @@ class TeamStandingRow(BaseModel):
     ``combined_rating_sum`` is the sum of the members' peak (lifetime
     ``max_rating``) ratings on the tournament's leaderboard;
     ``combined_rating_average`` is that sum over the count of members
-    with a non-null peak. Only members with a rating on that leaderboard
-    are counted — a member the poller hasn't rated yet is omitted. A
-    member whose ``max_rating`` is null is still listed under
-    ``members`` but excluded from the combined sum and average's
-    denominator.
+    with a non-null peak. Every ``team_members`` row is listed under
+    ``members`` regardless of rating status — a linked-but-unrated
+    member (no ``PlayerRating`` on the leaderboard yet) is included with
+    null rating fields but excluded from the combined sum and the
+    average's denominator (#166).
     """
 
     team_id: int

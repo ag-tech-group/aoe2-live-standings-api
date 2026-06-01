@@ -715,12 +715,14 @@ async def get_team_standings(
 
     A team's combined rating is the sum of its members' peak (lifetime
     ``max_rating``) ratings on the tournament's leaderboard; the average
-    is that sum over the count of members with a non-null peak. Members
-    without a rating row on that leaderboard are omitted; a member whose
-    rating row has no recorded peak is listed under ``members`` but
-    excluded from the aggregate (and the average's denominator). Teams
-    are optional — a tournament with none returns an empty list. Sorted
-    by combined sum desc.
+    is that sum over the count of members with a non-null peak. Every
+    ``team_members`` row is returned regardless of whether the poller
+    has rated the member yet — a linked-but-unrated member (no
+    ``PlayerRating`` row on the leaderboard, or no ``Player`` row at all
+    if the poller hasn't picked them up) is listed under ``members``
+    with null rating fields and excluded from the aggregate (and the
+    average's denominator). Teams are optional — a tournament with none
+    returns an empty list. Sorted by combined sum desc.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -730,6 +732,11 @@ async def get_team_standings(
         .all()
     )
 
+    # LEFT JOIN both ``Player`` and ``PlayerRating`` so every team_members
+    # row is returned, with rating fields null for members the poller
+    # hasn't rated yet. The leaderboard filter sits in the JOIN ON
+    # condition, not WHERE — moving it to WHERE would re-filter the outer
+    # join back to inner-join behaviour and re-introduce the #166 bug.
     member_stmt = (
         select(
             TeamMember.team_id,
@@ -742,12 +749,15 @@ async def get_team_standings(
             TeamMember.is_captain,
         )
         .join(Team, Team.id == TeamMember.team_id)
-        .join(Player, Player.profile_id == TeamMember.profile_id)
-        .join(PlayerRating, PlayerRating.profile_id == TeamMember.profile_id)
-        .where(
-            Team.tournament_id == tournament.id,
-            PlayerRating.leaderboard_id == tournament.leaderboard_id,
+        .outerjoin(Player, Player.profile_id == TeamMember.profile_id)
+        .outerjoin(
+            PlayerRating,
+            and_(
+                PlayerRating.profile_id == TeamMember.profile_id,
+                PlayerRating.leaderboard_id == tournament.leaderboard_id,
+            ),
         )
+        .where(Team.tournament_id == tournament.id)
     )
     member_rows = (await session.execute(member_stmt)).all()
 
