@@ -87,6 +87,17 @@ class TournamentCreate(BaseModel):
         max_length=_MAX_HOST_STREAM_URLS,
     )
 
+    @field_validator("slug")
+    @classmethod
+    def _reject_reserved_slug(cls, value: str) -> str:
+        # ``current`` is reserved as the active-tournament alias resolved
+        # in ``get_tournament`` — a literal row with that slug would be
+        # unreachable. See ``CURRENT_TOURNAMENT_ALIAS`` in
+        # ``app.routers.tournaments``.
+        if value == "current":
+            raise ValueError("slug 'current' is reserved")
+        return value
+
     @field_validator("host_stream_urls")
     @classmethod
     def _validate_host_stream_urls(cls, value: list[str]) -> list[str]:

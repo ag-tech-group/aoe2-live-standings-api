@@ -9,10 +9,10 @@ request sees. ``POST /`` is open to any authenticated criticalbit user
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
@@ -81,14 +81,47 @@ _RECENT_RESULTS_LIMIT = 10
 _LIVE_MATCH_STATES = (MatchState.STAGING, MatchState.IN_PROGRESS)
 
 
+# Reserved slug that resolves to "the currently active tournament" —
+# never matches a real row, so the create-route validator (see
+# ``TournamentCreate.slug``) rejects this string to keep the alias
+# unambiguous.
+CURRENT_TOURNAMENT_ALIAS = "current"
+
+
 async def get_tournament(
     tournament_slug: str,
     session: AsyncSession = Depends(get_async_session),
 ) -> Tournament:
-    """Resolve the ``{tournament_slug}`` path parameter to a Tournament, or 404."""
-    tournament = (
-        await session.execute(select(Tournament).where(Tournament.slug == tournament_slug))
-    ).scalar_one_or_none()
+    """Resolve the ``{tournament_slug}`` path parameter to a Tournament, or 404.
+
+    The literal slug ``"current"`` is a tournament-agnostic alias: it
+    resolves to the most recently started tournament (``start_date <=
+    now`` ordered ``start_date`` desc, then ``created_at`` desc),
+    falling back to the most recently created tournament if none have
+    started yet. Used by external probes (Cloud Monitoring uptime, the
+    Sentry uptime monitor) so the check survives tournament-to-
+    tournament rollovers without an infra redeploy.
+    """
+    if tournament_slug == CURRENT_TOURNAMENT_ALIAS:
+        has_started = Tournament.start_date <= datetime.now(UTC)
+        stmt = (
+            select(Tournament)
+            .order_by(
+                # Started rows first (0 = started, 1 = not started / null).
+                case((has_started, 0), else_=1).asc(),
+                # Among started rows, prefer the one most recently
+                # started. For not-started rows this key is null so
+                # ``created_at`` decides — keeps a future-scheduled
+                # tournament from outranking a more-recently-created
+                # one that just has no ``start_date`` set yet.
+                case((has_started, Tournament.start_date), else_=None).desc().nulls_last(),
+                Tournament.created_at.desc(),
+            )
+            .limit(1)
+        )
+    else:
+        stmt = select(Tournament).where(Tournament.slug == tournament_slug)
+    tournament = (await session.execute(stmt)).scalar_one_or_none()
     if tournament is None:
         raise HTTPException(status_code=404, detail="Tournament not found")
     return tournament
