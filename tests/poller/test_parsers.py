@@ -111,6 +111,37 @@ class TestParsePlayerStats:
         assert rating["region_rank"] is None
         assert rating["region_rank_total"] is None
 
+    def test_max_rating_floors_at_current_when_highestrating_missing(self):
+        # Relic omits ``highestrating`` for accounts with no wins on a
+        # ladder. Without the floor, ``max_rating`` lands at 0 and team
+        # peak aggregates (see #158) tank for any team containing such
+        # a player.
+        payload = {
+            "statGroups": [{"id": 1, "members": [{"profile_id": 1, "alias": "x"}]}],
+            "leaderboardStats": [
+                {"statgroup_id": 1, "leaderboard_id": 3, "rating": 819},
+            ],
+        }
+        _, ratings = parse_player_stats(payload)
+        assert ratings[0]["max_rating"] == 819
+
+    def test_max_rating_floors_at_current_when_highestrating_is_zero(self):
+        # Same shape as the previous test but with the field present
+        # and explicitly 0 — also seen in the wild for fresh accounts.
+        payload = {
+            "statGroups": [{"id": 1, "members": [{"profile_id": 1, "alias": "x"}]}],
+            "leaderboardStats": [
+                {
+                    "statgroup_id": 1,
+                    "leaderboard_id": 3,
+                    "rating": 819,
+                    "highestrating": 0,
+                },
+            ],
+        }
+        _, ratings = parse_player_stats(payload)
+        assert ratings[0]["max_rating"] == 819
+
     def test_no_steam_prefix_yields_none_steam_id(self):
         payload = {
             "statGroups": [
