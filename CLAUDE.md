@@ -39,7 +39,11 @@ The polling worker lives in `app/poller/`. It runs as the same Python process bu
 - Tournament-config reads (`GET /tournaments`, `GET /tournaments/{slug}`) use the **static** `_TOURNAMENT_CONFIG_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"`.
 - Default middleware Cache-Control since #103 is `no-store`, so cacheable endpoints **must** opt in explicitly.
 
-**Standings sort order**: rated rows by `current_rating` DESC (NULLS LAST), then unrated polled rows by `profile_id` ASC, then placeholders by `name` ASC. Postgres's default NULLS-FIRST under DESC is the trap; always pair `.desc()` with `.nulls_last()`.
+**Standings sort order** (per-player `/standings`): rated rows by `current_rating` DESC (NULLS LAST), then unrated polled rows by `profile_id` ASC, then placeholders by `name` ASC. Postgres's default NULLS-FIRST under DESC is the trap; always pair `.desc()` with `.nulls_last()`.
+
+**Team standings rank on peak** (`/teams/standings`, #158): `combined_rating_sum` / `combined_rating_average` aggregate each member's lifetime `max_rating`, not `current_rating`; teams sort by that peak-based sum desc. Members within a team are ordered by `max_rating` desc (NULLS LAST). The names of the aggregate fields stay `combined_rating_*` — their meaning changed in #158; only the docstrings called it out. Same field on each member: `current_rating` and `max_rating` are both surfaced so the FE can render a current-vs-peak overlay.
+
+**`current` magic slug** (`CURRENT_TOURNAMENT_ALIAS` in `app/routers/tournaments.py`): the literal slug `"current"` is reserved by `get_tournament` and resolves to the most-recently-started tournament (with fallback to most-recently-created). `TournamentCreate.slug` rejects it on create (422) so a real row can't shadow the alias. Use it from external probes (Cloud Monitoring uptime check on `/v1/tournaments/current/standings`, future Sentry uptime) so they survive event rollovers without an infra redeploy. **Event-specific FEs pin to their literal slug** — `/current` is for tournament-agnostic infra, not for app code that should track one specific event.
 
 **Polymorphic URL dispatch on `/players/{lookup}`** (PATCH/DELETE only — GET `/players/{profile_id}` stays profile_id-keyed):
 - Numeric lookup → looks up by `profile_id`.
@@ -70,6 +74,6 @@ For `tofu apply` (`infra/terraform/`): ADC is often set to the user's personal a
 
 - Don't `gcloud auth application-default login` or `gcloud config set` anything (global CLAUDE.md rule; mutates shared state).
 - Don't write transient artifacts to the repo (scripts → `/tmp/`; debug dumps → outside the worktree).
-- Don't reintroduce single-tournament assumptions (the `TRACKED_PROFILE_IDS` env var design is gone; the platform is multi-tournament since #25–#27).
+- Don't reintroduce single-tournament assumptions (the `TRACKED_PROFILE_IDS` env var and the seed-tournament bootstrap that minted `default`-slug rows are both gone; the platform is multi-tournament since #25–#27, and a fresh deploy now errors out without an explicit tournament created via `POST /v1/tournaments`).
 - Don't propose API contract changes for FE-renderable display data — extend the `presentation` bag instead. The API is deliberately tournament-agnostic (see `[[project-overview]]`).
 - Don't put alerts on the `email` notification channel for new infra/capacity policies — route through the Sentry Pub/Sub channel (see `[[feedback_infra_alert_routing]]`). Uptime + budget stay on email.

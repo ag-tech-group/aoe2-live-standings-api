@@ -148,6 +148,8 @@ Most of the API is scoped to a tournament:
 
 Unscoped: `GET /v1/leaderboards` (leaderboard metadata), `GET /v1/stream` (SSE refresh nudges), `GET /v1/flags` (feature flags).
 
+The reserved slug `current` resolves to the most recently started tournament (latest `start_date <= now`, then latest `created_at` as fallback), so external probes (uptime monitors, status pages) can hit any per-tournament read path without an infra redeploy across event rollovers. `POST /v1/tournaments` rejects `current` as a literal slug to keep the alias unambiguous. Event-specific frontends should pin to their literal slug; reserve `current` for tournament-agnostic infrastructure callers.
+
 ### Authenticated read
 
 - `GET /v1/me` — identity (`user_id`) plus the list of tournaments the caller owns. One round-trip lets the frontend gate admin UI without per-tournament probes. 401 when unauthenticated.

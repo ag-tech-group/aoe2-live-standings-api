@@ -142,7 +142,10 @@ The "bypass if not present" choice is deliberate: the app's `cache_control_middl
 **Verify via:**
 
 ```sh
-URL=https://aoe2-live-standings-api.criticalbit.gg/v1/tournaments/default/standings
+# `current` is the reserved active-tournament alias (see app/routers/tournaments.py
+# `CURRENT_TOURNAMENT_ALIAS`); using it here keeps the example correct across
+# tournament rollovers without needing a slug update.
+URL=https://aoe2-live-standings-api.criticalbit.gg/v1/tournaments/current/standings
 for i in 1 2 3; do
   curl -sI --max-time 8 "$URL" | grep -iE "cf-cache-status|x-request-id"
   sleep 2
@@ -177,7 +180,7 @@ The two-rule setup means:
 **Verify via:**
 
 ```sh
-URL=https://aoe2-live-standings-api.criticalbit.gg/v1/tournaments/default/players
+URL=https://aoe2-live-standings-api.criticalbit.gg/v1/tournaments/current/players
 # Viewer-path: should populate then hit cache
 curl -sI --max-time 8 "$URL" | grep -iE "cf-cache-status|cache-control"  # MISS or HIT
 # Admin-path: should bypass on every request (substitute any non-empty value)
