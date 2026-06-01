@@ -678,8 +678,10 @@ async def get_progression(
     oldest-first, where ``rating`` is the post-match value. The consumer
     plots rating against ``completed_at`` for a by-date view, or against
     point index for a by-games-played view. Players with no such history
-    are omitted, and points reach back only as far as the poller's match
-    record — not a player's whole career.
+    are omitted. Points are bounded by the tournament's date window
+    (``[start_date, grand_finals_date]``; a null bound is open), mirroring
+    ``tournament_record`` — so the chart reflects in-event rating movement,
+    not a player's whole tracked history.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -699,6 +701,13 @@ async def get_progression(
         # Alpha by alias for a stable legend; chronological within a player.
         .order_by(Player.alias, Player.profile_id, Match.completed_at, Match.match_id)
     )
+    # Window to the tournament's date bounds, mirroring `_tournament_record_by_profile`,
+    # so the chart reflects in-event rating movement rather than a player's whole tracked
+    # history (which can reach back years). A null bound is treated as open.
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
     rows = (await session.execute(stmt)).all()
 
     series: dict[int, PlayerProgression] = {}
