@@ -4,7 +4,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import LiveMatchPlayer, MatchState, Team, TeamMember
+from app.models import LiveMatchPlayer, MatchState, Team, TeamMember, TournamentPlayer
 from tests.conftest import (
     DEFAULT_TEST_USER_ID,
     make_match,
@@ -40,7 +40,7 @@ class TestTeamStandings:
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
@@ -67,7 +67,7 @@ class TestTeamStandings:
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
@@ -87,7 +87,7 @@ class TestTeamStandings:
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
@@ -108,7 +108,7 @@ class TestTeamStandings:
         )
         session.add(player)
         tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
 
@@ -131,8 +131,8 @@ class TestTeamStandings:
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2, 3, 4], leaderboard_id=3)
         tournament.teams = [
-            make_team("Weak", profile_ids=[1, 2]),
-            make_team("Strong", profile_ids=[3, 4]),
+            make_team(tournament, "Weak", profile_ids=[1, 2]),
+            make_team(tournament, "Strong", profile_ids=[3, 4]),
         ]
         session.add(tournament)
         await session.commit()
@@ -161,8 +161,8 @@ class TestTeamStandings:
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2, 3, 4], leaderboard_id=3)
         tournament.teams = [
-            make_team("Cold", profile_ids=[3, 4]),
-            make_team("Hot", profile_ids=[1, 2]),
+            make_team(tournament, "Cold", profile_ids=[3, 4]),
+            make_team(tournament, "Hot", profile_ids=[1, 2]),
         ]
         session.add(tournament)
         await session.commit()
@@ -176,7 +176,7 @@ class TestTeamStandings:
         self, client: AsyncClient, session: AsyncSession
     ):
         tournament = make_tournament("cup", leaderboard_id=3)
-        tournament.teams = [make_team("Ghosts")]
+        tournament.teams = [make_team(tournament, "Ghosts")]
         session.add(tournament)
         await session.commit()
 
@@ -201,7 +201,7 @@ class TestTeamStandings:
         session.add(rated)
         session.add(make_player(2, alias="newbie", country="us"))
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
@@ -230,7 +230,7 @@ class TestTeamStandings:
         rated.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(rated)
         tournament = make_tournament("cup", profile_ids=[1, 999], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1, 999])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 999])]
         session.add(tournament)
         await session.commit()
 
@@ -252,7 +252,7 @@ class TestTeamStandings:
         session.add(make_player(1, alias="a"))
         session.add(make_player(2, alias="b"))
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Newcomers", profile_ids=[1, 2])]
+        tournament.teams = [make_team(tournament, "Newcomers", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
@@ -303,7 +303,7 @@ class TestTeamMemberIdentityAndLiveStatus:
         player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(player)
         tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
 
@@ -321,7 +321,7 @@ class TestTeamMemberIdentityAndLiveStatus:
         session.add(make_match(601, state=MatchState.IN_PROGRESS, completed_at=None))
         session.add(LiveMatchPlayer(match_id=601, profile_id=1))
         tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
 
@@ -336,7 +336,7 @@ class TestTeamMemberIdentityAndLiveStatus:
         player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(player)
         tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
 
@@ -360,7 +360,7 @@ class TestTeamMemberIdentityAndLiveStatus:
         session.add(make_match(602, state=MatchState.IN_PROGRESS, completed_at=None))
         session.add(LiveMatchPlayer(match_id=602, profile_id=1))
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
 
@@ -410,7 +410,7 @@ class TestUpdateTeam:
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red")]
+        tournament.teams = [make_team(tournament, "Red")]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
@@ -434,7 +434,7 @@ class TestUpdateTeam:
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         other = make_tournament("other")
-        other.teams = [make_team("Foreign")]
+        other.teams = [make_team(other, "Foreign")]
         session.add(other)
         await session.commit()
         foreign_team_id = other.teams[0].id
@@ -452,8 +452,8 @@ class TestDeleteTeam:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1, 2])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
@@ -468,98 +468,101 @@ class TestDeleteTeam:
 class TestAddTeamMember:
     """POST /v1/tournaments/{slug}/teams/{team_id}/members — owner-gated."""
 
-    async def test_owner_adds_member(self, client: AsyncClient, session: AsyncSession, auth_as):
-        auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red")]
-        session.add(tournament)
-        await session.commit()
-        team_id = tournament.teams[0].id
-
-        response = await client.post(
-            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
-        )
-        assert response.status_code == 204
-        members = (await session.execute(select(TeamMember.profile_id))).scalars().all()
-        assert members == [199325]
-
-    async def test_adding_a_duplicate_member_is_409(
+    async def test_owner_adds_polled_member(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[199325])]
-        session.add(tournament)
-        await session.commit()
-        team_id = tournament.teams[0].id
-
-        response = await client.post(
-            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
-        )
-        assert response.status_code == 409
-
-    async def test_add_dual_writes_tournament_player_id_when_on_roster(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        # The profile is on the tournament's roster, so add_team_member
-        # resolves the matching TournamentPlayer and populates the new
-        # ``tournament_player_id`` alongside ``profile_id`` (#167 expand).
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[199325])
-        tournament.teams = [make_team("Red")]
+        tournament.teams = [make_team(tournament, "Red")]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
         roster_id = tournament.tracked_players[0].id
 
         response = await client.post(
-            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
+            f"/v1/tournaments/cup/teams/{team_id}/members",
+            json={"tournament_player_id": roster_id},
         )
         assert response.status_code == 204
-        row = (
-            await session.execute(select(TeamMember.profile_id, TeamMember.tournament_player_id))
-        ).one()
-        assert row.profile_id == 199325
-        assert row.tournament_player_id == roster_id
+        members = (await session.execute(select(TeamMember.tournament_player_id))).scalars().all()
+        assert members == [roster_id]
 
-    async def test_add_leaves_tournament_player_id_null_when_off_roster(
+    async def test_owner_adds_placeholder_member(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # Profile isn't on the tournament's roster, so no
-        # TournamentPlayer to dual-link to — the new column stays
-        # NULL during the expand window and the contract migration
-        # will backfill defensively. This shape mirrors a row written
-        # by the previous Cloud Run revision during rollover.
+        # The original #167 ask: a placeholder roster row (announced
+        # entrant whose profile_id hasn't minted yet) can now be teamed
+        # via the surrogate roster id.
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red")]
+        tournament.tracked_players.append(TournamentPlayer(name="Jabo"))
+        tournament.teams = [make_team(tournament, "Red")]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        placeholder_roster_id = tournament.tracked_players[0].id
 
         response = await client.post(
-            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
+            f"/v1/tournaments/cup/teams/{team_id}/members",
+            json={"tournament_player_id": placeholder_roster_id},
         )
         assert response.status_code == 204
-        row = (
-            await session.execute(select(TeamMember.profile_id, TeamMember.tournament_player_id))
-        ).one()
-        assert row.profile_id == 199325
-        assert row.tournament_player_id is None
+        members = (await session.execute(select(TeamMember.tournament_player_id))).scalars().all()
+        assert members == [placeholder_roster_id]
+
+    async def test_adding_a_duplicate_member_is_409(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[199325])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[199325])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+        roster_id = tournament.tracked_players[0].id
+
+        response = await client.post(
+            f"/v1/tournaments/cup/teams/{team_id}/members",
+            json={"tournament_player_id": roster_id},
+        )
+        assert response.status_code == 409
+
+    async def test_adding_a_roster_row_from_another_tournament_is_404(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The surrogate roster id is global, but the URL path scopes
+        # to one tournament — a roster id from another tournament is
+        # unreachable from this URL and must 404 (not 500 or accept).
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team(tournament, "Red")]
+        other = make_tournament("other", profile_ids=[199325])
+        session.add(tournament)
+        session.add(other)
+        await session.commit()
+        team_id = tournament.teams[0].id
+        foreign_roster_id = other.tracked_players[0].id
+
+        response = await client.post(
+            f"/v1/tournaments/cup/teams/{team_id}/members",
+            json={"tournament_player_id": foreign_roster_id},
+        )
+        assert response.status_code == 404
 
 
 class TestRemoveTeamMember:
-    """DELETE /v1/tournaments/{slug}/teams/{team_id}/members/{profile_id}."""
+    """DELETE /v1/tournaments/{slug}/teams/{team_id}/members/{tournament_player_id}."""
 
     async def test_owner_removes_member(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[199325])]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[199325])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[199325])]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_id = tournament.tracked_players[0].id
 
-        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/199325")
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/{roster_id}")
         assert response.status_code == 204
         assert (await session.execute(select(TeamMember))).scalars().all() == []
 
@@ -567,13 +570,14 @@ class TestRemoveTeamMember:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red")]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[199325])
+        tournament.teams = [make_team(tournament, "Red")]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_id = tournament.tracked_players[0].id
 
-        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/199325")
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/{roster_id}")
         assert response.status_code == 404
 
 
@@ -582,45 +586,49 @@ class TestSetTeamCaptain:
 
     async def test_owner_sets_captain(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1, 2])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_ids_by_pid = {tp.profile_id: tp.id for tp in tournament.tracked_players}
 
         response = await client.patch(
-            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 2}
+            f"/v1/tournaments/cup/teams/{team_id}/captain",
+            json={"tournament_player_id": roster_ids_by_pid[2]},
         )
         assert response.status_code == 204
         captain = (
             await session.execute(
-                select(TeamMember.profile_id).where(
+                select(TeamMember.tournament_player_id).where(
                     TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
                 )
             )
         ).scalar_one_or_none()
-        assert captain == 2
+        assert captain == roster_ids_by_pid[2]
 
     async def test_setting_existing_captain_is_idempotent_noop(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        team = make_team("Red", profile_ids=[1, 2])
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1, 2])
+        team = make_team(tournament, "Red", profile_ids=[1, 2])
         team.members[0].is_captain = True  # profile 1 is already captain
         tournament.teams = [team]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_ids_by_pid = {tp.profile_id: tp.id for tp in tournament.tracked_players}
 
         response = await client.patch(
-            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 1}
+            f"/v1/tournaments/cup/teams/{team_id}/captain",
+            json={"tournament_player_id": roster_ids_by_pid[1]},
         )
         assert response.status_code == 204
         captains = (
             (
                 await session.execute(
-                    select(TeamMember.profile_id).where(
+                    select(TeamMember.tournament_player_id).where(
                         TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
                     )
                 )
@@ -628,28 +636,30 @@ class TestSetTeamCaptain:
             .scalars()
             .all()
         )
-        assert captains == [1]
+        assert captains == [roster_ids_by_pid[1]]
 
     async def test_setting_replaces_previous_captain(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        team = make_team("Red", profile_ids=[1, 2])
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1, 2])
+        team = make_team(tournament, "Red", profile_ids=[1, 2])
         team.members[0].is_captain = True  # profile 1 starts as captain
         tournament.teams = [team]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_ids_by_pid = {tp.profile_id: tp.id for tp in tournament.tracked_players}
 
         response = await client.patch(
-            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 2}
+            f"/v1/tournaments/cup/teams/{team_id}/captain",
+            json={"tournament_player_id": roster_ids_by_pid[2]},
         )
         assert response.status_code == 204
         captains = (
             (
                 await session.execute(
-                    select(TeamMember.profile_id).where(
+                    select(TeamMember.tournament_player_id).where(
                         TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
                     )
                 )
@@ -657,32 +667,35 @@ class TestSetTeamCaptain:
             .scalars()
             .all()
         )
-        assert captains == [2]
+        assert captains == [roster_ids_by_pid[2]]
 
     async def test_setting_non_member_is_404(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
 
         response = await client.patch(
-            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 9999}
+            f"/v1/tournaments/cup/teams/{team_id}/captain",
+            json={"tournament_player_id": 9999},
         )
         assert response.status_code == 404
 
     async def test_unauthenticated_is_401(self, client: AsyncClient, session: AsyncSession):
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_id = tournament.tracked_players[0].id
 
         response = await client.patch(
-            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 1}
+            f"/v1/tournaments/cup/teams/{team_id}/captain",
+            json={"tournament_player_id": roster_id},
         )
         assert response.status_code == 401
 
@@ -692,8 +705,8 @@ class TestClearTeamCaptain:
 
     async def test_owner_clears_captain(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        team = make_team("Red", profile_ids=[1])
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1])
+        team = make_team(tournament, "Red", profile_ids=[1])
         team.members[0].is_captain = True
         tournament.teams = [team]
         session.add(tournament)
@@ -704,7 +717,7 @@ class TestClearTeamCaptain:
         assert response.status_code == 204
         captain = (
             await session.execute(
-                select(TeamMember.profile_id).where(
+                select(TeamMember.tournament_player_id).where(
                     TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
                 )
             )
@@ -715,8 +728,8 @@ class TestClearTeamCaptain:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[1])
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
@@ -738,7 +751,7 @@ class TestCaptainOnTeamStandings:
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        team = make_team("Red", profile_ids=[1, 2])
+        team = make_team(tournament, "Red", profile_ids=[1, 2])
         team.members[1].is_captain = True  # profile 2 is captain
         tournament.teams = [team]
         session.add(tournament)
@@ -757,7 +770,7 @@ class TestCaptainOnTeamStandings:
         player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(player)
         tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
-        tournament.teams = [make_team("Red", profile_ids=[1])]
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)
         await session.commit()
 

@@ -351,7 +351,7 @@ class TestTournamentStandings:
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
-        tournament.teams = [make_team("Grubby", profile_ids=[1], initials="G")]
+        tournament.teams = [make_team(tournament, "Grubby", profile_ids=[1], initials="G")]
         session.add(tournament)
         await session.commit()
 
@@ -1566,7 +1566,7 @@ class TestDeleteTournament:
             profile_ids=[1, 2],
             owner_ids=[DEFAULT_TEST_USER_ID, "00000000-0000-0000-0000-0000000000bb"],
         )
-        team = make_team("Reds", profile_ids=[1])
+        team = make_team(tournament, "Reds", profile_ids=[1])
         tournament.teams = [team]
         session.add(tournament)
         await session.commit()

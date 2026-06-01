@@ -272,11 +272,26 @@ def make_tournament(
     return tournament
 
 
-def make_team(name: str, profile_ids: list[int] | None = None, **overrides: Any) -> Team:
+def make_team(
+    tournament: Tournament,
+    name: str,
+    profile_ids: list[int] | None = None,
+    placeholder_names: list[str] | None = None,
+    **overrides: Any,
+) -> Team:
     """Build a Team with reasonable defaults and an optional member list.
 
-    Attach to a tournament via ``tournament.teams = [...]`` so its
-    ``tournament_id`` and ``id`` are assigned on flush.
+    The team's members are resolved by matching ``profile_ids`` and
+    ``placeholder_names`` against the tournament's existing roster
+    (``tournament.tracked_players``) — so callers seed the roster on
+    ``make_tournament`` first, then refer to it here. Raises if a
+    requested id/name isn't on the roster (mirrors the prod 404 from
+    ``POST /teams/{id}/members`` when the surrogate id isn't a roster
+    row in this tournament).
+
+    Attach via ``tournament.teams.append(team)`` so the team's
+    ``tournament_id``, ``id``, and the members' ``tournament_player_id``
+    FKs are all populated on flush.
     """
     defaults: dict[str, Any] = {
         "name": name,
@@ -284,7 +299,24 @@ def make_team(name: str, profile_ids: list[int] | None = None, **overrides: Any)
     }
     defaults.update(overrides)
     team = Team(**defaults)
-    team.members = [TeamMember(profile_id=pid) for pid in (profile_ids or [])]
+    roster_by_profile = {
+        tp.profile_id: tp for tp in tournament.tracked_players if tp.profile_id is not None
+    }
+    roster_by_name = {tp.name: tp for tp in tournament.tracked_players if tp.name is not None}
+    members: list[TeamMember] = []
+    for pid in profile_ids or []:
+        tp = roster_by_profile.get(pid)
+        if tp is None:
+            raise ValueError(f"profile_id {pid} not on tournament {tournament.slug!r} roster")
+        members.append(TeamMember(tournament_player=tp))
+    for placeholder in placeholder_names or []:
+        tp = roster_by_name.get(placeholder)
+        if tp is None:
+            raise ValueError(
+                f"placeholder {placeholder!r} not on tournament {tournament.slug!r} roster"
+            )
+        members.append(TeamMember(tournament_player=tp))
+    team.members = members
     return team
 
 
