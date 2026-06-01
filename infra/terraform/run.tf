@@ -105,14 +105,6 @@ resource "google_cloud_run_v2_service" "api" {
         }
       }
 
-      # Seed roster for a brand-new, empty database only — consumed once by
-      # ensure_seed_tournament() at startup. The live roster lives in the
-      # tournament_players table and is managed via the write API.
-      env {
-        name  = "TRACKED_PROFILE_IDS"
-        value = var.tracked_profile_ids
-      }
-
       env {
         name  = "ENVIRONMENT"
         value = "production"
@@ -244,14 +236,6 @@ resource "google_cloud_run_v2_service" "worker" {
             version = "latest"
           }
         }
-      }
-
-      # Seed roster for a brand-new, empty database only — consumed once by
-      # ensure_seed_tournament() at startup. The live roster lives in the
-      # tournament_players table and is managed via the write API.
-      env {
-        name  = "TRACKED_PROFILE_IDS"
-        value = var.tracked_profile_ids
       }
 
       env {

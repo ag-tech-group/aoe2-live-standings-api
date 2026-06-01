@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -68,18 +66,6 @@ class Settings(BaseSettings):
     # dev defaults both true so a single mono process does everything.
     listener_enabled: bool = True
 
-    # Seed-tournament bootstrap. On startup, when the `tournaments` table is
-    # empty, a tournament is created from these values with the
-    # `tracked_profile_ids` roster — the migration path off the old
-    # single-deployment config and the zero-touch seed for a fresh deploy.
-    # Once any tournament exists the bootstrap is a no-op.
-    tracked_profile_ids: str = ""
-    tournament_slug: str = "default"
-    tournament_name: str = "Default Tournament"
-    tournament_leaderboard_id: int = 3
-    tournament_start_date: datetime | None = None
-    tournament_grand_finals_date: datetime | None = None
-
     # Authentication for the write/management API. The read surface stays
     # unauthenticated; write routes verify the `criticalbit_access` cookie's
     # RS256 JWT against criticalbit-auth-api's public JWKS. `auth_token_issuer`
@@ -129,11 +115,6 @@ class Settings(BaseSettings):
         if self.is_development:
             return None
         return r"https://([a-z0-9-]+\.)?criticalbit\.gg"
-
-    @property
-    def tracked_profile_id_list(self) -> list[int]:
-        """Parse the CSV ``TRACKED_PROFILE_IDS`` env var into ints, skipping blanks."""
-        return [int(p.strip()) for p in self.tracked_profile_ids.split(",") if p.strip()]
 
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":

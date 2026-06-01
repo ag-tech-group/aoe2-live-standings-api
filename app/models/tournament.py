@@ -21,11 +21,12 @@ from app.database import Base
 class Tournament(Base):
     """One tracked tournament — a named roster of players on one leaderboard.
 
-    Supersedes the single-deployment ``TRACKED_PROFILE_IDS`` env var: one
-    API instance serves many tournaments, each with its own roster
+    One API instance serves many tournaments, each with its own roster
     (``TournamentPlayer``), competition window, and optional teams.
-    ``slug`` is the URL-friendly key used in ``/v1/tournaments/{slug}/...``
-    routes.
+    Tournaments are created exclusively via the management API
+    (``POST /v1/tournaments``); a fresh deploy serves no data until an
+    operator creates one. ``slug`` is the URL-friendly key used in
+    ``/v1/tournaments/{slug}/...`` routes.
     """
 
     __tablename__ = "tournaments"
