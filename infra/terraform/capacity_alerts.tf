@@ -59,16 +59,57 @@ resource "google_monitoring_alert_policy" "sql_cpu_high" {
 
 # --- Cloud SQL active connections ----------------------------------------
 #
-# `max_connections` is 100 on the SQL instance. 80 active connections
-# is 80% of the cap; sustained pressure here means the application's
-# connection pool is full and queries are queuing waiting for slots.
-# Steady-state for this service is well under 30 connections (api ×
-# pool + worker + migrate-job overlap), so 80 represents a real change.
+# `max_connections` is 100 on the SQL instance. Two policies fire:
+#
+#   - Early (60 backends, 1 min) — heads-up that the pool is climbing
+#     past steady-state. Steady-state is < 30 connections (api × pool
+#     + worker + migrate-job overlap), so 60 is a real change but well
+#     before refusals begin. The 1-minute window is tight because by
+#     the time 5-minute sustained pressure trips, the saturation event
+#     is already visible to users (this is the 2026-06-01 outage's
+#     bitter lesson; see `[[project_cloud_run_revision_outage]]`).
+#   - Critical (80 backends, 5 min) — 80% of the cap, sustained.
+#     Refusals start at 97 (~3 superuser reserves). Keeping the
+#     longer window on the critical policy keeps it as the "things
+#     are bad now" signal and avoids double-firing on a brief spike
+#     that the early-warning already covered.
 
-resource "google_monitoring_alert_policy" "sql_connections_high" {
-  display_name = "Cloud SQL active connections > 80 (#84 event-window)"
+resource "google_monitoring_alert_policy" "sql_connections_climbing" {
+  display_name = "Cloud SQL active connections > 60 (early warning)"
   combiner     = "OR"
   severity     = "WARNING"
+
+  notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
+
+  conditions {
+    display_name = "num_backends > 60 sustained 1 minute"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\"",
+        "resource.type=\"cloudsql_database\"",
+        "resource.labels.database_id=\"${var.project_id}:${google_sql_database_instance.main.name}\"",
+      ])
+      duration        = "60s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 60
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+    }
+  }
+
+  documentation {
+    content   = "Cloud SQL is holding > 60 active backends — well above steady-state (< 30). This is the heads-up before the 80-backend critical fires. Likely causes: (a) stale Cloud Run revisions accumulating with `minScale=1` pinning instances + pools — check `gcloud run revisions list` on both services and confirm the CI prune step ran on the most recent deploy; (b) genuine traffic ramp pushing api instances past their pool budget; (c) a long-running transaction holding slots. Going past 80 fires the critical policy; past 97 the DB refuses connections."
+    mime_type = "text/markdown"
+  }
+}
+
+resource "google_monitoring_alert_policy" "sql_connections_high" {
+  display_name = "Cloud SQL active connections > 80 (critical)"
+  combiner     = "OR"
+  severity     = "CRITICAL"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
@@ -92,7 +133,7 @@ resource "google_monitoring_alert_policy" "sql_connections_high" {
   }
 
   documentation {
-    content   = "Cloud SQL is holding > 80 active backends (`num_backends`) — 80% of the 100 `max_connections` cap. Steady-state for this service is < 30; sustained 80+ means the pool is saturating. Check Cloud Run instance counts (api scaling above expected? worker spawning extras?), pgbouncer-style pooling absence, or stuck transactions in Query Insights. Going past 100 results in connection refusals."
+    content   = "Cloud SQL is holding > 80 active backends (`num_backends`) — 80% of the 100 `max_connections` cap. Steady-state for this service is < 30; sustained 80+ means the pool is saturating. Check Cloud Run instance counts (api scaling above expected? worker spawning extras?), pgbouncer-style pooling absence, or stuck transactions in Query Insights. Going past 97 results in connection refusals. The 2026-06-01 outage cleared via `gcloud sql instances restart aoe2-standings-db` once the leak source (stale revision proliferation) was identified."
     mime_type = "text/markdown"
   }
 }
