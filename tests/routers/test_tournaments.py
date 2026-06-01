@@ -1642,6 +1642,63 @@ class TestProgression:
         assert completed == sorted(completed)
         assert body["last_polled_at"] is not None
 
+    async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
+        # Only matches whose started_at falls inside [start_date, grand_finals_date]
+        # contribute points — a years-old match and one past the window are dropped,
+        # mirroring tournament_record so the chart reflects in-event movement, not a
+        # player's whole tracked history.
+        player = make_player(1, alias="hera")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=1530))
+        session.add(player)
+        # (match_id, started_at, completed_at, new_rating): pre-window (2021),
+        # two in-window (2026-06), post-window (2026-07).
+        matches = [
+            (
+                101,
+                datetime(2021, 3, 1, 12, 0, tzinfo=UTC),
+                datetime(2021, 3, 1, 12, 30, tzinfo=UTC),
+                1400,
+            ),
+            (
+                102,
+                datetime(2026, 6, 2, 12, 0, tzinfo=UTC),
+                datetime(2026, 6, 2, 12, 30, tzinfo=UTC),
+                1490,
+            ),
+            (
+                103,
+                datetime(2026, 6, 9, 12, 0, tzinfo=UTC),
+                datetime(2026, 6, 9, 12, 30, tzinfo=UTC),
+                1520,
+            ),
+            (
+                104,
+                datetime(2026, 7, 1, 12, 0, tzinfo=UTC),
+                datetime(2026, 7, 1, 12, 30, tzinfo=UTC),
+                1600,
+            ),
+        ]
+        for match_id, started_at, completed_at, rating in matches:
+            match = make_match(
+                match_id, leaderboard_id=3, started_at=started_at, completed_at=completed_at
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 6, 30, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        series = (await client.get("/v1/tournaments/cup/progression")).json()["items"][0]
+        # Pre-window (1400) and post-window (1600) dropped; only in-window points remain.
+        assert [p["rating"] for p in series["points"]] == [1490, 1520]
+
     async def test_scoped_to_tournament_leaderboard(
         self, client: AsyncClient, session: AsyncSession
     ):
