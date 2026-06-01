@@ -498,6 +498,55 @@ class TestAddTeamMember:
         )
         assert response.status_code == 409
 
+    async def test_add_dual_writes_tournament_player_id_when_on_roster(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The profile is on the tournament's roster, so add_team_member
+        # resolves the matching TournamentPlayer and populates the new
+        # ``tournament_player_id`` alongside ``profile_id`` (#167 expand).
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[199325])
+        tournament.teams = [make_team("Red")]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+        roster_id = tournament.tracked_players[0].id
+
+        response = await client.post(
+            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
+        )
+        assert response.status_code == 204
+        row = (
+            await session.execute(select(TeamMember.profile_id, TeamMember.tournament_player_id))
+        ).one()
+        assert row.profile_id == 199325
+        assert row.tournament_player_id == roster_id
+
+    async def test_add_leaves_tournament_player_id_null_when_off_roster(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # Profile isn't on the tournament's roster, so no
+        # TournamentPlayer to dual-link to — the new column stays
+        # NULL during the expand window and the contract migration
+        # will backfill defensively. This shape mirrors a row written
+        # by the previous Cloud Run revision during rollover.
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red")]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.post(
+            f"/v1/tournaments/cup/teams/{team_id}/members", json={"profile_id": 199325}
+        )
+        assert response.status_code == 204
+        row = (
+            await session.execute(select(TeamMember.profile_id, TeamMember.tournament_player_id))
+        ).one()
+        assert row.profile_id == 199325
+        assert row.tournament_player_id is None
+
 
 class TestRemoveTeamMember:
     """DELETE /v1/tournaments/{slug}/teams/{team_id}/members/{profile_id}."""

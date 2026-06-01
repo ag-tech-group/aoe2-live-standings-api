@@ -207,6 +207,13 @@ class TeamMember(Base):
 
     No FK to ``players``: a profile can be assigned to a team before the
     poller has written its ``Player`` row. Mirrors ``TournamentPlayer``.
+
+    ``tournament_player_id`` is the expand-step column (#167): the
+    in-flight migration of this table's key from ``profile_id`` to a
+    surrogate roster-row id, so placeholder entrants (which have no
+    ``profile_id``) can be teamed. While the column is nullable the
+    writers dual-populate both keys; the follow-up contract migration
+    makes it NOT NULL, swaps the PK, and drops ``profile_id``.
     """
 
     __tablename__ = "team_members"
@@ -216,6 +223,14 @@ class TeamMember(Base):
         primary_key=True,
     )
     profile_id: Mapped[int] = mapped_column(primary_key=True)
+    # Nullable during the expand window so the previous Cloud Run
+    # revision (which only knows about ``profile_id``) keeps inserting
+    # successfully during rollover. New writers populate both columns;
+    # the contract step tightens this to NOT NULL.
+    tournament_player_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tournament_players.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     is_captain: Mapped[bool] = mapped_column(server_default=false())
 
     team: Mapped[Team] = relationship(back_populates="members")
@@ -223,6 +238,7 @@ class TeamMember(Base):
     __table_args__ = (
         # Find every team a profile belongs to.
         Index("ix_team_members_profile_id", "profile_id"),
+        Index("ix_team_members_tournament_player_id", "tournament_player_id"),
         # At most one captain per team — partial unique index on team_id
         # filtered to ``is_captain``. The endpoint also clears any current
         # captain before setting a new one, so the app-level write path is

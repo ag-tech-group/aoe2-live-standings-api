@@ -16,7 +16,7 @@ from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
 from app.database import get_async_session
 from app.limiting import limiter
-from app.models import Team, TeamMember, Tournament
+from app.models import Team, TeamMember, Tournament, TournamentPlayer
 from app.schemas import TeamCaptainSet, TeamCreate, TeamMemberCreate, TeamRead, TeamUpdate
 
 router = APIRouter(prefix="/tournaments/{tournament_slug}/teams", tags=["teams"])
@@ -135,6 +135,13 @@ async def add_team_member(
     409 if the profile is already on the team. Team membership is separate
     from the tournament roster — this does not add the profile to
     ``TournamentPlayer``.
+
+    Dual-writes ``tournament_player_id`` alongside ``profile_id`` during
+    the #167 expand window so the follow-up contract migration can
+    swap the PK without backfill drift. The lookup resolves the roster
+    row in the team's tournament; absent (profile not on the roster
+    yet) the new column stays NULL — backfilled defensively by the
+    contract migration.
     """
     existing = (
         await session.execute(
@@ -147,7 +154,22 @@ async def add_team_member(
     if existing is not None:
         raise HTTPException(status_code=409, detail="Player already on the team")
 
-    session.add(TeamMember(team_id=team.id, profile_id=payload.profile_id))
+    tournament_player_id = (
+        await session.execute(
+            select(TournamentPlayer.id).where(
+                TournamentPlayer.tournament_id == team.tournament_id,
+                TournamentPlayer.profile_id == payload.profile_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    session.add(
+        TeamMember(
+            team_id=team.id,
+            profile_id=payload.profile_id,
+            tournament_player_id=tournament_player_id,
+        )
+    )
     await session.commit()
     audit(
         AuditAction.TEAM_MEMBER_ADD,
