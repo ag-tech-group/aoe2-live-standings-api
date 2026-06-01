@@ -307,13 +307,18 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     # ACCM is in no live lobby.
     assert (rows[0]["in_match"], rows[0]["live_match_id"]) == (True, 9001)
     assert (rows[1]["in_match"], rows[1]["live_match_id"]) == (False, None)
-    # Hera won both completed matches inside the (open) tournament window.
-    assert rows[0]["tournament_record"] == {
-        "games_played": 2,
-        "wins": 2,
-        "losses": 0,
-        "streak": 2,
-    }
+    # Hera won both completed matches inside the (open) tournament window —
+    # counts/streak, peak (best of 2788 / 2780), and recent_results all reflect
+    # in-window play; last_match_at is the newer of the two starts.
+    record = rows[0]["tournament_record"]
+    assert record["games_played"] == 2
+    assert record["wins"] == 2
+    assert record["losses"] == 0
+    assert record["streak"] == 2
+    assert record["peak_rating"] == 2788
+    assert record["recent_results"] == ["win", "win"]
+    assert record["win_pct"] == 100.0
+    assert record["last_match_at"] is not None
 
     # 5. Matches — completed list. Match 1001 only exists once even though both
     # profile queries returned it — confirms ON CONFLICT dedupe.

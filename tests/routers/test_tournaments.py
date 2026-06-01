@@ -335,6 +335,10 @@ class TestStandingsUnratedRoster:
             "wins": 0,
             "losses": 0,
             "streak": 0,
+            "peak_rating": None,
+            "last_match_at": None,
+            "recent_results": [],
+            "win_pct": None,
         }
         assert newbie["rank"] is None
         assert newbie["rank_total"] is None
@@ -416,6 +420,10 @@ class TestStandingsPlaceholderTail:
             "wins": 0,
             "losses": 0,
             "streak": 0,
+            "peak_rating": None,
+            "last_match_at": None,
+            "recent_results": [],
+            "win_pct": None,
         }
         assert ghost["rank"] is None
         assert ghost["rank_total"] is None
@@ -837,7 +845,210 @@ class TestStandingsTournamentRecord:
             "wins": 0,
             "losses": 0,
             "streak": 0,
+            "peak_rating": None,
+            "last_match_at": None,
+            "recent_results": [],
+            "win_pct": None,
         }
+
+    async def test_peak_rating_is_max_in_window(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, day, new_rating in (
+            (1, 1, 1900),
+            (2, 2, 2050),  # peak
+            (3, 3, 1980),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, outcome=MatchOutcome.WIN, new_rating=new_rating
+                )
+            )
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["peak_rating"] == 2050
+
+    async def test_peak_rating_ignores_matches_outside_the_window(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A match with the highest rating sits outside the window — it must
+        # not surface as the in-window peak.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, day, new_rating in (
+            (1, 3, 1950),  # before window
+            (2, 7, 2000),  # in window
+            (3, 12, 2100),  # after window — higher, but should not count
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, outcome=MatchOutcome.WIN, new_rating=new_rating
+                )
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["peak_rating"] == 2000
+
+    async def test_peak_rating_null_when_all_in_window_new_ratings_are_null(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Counts a game (so games_played > 0) but no rating data on any of
+        # the in-window matches — peak_rating must report null, not 0.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(1, profile_id=1, outcome=MatchOutcome.WIN, new_rating=None)
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["games_played"] == 1
+        assert row["tournament_record"]["peak_rating"] is None
+
+    async def test_last_match_at_is_newest_in_window(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Three matches inside the window — last_match_at picks the newest.
+        # A fourth match sits after the window and must be ignored even
+        # though it would otherwise be the newer of the lot.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, day in ((1, 6), (2, 8), (3, 9), (4, 15)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        # SQLite strips the tz on read-back; prod (Postgres) keeps it. Match
+        # on the ISO prefix so the assertion is portable across both.
+        assert row["tournament_record"]["last_match_at"].startswith("2026-05-09T12:00:00")
+
+    async def test_recent_results_newest_first_capped_at_limit(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Twelve completed matches — recent_results returns the 10 newest
+        # outcomes, newest-first.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id in range(1, 13):
+            # Match N is on day N (later N = newer). Outcomes alternate.
+            outcome = MatchOutcome.WIN if match_id % 2 == 0 else MatchOutcome.LOSS
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, match_id, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        recent = row["tournament_record"]["recent_results"]
+        assert len(recent) == 10
+        # Matches 12..3 (newest first): even=win, odd=loss.
+        expected = ["win" if mid % 2 == 0 else "loss" for mid in range(12, 2, -1)]
+        assert recent == expected
+
+    async def test_recent_results_window_scoped(self, client: AsyncClient, session: AsyncSession):
+        # Same-leaderboard matches outside the window are excluded — even
+        # when they would otherwise be newer than every in-window match.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, day, outcome in (
+            (1, 3, MatchOutcome.WIN),  # before window — excluded
+            (2, 6, MatchOutcome.WIN),  # in window
+            (3, 8, MatchOutcome.LOSS),  # in window
+            (4, 15, MatchOutcome.LOSS),  # after window — excluded
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["recent_results"] == ["loss", "win"]
+
+    async def test_win_pct_rounds_to_one_decimal(self, client: AsyncClient, session: AsyncSession):
+        # 2 wins of 3 → 66.66...% → rounds to 66.7.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id, outcome in (
+            (1, MatchOutcome.WIN),
+            (2, MatchOutcome.WIN),
+            (3, MatchOutcome.LOSS),
+        ):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["tournament_record"]["win_pct"] == 66.7
 
 
 class TestUpdateTournament:
