@@ -99,7 +99,7 @@ class TeamMemberCreate(BaseModel):
 
 
 class TeamCaptainSet(BaseModel):
-    """Request body for ``PUT /teams/{team_id}/captain`` — designates the captain.
+    """Request body for ``PATCH /teams/{team_id}/captain`` — designates the captain.
 
     The profile must already be a member of the team; the endpoint
     atomically clears any existing captain on the team and sets this one.

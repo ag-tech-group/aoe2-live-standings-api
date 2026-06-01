@@ -368,7 +368,7 @@ class TestRemoveTeamMember:
 
 
 class TestSetTeamCaptain:
-    """PUT /v1/tournaments/{slug}/teams/{team_id}/captain — owner-gated."""
+    """PATCH /v1/tournaments/{slug}/teams/{team_id}/captain — owner-gated."""
 
     async def test_owner_sets_captain(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -378,7 +378,7 @@ class TestSetTeamCaptain:
         await session.commit()
         team_id = tournament.teams[0].id
 
-        response = await client.put(
+        response = await client.patch(
             f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 2}
         )
         assert response.status_code == 204
@@ -403,7 +403,7 @@ class TestSetTeamCaptain:
         await session.commit()
         team_id = tournament.teams[0].id
 
-        response = await client.put(
+        response = await client.patch(
             f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 1}
         )
         assert response.status_code == 204
@@ -432,7 +432,7 @@ class TestSetTeamCaptain:
         await session.commit()
         team_id = tournament.teams[0].id
 
-        response = await client.put(
+        response = await client.patch(
             f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 2}
         )
         assert response.status_code == 204
@@ -459,7 +459,7 @@ class TestSetTeamCaptain:
         await session.commit()
         team_id = tournament.teams[0].id
 
-        response = await client.put(
+        response = await client.patch(
             f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 9999}
         )
         assert response.status_code == 404
@@ -471,7 +471,7 @@ class TestSetTeamCaptain:
         await session.commit()
         team_id = tournament.teams[0].id
 
-        response = await client.put(
+        response = await client.patch(
             f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 1}
         )
         assert response.status_code == 401
