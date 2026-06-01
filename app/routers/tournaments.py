@@ -481,37 +481,35 @@ async def _tournament_record_by_profile(
     return records
 
 
-async def _team_by_profile(
+async def _team_by_tournament_player(
     session: AsyncSession,
     tournament_id: int,
 ) -> dict[int, StandingTeam]:
-    """Map each teamed *polled* profile to its team within the tournament.
+    """Map each teamed roster row to its team within the tournament.
 
-    Joins through ``TournamentPlayer`` since ``TeamMember`` now keys on
-    the roster row's surrogate id (#167). Placeholder team memberships
-    have no ``profile_id`` and are skipped here — the per-player
-    standings endpoint keys its render on ``profile_id`` and renders
-    placeholders separately.
+    Keyed on ``tournament_player_id`` — the surrogate ``team_members``
+    already keys on (#181) and every standings row carries (#184) — so a
+    *placeholder* member (a roster row whose ``profile_id`` hasn't minted
+    yet) surfaces its team like a polled one. Keying on ``profile_id``
+    instead stranded such members at ``team = null`` even when rostered on
+    a team (#187): the join back to ``TournamentPlayer`` and its
+    ``profile_id IS NOT NULL`` filter both dropped them.
 
-    Scoped to the tournament's teams; a profile appears at most once,
-    since a player belongs to at most one team per tournament. Profiles
-    on no team are absent from the map — the caller renders their row
+    Scoped to the tournament's teams; a roster row appears at most once,
+    since a player belongs to at most one team per tournament. Rows on no
+    team are absent from the map — the caller renders their standings row
     with ``team = null``.
     """
     stmt = (
-        select(TournamentPlayer.profile_id, Team.id, Team.name, Team.initials)
+        select(TeamMember.tournament_player_id, Team.id, Team.name, Team.initials)
         .select_from(TeamMember)
         .join(Team, Team.id == TeamMember.team_id)
-        .join(TournamentPlayer, TournamentPlayer.id == TeamMember.tournament_player_id)
-        .where(
-            Team.tournament_id == tournament_id,
-            TournamentPlayer.profile_id.is_not(None),
-        )
+        .where(Team.tournament_id == tournament_id)
     )
     rows = (await session.execute(stmt)).all()
     return {
-        profile_id: StandingTeam(team_id=team_id, name=name, initials=initials)
-        for profile_id, team_id, name, initials in rows
+        tournament_player_id: StandingTeam(team_id=team_id, name=name, initials=initials)
+        for tournament_player_id, team_id, name, initials in rows
     }
 
 
@@ -591,7 +589,7 @@ async def get_standings(
     )
     live_match_ids = await _live_match_by_profile(session, profile_ids)
     tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
-    teams_by_profile = await _team_by_profile(session, tournament.id)
+    teams_by_tournament_player = await _team_by_tournament_player(session, tournament.id)
     stream_live_rows = await _stream_live_roster_rows(session, roster_row_ids)
 
     items: list[StandingRow] = []
@@ -604,7 +602,7 @@ async def get_standings(
                     profile_id=player.profile_id,
                     alias=player.alias,
                     country=player.country,
-                    team=teams_by_profile.get(player.profile_id),
+                    team=teams_by_tournament_player.get(entry.id),
                     presentation=entry.presentation,
                     current_rating=rating.current_rating if rating else None,
                     max_rating=rating.max_rating if rating else None,
@@ -631,7 +629,7 @@ async def get_standings(
                     profile_id=None,
                     alias=entry.name or "",
                     country=None,
-                    team=None,
+                    team=teams_by_tournament_player.get(entry.id),
                     presentation=entry.presentation,
                     current_rating=None,
                     max_rating=None,

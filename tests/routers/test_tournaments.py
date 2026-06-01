@@ -367,6 +367,33 @@ class TestTournamentStandings:
         assert grubby["initials"] == "G"
         assert isinstance(grubby["team_id"], int)
 
+    async def test_placeholder_member_row_carries_team(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A placeholder roster slot (no profile_id minted yet) that's on a
+        # team surfaces the team chip on its standings row — the live Jabo
+        # bug (#187). team_members keys on tournament_player_id (#181), so a
+        # placeholder can be teamed; the standings read used to key the team
+        # map on profile_id and hardcode team=None for placeholders, so the
+        # chip never reached the row.
+        tournament = make_tournament("cup", leaderboard_id=3)
+        tournament.tracked_players.append(TournamentPlayer(name="Jabo"))
+        tournament.teams = [make_team(tournament, "PiG", placeholder_names=["Jabo"], initials="PG")]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert len(items) == 1
+        jabo = items[0]
+        assert jabo["profile_id"] is None
+        assert jabo["alias"] == "Jabo"
+        team = jabo["team"]
+        assert team is not None
+        assert set(team) == {"team_id", "name", "initials"}
+        assert team["name"] == "PiG"
+        assert team["initials"] == "PG"
+        assert isinstance(team["team_id"], int)
+
     async def test_presentation_folded_onto_standings_rows(
         self, client: AsyncClient, session: AsyncSession
     ):
