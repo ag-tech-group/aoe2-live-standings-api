@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TeamMemberRead(BaseModel):
-    """One member of a team, with their current rating + live-match status.
+    """One member of a team, with their ratings + live-match status.
 
     Shape parallels the per-player ``StandingRow`` fields the web app
     already renders on the standings tab: ``country`` for the flag pill,
@@ -21,6 +21,11 @@ class TeamMemberRead(BaseModel):
     # Nullable: upstream sometimes returns players without a country set.
     country: str | None
     current_rating: int
+    # Lifetime peak on this leaderboard. Drives the team-standings
+    # ``combined_rating_*`` aggregates (see ``TeamStandingRow``). Null
+    # when the rating row has no recorded peak (brand-new account with a
+    # rating row but no max yet).
+    max_rating: int | None
     # True while the member is in a live (staging / in-progress) match,
     # as of the last live poll (~15s cadence). ``live_match_id`` is that
     # match's id when ``in_match`` is true, else null.
@@ -34,10 +39,14 @@ class TeamMemberRead(BaseModel):
 class TeamStandingRow(BaseModel):
     """One row in a tournament's team standings.
 
-    ``combined_rating_sum`` is the sum of the members' current ratings on
-    the tournament's leaderboard; ``combined_rating_average`` is that sum
-    over the member count. Only members with a rating on that leaderboard
-    are counted — a member the poller hasn't rated yet is omitted.
+    ``combined_rating_sum`` is the sum of the members' peak (lifetime
+    ``max_rating``) ratings on the tournament's leaderboard;
+    ``combined_rating_average`` is that sum over the count of members
+    with a non-null peak. Only members with a rating on that leaderboard
+    are counted — a member the poller hasn't rated yet is omitted. A
+    member whose ``max_rating`` is null is still listed under
+    ``members`` but excluded from the combined sum and average's
+    denominator.
     """
 
     team_id: int
