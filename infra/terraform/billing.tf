@@ -65,4 +65,16 @@ resource "google_billing_budget" "monthly" {
     # is the near-realtime path.
     disable_default_iam_recipients = false
   }
+
+  lifecycle {
+    # The Cloud Billing API normalizes the project identifier in
+    # ``budget_filter.projects`` from the string project ID we send
+    # (``projects/aoe2-live-standings-api``) back to the numeric form
+    # (``projects/203935104513``) on read. Both reference the same
+    # project — the difference is purely representational — but the
+    # round-trip mismatch makes every ``tofu plan`` show drift on this
+    # resource forever. Ignoring the field here pins us to the
+    # human-readable form in code while letting the API store whatever.
+    ignore_changes = [budget_filter[0].projects]
+  }
 }

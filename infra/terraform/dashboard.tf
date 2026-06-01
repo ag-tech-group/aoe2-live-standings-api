@@ -217,6 +217,18 @@ resource "google_monitoring_dashboard" "event_day" {
       ]
     }
   })
+
+  lifecycle {
+    # GCP normalizes the dashboard JSON aggressively on read: it
+    # auto-emits an ``etag``, fills in ``xPos = 0`` / ``yPos = 0``
+    # defaults on tiles that omitted them, strips ``targetAxis = "Y1"``
+    # defaults from datasets, and re-emits the resource ``name``. None
+    # of these are layout or query changes — but the round-trip diff
+    # makes every ``tofu plan`` show this resource as drifting. Pin the
+    # whole JSON in code; rare dashboard updates use ``tofu apply
+    # -replace`` to force a re-deploy.
+    ignore_changes = [dashboard_json]
+  }
 }
 
 output "event_day_dashboard_url" {
