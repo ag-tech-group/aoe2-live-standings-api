@@ -60,6 +60,8 @@ The polling worker lives in `app/poller/`. It runs as the same Python process bu
 
 **Tournament data window**: `start_date` / `grand_finals_date` on `Tournament` bound the per-tournament `tournament_record` aggregation. A null bound is treated as open. `grand_finals_date` is a legacy name — for ladder-race events it's just the race-end bound (the old `end_date` was dropped in #76).
 
+**Deploy hygiene — Cloud Run revision pruning** (`.github/workflows/ci.yml`): Every deploy creates a new Cloud Run revision; Cloud Run does NOT auto-prune them, and each revision keeps its `minScale=1 + cpu_idle=false` shape baked into its spec — so a stale revision pins a hot instance and its DB connection pool. Left unchecked, 100+ stale revisions × ~5 connections each saturates the Cloud SQL `max_connections=100` cap and every endpoint 500s (this is what caused the 2026-06-01 outage). The CI workflow's `Prune stale Cloud Run revisions` step keeps the 2 newest revisions per service and deletes the rest after each deploy — current + one rollback safety margin. If the step misses (transient delete error), it never fails the workflow; the next deploy catches up. Don't disable this without replacing it.
+
 ## Prod write recipe
 
 The auto-mode classifier blocks fetching prod secrets (e.g. `gcloud secrets versions access latest --secret=database-url`) so the URL+password don't land in the transcript. Standard pattern for any prod SQL write:

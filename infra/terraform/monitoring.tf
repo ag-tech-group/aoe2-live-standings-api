@@ -155,10 +155,13 @@ resource "google_monitoring_alert_policy" "poller_stalled" {
 
   depends_on = [time_sleep.wait_for_metric_propagation]
 
-  # No notification channels — see the file header for the rationale.
-  # Incidents are visible in the Cloud Monitoring UI; add a channel
-  # here when this graduates past preview.
-  notification_channels = []
+  # Routed to Sentry Pub/Sub since the 2026-06-01 outage: the worker
+  # stalled silently for 30+ minutes during a DB connection exhaustion
+  # event, the UI-only alert presumably fired but nobody was watching
+  # the Monitoring console. Loud failure → Sentry is the right
+  # surface; the original preview-scale rationale for keeping this
+  # quiet (the file-header note above) doesn't survive a live event.
+  notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
   dynamic "conditions" {
     for_each = local.poller_tasks

@@ -91,3 +91,45 @@ jobs:
             --image="$IMAGE:$GITHUB_SHA" \
             --region=us-central1 \
             --project=aoe2-live-standings-api
+
+      # Prune stale Cloud Run revisions on both services. Every deploy
+      # creates a new revision; Cloud Run does NOT auto-prune them, and
+      # every revision keeps its `minScale=1 + cpu_idle=false` shape
+      # baked into its spec — so each stale revision pins a hot instance
+      # and its DB connection pool. Without this step, revisions
+      # accumulate until ~100 stale revisions × ~5 connections each
+      # saturates the Cloud SQL `max_connections=100` cap and every
+      # endpoint 500s with `TooManyConnectionsError`. That's the 2026-06-01
+      # outage in one sentence; see `[[project_cloud_run_revision_outage]]`.
+      #
+      # Keeps the 2 newest revisions per service (current + one rollback
+      # safety margin) and deletes the rest in parallel. Failures here
+      # MUST NOT fail the deploy — a transient delete error is a
+      # cleanup miss, not a deploy failure. `set +e` keeps the script
+      # going on individual errors; the `|| true` on the loop guards
+      # against the whole step exiting non-zero.
+      - name: Prune stale Cloud Run revisions
+        if: success()
+        run: |
+          set +e
+          for SVC in aoe2-live-standings-api aoe2-live-standings-api-worker; do
+            echo "::group::Pruning stale revisions on $SVC"
+            STALE=$(gcloud run revisions list \
+              --service="$SVC" \
+              --region=us-central1 \
+              --project=aoe2-live-standings-api \
+              --sort-by=~metadata.creationTimestamp \
+              --format='value(name)' \
+              | tail -n +3)
+            if [ -z "$STALE" ]; then
+              echo "no stale revisions on $SVC"
+            else
+              echo "$STALE" | xargs -r -P 10 -I {} gcloud run revisions delete {} \
+                --region=us-central1 \
+                --project=aoe2-live-standings-api \
+                --quiet
+            fi
+            echo "::endgroup::"
+          done
+          # Never let cleanup miss take down the workflow status.
+          true
