@@ -142,18 +142,20 @@ class TestTeamAudits:
     async def test_add_member_emits_team_member_add(
         self, client: AsyncClient, session: AsyncSession, auth_as, audit_events
     ):
-        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.teams = [make_team("Reds")]
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID], profile_ids=[99])
+        tournament.teams = [make_team(tournament, "Reds")]
         session.add(tournament)
         await session.commit()
         team_id = tournament.teams[0].id
+        roster_id = tournament.tracked_players[0].id
         auth_as(DEFAULT_TEST_USER_ID)
 
         await client.post(
             f"/v1/tournaments/cup/teams/{team_id}/members",
-            json={"profile_id": 99},
+            json={"tournament_player_id": roster_id},
         )
         e = audit_events[0]
         assert e["action"] == AuditAction.TEAM_MEMBER_ADD
+        assert e["target_tournament_player_id"] == roster_id
         assert e["target_profile_id"] == 99
         assert e["target_team_id"] == team_id

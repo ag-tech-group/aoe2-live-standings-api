@@ -121,6 +121,33 @@ async def delete_team(
     audit(AuditAction.TEAM_DELETE, actor_user_id=actor_user_id, **audit_payload)
 
 
+async def _resolve_roster_row(
+    tournament_player_id: int,
+    tournament: Tournament,
+    session: AsyncSession,
+) -> TournamentPlayer:
+    """Resolve ``tournament_player_id`` to a roster row in this tournament, or 404.
+
+    The team-mgmt URLs key on the roster-row surrogate ``id`` (#167) so
+    placeholder entrants — which have no ``profile_id`` — can be teamed
+    just like polled identities. This helper enforces that the row
+    belongs to the same tournament as the team being edited; a caller
+    passing a roster id from another tournament gets a 404 (the
+    resource is unreachable from this URL path).
+    """
+    roster_row = (
+        await session.execute(
+            select(TournamentPlayer).where(
+                TournamentPlayer.id == tournament_player_id,
+                TournamentPlayer.tournament_id == tournament.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if roster_row is None:
+        raise HTTPException(status_code=404, detail="Roster player not found in this tournament")
+    return roster_row
+
+
 @router.post("/{team_id}/members", status_code=204)
 @limiter.limit("20/minute")
 async def add_team_member(
@@ -130,74 +157,59 @@ async def add_team_member(
     actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    """Add a profile to a team — owner-gated.
+    """Add a roster row to a team — owner-gated.
 
-    409 if the profile is already on the team. Team membership is separate
-    from the tournament roster — this does not add the profile to
-    ``TournamentPlayer``.
-
-    Dual-writes ``tournament_player_id`` alongside ``profile_id`` during
-    the #167 expand window so the follow-up contract migration can
-    swap the PK without backfill drift. The lookup resolves the roster
-    row in the team's tournament; absent (profile not on the roster
-    yet) the new column stays NULL — backfilled defensively by the
-    contract migration.
+    Keys on ``tournament_player_id`` so a placeholder entrant (a roster
+    row whose ``profile_id`` hasn't been minted yet) can be teamed —
+    the original #167 ask. 404 if the id isn't a roster row in this
+    tournament; 409 if it's already on the team. Team membership is
+    separate from the tournament roster — this does not add or modify
+    a ``TournamentPlayer``.
     """
+    roster_row = await _resolve_roster_row(payload.tournament_player_id, team.tournament, session)
+
     existing = (
         await session.execute(
             select(TeamMember).where(
                 TeamMember.team_id == team.id,
-                TeamMember.profile_id == payload.profile_id,
+                TeamMember.tournament_player_id == roster_row.id,
             )
         )
     ).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(status_code=409, detail="Player already on the team")
 
-    tournament_player_id = (
-        await session.execute(
-            select(TournamentPlayer.id).where(
-                TournamentPlayer.tournament_id == team.tournament_id,
-                TournamentPlayer.profile_id == payload.profile_id,
-            )
-        )
-    ).scalar_one_or_none()
-
-    session.add(
-        TeamMember(
-            team_id=team.id,
-            profile_id=payload.profile_id,
-            tournament_player_id=tournament_player_id,
-        )
-    )
+    session.add(TeamMember(team_id=team.id, tournament_player_id=roster_row.id))
     await session.commit()
     audit(
         AuditAction.TEAM_MEMBER_ADD,
         actor_user_id=actor_user_id,
         tournament_id=team.tournament_id,
         target_team_id=team.id,
-        target_profile_id=payload.profile_id,
+        target_tournament_player_id=roster_row.id,
+        target_profile_id=roster_row.profile_id,
     )
 
 
-@router.delete("/{team_id}/members/{profile_id}", status_code=204)
+@router.delete("/{team_id}/members/{tournament_player_id}", status_code=204)
 @limiter.limit("20/minute")
 async def remove_team_member(
     request: Request,
-    profile_id: int,
+    tournament_player_id: int,
     team: Team = Depends(get_owned_team),
     actor_user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    """Remove a profile from a team — owner-gated.
+    """Remove a roster row from a team — owner-gated.
 
-    404 if the profile isn't on the team.
+    Keys on ``tournament_player_id`` to match ``POST``. 404 if the row
+    isn't on the team.
     """
     member = (
         await session.execute(
             select(TeamMember).where(
                 TeamMember.team_id == team.id,
-                TeamMember.profile_id == profile_id,
+                TeamMember.tournament_player_id == tournament_player_id,
             )
         )
     ).scalar_one_or_none()
@@ -211,7 +223,7 @@ async def remove_team_member(
         actor_user_id=actor_user_id,
         tournament_id=team.tournament_id,
         target_team_id=team.id,
-        target_profile_id=profile_id,
+        target_tournament_player_id=tournament_player_id,
     )
 
 
@@ -227,15 +239,15 @@ async def set_team_captain(
     """Designate a team member as the team's captain — owner-gated.
 
     Atomic: clears any existing captain on the team, then sets the new
-    one. The target profile must already be a member of the team (404
-    otherwise). Idempotent — re-PATCHing the current captain is a 204
-    no-op with no audit event.
+    one. The target roster row must already be a member of the team
+    (404 otherwise). Idempotent — re-PATCHing the current captain is a
+    204 no-op with no audit event.
     """
     member = (
         await session.execute(
             select(TeamMember).where(
                 TeamMember.team_id == team.id,
-                TeamMember.profile_id == payload.profile_id,
+                TeamMember.tournament_player_id == payload.tournament_player_id,
             )
         )
     ).scalar_one_or_none()
@@ -245,9 +257,9 @@ async def set_team_captain(
     if member.is_captain:
         return Response(status_code=204)
 
-    previous_captain_profile_id: int | None = (
+    previous_captain_tournament_player_id: int | None = (
         await session.execute(
-            select(TeamMember.profile_id).where(
+            select(TeamMember.tournament_player_id).where(
                 TeamMember.team_id == team.id,
                 TeamMember.is_captain.is_(True),
             )
@@ -269,8 +281,8 @@ async def set_team_captain(
         actor_user_id=actor_user_id,
         tournament_id=team.tournament_id,
         target_team_id=team.id,
-        target_profile_id=payload.profile_id,
-        previous_captain_profile_id=previous_captain_profile_id,
+        target_tournament_player_id=payload.tournament_player_id,
+        previous_captain_tournament_player_id=previous_captain_tournament_player_id,
     )
     return Response(status_code=204)
 
@@ -287,15 +299,15 @@ async def clear_team_captain(
 
     204 even when no captain was set (no-op with no audit event).
     """
-    previous_captain_profile_id: int | None = (
+    previous_captain_tournament_player_id: int | None = (
         await session.execute(
-            select(TeamMember.profile_id).where(
+            select(TeamMember.tournament_player_id).where(
                 TeamMember.team_id == team.id,
                 TeamMember.is_captain.is_(True),
             )
         )
     ).scalar_one_or_none()
-    if previous_captain_profile_id is None:
+    if previous_captain_tournament_player_id is None:
         return Response(status_code=204)
 
     await session.execute(
@@ -309,6 +321,6 @@ async def clear_team_captain(
         actor_user_id=actor_user_id,
         tournament_id=team.tournament_id,
         target_team_id=team.id,
-        target_profile_id=previous_captain_profile_id,
+        target_tournament_player_id=previous_captain_tournament_player_id,
     )
     return Response(status_code=204)
