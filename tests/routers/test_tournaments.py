@@ -479,32 +479,34 @@ class TestStandingsUnratedRoster:
         assert items[0]["profile_id"] == 1
         assert items[0]["current_rating"] is None
 
-    async def test_unrated_tail_sorted_by_profile_id(
-        self, client: AsyncClient, session: AsyncSession
-    ):
-        # Three unrated members + one rated. The unrated tail is ordered by
-        # profile_id ASC so the public list is deterministic across requests.
+    async def test_unrated_sorted_by_display_name(self, client: AsyncClient, session: AsyncSession):
+        # Three unrated members + one rated. The unrated rows are ordered by
+        # display name ASC (#187 — was profile_id), so the public list is
+        # deterministic. Aliases are chosen to differ from profile_id order:
+        # name order [Alice, Bob, Charlie] ≠ profile_id order [10, 20, 30].
         rated = make_player(50, alias="rated")
         rated.ratings.append(make_player_rating(50, leaderboard_id=3, current_rating=2000))
         session.add(rated)
-        for profile_id in (30, 10, 20):
-            session.add(make_player(profile_id, alias=f"p{profile_id}"))
+        for profile_id, alias in ((10, "Charlie"), (20, "Alice"), (30, "Bob")):
+            session.add(make_player(profile_id, alias=alias))
         session.add(make_tournament("cup", profile_ids=[10, 20, 30, 50], leaderboard_id=3))
         await session.commit()
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
-        assert [row["profile_id"] for row in items] == [50, 10, 20, 30]
+        assert [row["alias"] for row in items] == ["rated", "Alice", "Bob", "Charlie"]
+        assert [row["profile_id"] for row in items] == [50, 20, 30, 10]
 
 
-class TestStandingsPlaceholderTail:
-    """Announced placeholder roster slots appear at the standings tail."""
+class TestStandingsUnlinkedRows:
+    """Unlinked roster rows sort among the unrated by display name (#187)."""
 
-    async def test_placeholder_appears_after_rated_and_unrated(
+    async def test_unlinked_sorts_among_unrated_by_name(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # Rated + unrated + placeholder, all on the same tournament. Order:
-        # rated first (by rating DESC), unrated next (by profile_id ASC),
-        # placeholder last with profile_id null + alias = its name.
+        # Rated + unrated + unlinked on one tournament. Rated first (by
+        # rating DESC); then every unrated row — linked or not — by display
+        # name. "iyouxin" (unlinked) sorts before "newbie" (unrated), NOT to
+        # a separate tail: #187 dropped the placeholder-tail special case.
         rated = make_player(10, alias="rated")
         rated.ratings.append(make_player_rating(10, leaderboard_id=3, current_rating=2000))
         session.add(rated)
@@ -517,9 +519,10 @@ class TestStandingsPlaceholderTail:
         await session.commit()
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
-        assert [row["alias"] for row in items] == ["rated", "newbie", "iyouxin"]
-        ghost = items[2]
+        assert [row["alias"] for row in items] == ["rated", "iyouxin", "newbie"]
+        ghost = next(row for row in items if row["profile_id"] is None)
         assert ghost["profile_id"] is None
+        assert ghost["name"] == "iyouxin"
         assert ghost["alias"] == "iyouxin"
         assert ghost["country"] is None
         assert ghost["team"] is None
@@ -576,10 +579,10 @@ class TestStandingsPlaceholderTail:
         assert all(isinstance(row["tournament_player_id"], int) for row in items)
         assert {row["tournament_player_id"] for row in items} == expected_ids
 
-    async def test_placeholder_tail_sorted_alphabetically(
+    async def test_unlinked_only_sorted_alphabetically(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # Three placeholders, no real players. Tail is name-sorted ASC.
+        # Three unlinked rows, no linked players. Sorted by display name ASC.
         tournament = make_tournament("cup")
         tournament.tracked_players = [
             TournamentPlayer(name="Zeke"),
@@ -591,6 +594,7 @@ class TestStandingsPlaceholderTail:
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
         assert [row["alias"] for row in items] == ["Alice", "Marco", "Zeke"]
+        assert [row["name"] for row in items] == ["Alice", "Marco", "Zeke"]
 
     async def test_placeholder_only_returns_three_rows(
         self, client: AsyncClient, session: AsyncSession

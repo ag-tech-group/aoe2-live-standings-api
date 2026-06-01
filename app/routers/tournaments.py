@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import AuditAction, audit
@@ -576,8 +576,11 @@ async def get_standings(
         )
         .order_by(
             PlayerRating.current_rating.desc().nulls_last(),
-            TournamentPlayer.profile_id.asc().nulls_last(),
-            TournamentPlayer.name.asc(),
+            # Then every unrated row — linked or not — by display name (#187
+            # dropped the old profile_id tier and the unlinked-tail special
+            # case). COALESCE falls back to the polled alias for a linked row
+            # whose name predates the Phase 1 backfill.
+            func.coalesce(TournamentPlayer.name, Player.alias).asc(),
         )
     )
     rows = (await session.execute(stmt)).all()
@@ -600,6 +603,7 @@ async def get_standings(
                 StandingRow(
                     tournament_player_id=entry.id,
                     profile_id=player.profile_id,
+                    name=entry.name or player.alias,
                     alias=player.alias,
                     country=player.country,
                     team=teams_by_tournament_player.get(entry.id),
@@ -627,6 +631,7 @@ async def get_standings(
                 StandingRow(
                     tournament_player_id=entry.id,
                     profile_id=None,
+                    name=entry.name or "",
                     alias=entry.name or "",
                     country=None,
                     team=teams_by_tournament_player.get(entry.id),
