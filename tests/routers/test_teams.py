@@ -31,10 +31,12 @@ class TestTeamStandings:
     async def test_combined_rating_sum_and_average(
         self, client: AsyncClient, session: AsyncSession
     ):
-        for profile_id, rating in ((1, 2000), (2, 2400)):
+        for profile_id, peak in ((1, 2000), (2, 2400)):
             player = make_player(profile_id)
             player.ratings.append(
-                make_player_rating(profile_id, leaderboard_id=3, current_rating=rating)
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=peak, max_rating=peak
+                )
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
@@ -45,18 +47,86 @@ class TestTeamStandings:
         row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
         assert row["name"] == "Red"
         assert row["member_count"] == 2
+        # Sum and average are over members' peak (max_rating) on the
+        # tournament's leaderboard.
         assert row["combined_rating_sum"] == 4400
         assert row["combined_rating_average"] == 2200.0
-        # Members are sorted by rating desc.
+        # Members are sorted by peak desc.
         assert [m["profile_id"] for m in row["members"]] == [2, 1]
+
+    async def test_combined_uses_peak_not_current(self, client: AsyncClient, session: AsyncSession):
+        # Each member's current_rating sits well below their max_rating,
+        # so a current-based sum would land at 3000 and a peak-based one
+        # at 4400 — the assertion pins us to the peak path.
+        for profile_id, current, peak in ((1, 1500, 2000), (2, 1500, 2400)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=current, max_rating=peak
+                )
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        assert row["combined_rating_sum"] == 4400
+        assert row["combined_rating_average"] == 2200.0
+
+    async def test_members_sorted_by_peak_desc(self, client: AsyncClient, session: AsyncSession):
+        # Profile 1 leads on current rating, profile 2 leads on peak —
+        # peak determines the in-team order.
+        for profile_id, current, peak in ((1, 2400, 1800), (2, 1500, 2400)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=current, max_rating=peak
+                )
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        members = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ]
+        assert [m["profile_id"] for m in members] == [2, 1]
+
+    async def test_current_rating_still_returned_on_members(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # ``current_rating`` is retained alongside ``max_rating`` so the
+        # FE can keep its live/in-match overlays without a breaking
+        # removal.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1800, max_rating=2200)
+        )
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        member = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ][0]
+        assert member["current_rating"] == 1800
+        assert member["max_rating"] == 2200
 
     async def test_sorted_by_combined_sum_descending(
         self, client: AsyncClient, session: AsyncSession
     ):
-        for profile_id, rating in ((1, 1000), (2, 1000), (3, 2000), (4, 2000)):
+        for profile_id, peak in ((1, 1000), (2, 1000), (3, 2000), (4, 2000)):
             player = make_player(profile_id)
             player.ratings.append(
-                make_player_rating(profile_id, leaderboard_id=3, current_rating=rating)
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=peak, max_rating=peak
+                )
             )
             session.add(player)
         tournament = make_tournament("cup", profile_ids=[1, 2, 3, 4], leaderboard_id=3)
@@ -69,6 +139,38 @@ class TestTeamStandings:
 
         items = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"]
         assert [t["name"] for t in items] == ["Strong", "Weak"]
+
+    async def test_ranking_by_peak_overrides_current(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # ``current`` would put Cold first (3000 vs 2400); ``peak`` flips
+        # that — Hot's roster has higher lifetime peaks (5000 vs 3600).
+        # Ranking must follow peak.
+        for profile_id, current, peak in (
+            (1, 1500, 2500),
+            (2, 1500, 2500),
+            (3, 2500, 1800),
+            (4, 2500, 1800),
+        ):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=current, max_rating=peak
+                )
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2, 3, 4], leaderboard_id=3)
+        tournament.teams = [
+            make_team("Cold", profile_ids=[3, 4]),
+            make_team("Hot", profile_ids=[1, 2]),
+        ]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"]
+        assert [t["name"] for t in items] == ["Hot", "Cold"]
+        assert items[0]["combined_rating_sum"] == 5000
+        assert items[1]["combined_rating_sum"] == 3600
 
     async def test_empty_team_appears_with_zero_aggregate(
         self, client: AsyncClient, session: AsyncSession

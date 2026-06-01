@@ -678,13 +678,16 @@ async def get_team_standings(
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
 ) -> ListEnvelope[TeamStandingRow]:
-    """The tournament's teams, ranked by combined current rating.
+    """The tournament's teams, ranked by combined peak rating.
 
-    A team's combined rating is the sum of its members' current ratings
-    on the tournament's leaderboard; the average is that sum over the
-    member count. Members without a rating on that leaderboard are
-    omitted. Teams are optional — a tournament with none returns an empty
-    list. Sorted by combined sum desc.
+    A team's combined rating is the sum of its members' peak (lifetime
+    ``max_rating``) ratings on the tournament's leaderboard; the average
+    is that sum over the count of members with a non-null peak. Members
+    without a rating row on that leaderboard are omitted; a member whose
+    rating row has no recorded peak is listed under ``members`` but
+    excluded from the aggregate (and the average's denominator). Teams
+    are optional — a tournament with none returns an empty list. Sorted
+    by combined sum desc.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -701,6 +704,7 @@ async def get_team_standings(
             Player.alias,
             Player.country,
             PlayerRating.current_rating,
+            PlayerRating.max_rating,
             PlayerRating.updated_at,
             TeamMember.is_captain,
         )
@@ -722,13 +726,23 @@ async def get_team_standings(
 
     members_by_team: dict[int, list[TeamMemberRead]] = {}
     timestamps: list[datetime | None] = []
-    for team_id, profile_id, alias, country, rating, updated_at, is_captain in member_rows:
+    for (
+        team_id,
+        profile_id,
+        alias,
+        country,
+        current_rating,
+        max_rating,
+        updated_at,
+        is_captain,
+    ) in member_rows:
         members_by_team.setdefault(team_id, []).append(
             TeamMemberRead(
                 profile_id=profile_id,
                 alias=alias,
                 country=country,
-                current_rating=rating,
+                current_rating=current_rating,
+                max_rating=max_rating,
                 in_match=profile_id in live_match_ids,
                 live_match_id=live_match_ids.get(profile_id),
                 is_captain=is_captain,
@@ -738,21 +752,22 @@ async def get_team_standings(
 
     items: list[TeamStandingRow] = []
     for team in teams:
+        # Sort members by peak desc with nulls last — matches the metric
+        # the headline figures and team ranking are computed on.
         members = sorted(
             members_by_team.get(team.id, []),
-            key=lambda m: m.current_rating,
-            reverse=True,
+            key=lambda m: (m.max_rating is None, -(m.max_rating or 0)),
         )
-        total = sum(m.current_rating for m in members)
-        count = len(members)
+        peaks = [m.max_rating for m in members if m.max_rating is not None]
+        total = sum(peaks)
         items.append(
             TeamStandingRow(
                 team_id=team.id,
                 name=team.name,
                 initials=team.initials,
-                member_count=count,
+                member_count=len(members),
                 combined_rating_sum=total,
-                combined_rating_average=(total / count) if count else 0.0,
+                combined_rating_average=(total / len(peaks)) if peaks else 0.0,
                 members=members,
             )
         )
