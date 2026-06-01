@@ -291,17 +291,19 @@ class TestLoadLeaderboards:
         assert {lb.leaderboard_id for lb in rows} == {3, 4}
         assert mapping == {6: 3, 7: 4, 8: 4}
 
-    async def test_upstream_error_returns_static_floor(
+    async def test_upstream_error_raises(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession
     ):
+        # A fetch failure now propagates (the loader catches it, keeps the
+        # lifespan-seeded floor, and retries soon) rather than masquerading as a
+        # healthy load that returned the floor — which is what forced the
+        # tight-retry loop in #182.
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/getAvailableLeaderboards").respond(500)
-            mapping = await load_leaderboards(upstream_client, session_maker_for_tasks)
+            with pytest.raises(httpx.HTTPError):
+                await load_leaderboards(upstream_client, session_maker_for_tasks)
 
-        # The table stays unchanged on failure, but the worker still gets the
-        # static floor so it can tag core-ladder matches instead of writing
-        # null leaderboard_id everywhere.
-        assert mapping == DEFAULT_MATCHTYPE_TO_LEADERBOARD
+        # The table stays unchanged on failure.
         rows = (await session.execute(select(Leaderboard))).scalars().all()
         assert rows == []
 
