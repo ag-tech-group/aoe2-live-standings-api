@@ -62,9 +62,15 @@ def apply_live_cache_control(request: Request, response: Response, *, cdn_second
       CF holds the response for ``cdn_seconds``; the browser always
       revalidates. Same pattern PR #99 shipped for #96.
 
-    ``Vary: Cookie`` is set on every response. CF does not natively
-    respect it (would tank hit rates on the wider web), but the header
-    is correct HTTP and protects any other proxy in the path.
+    We deliberately do **not** emit ``Vary: Cookie``. It fragments the
+    edge cache per distinct cookie value — and every viewer carries
+    unique cookies (CF's own, analytics) — so each viewer becomes a
+    unique cache key, a guaranteed miss, and the ``s-maxage`` coalescing
+    never engages: every viewer punches through to origin (this is what
+    fed the 2026-06-01 429 storm). Viewer responses are therefore
+    cookie-agnostic so CF can hold one shared copy. The admin/viewer
+    split is enforced at the edge by the Cloudflare Cache Rule above
+    (bypass cache when the access cookie is present), not by ``Vary``.
 
     The branch's purely "is the cookie present?" — we do not verify the
     JWT here. A request with a malformed or expired token still gets
@@ -80,4 +86,3 @@ def apply_live_cache_control(request: Request, response: Response, *, cdn_second
         response.headers["Cache-Control"] = (
             f"public, s-maxage={cdn_seconds}, max-age=0, must-revalidate"
         )
-    response.headers["Vary"] = "Cookie"

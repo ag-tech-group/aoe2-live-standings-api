@@ -25,5 +25,29 @@ from __future__ import annotations
 
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from starlette.requests import Request
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
+
+def _client_ip(request: Request) -> str:
+    """Resolve the real client IP for rate-limit bucketing.
+
+    The API sits behind Cloudflare, so ``request.client.host`` (what
+    ``slowapi``'s stock ``get_remote_address`` returns) is the CF *edge*
+    IP — shared by every viewer routed through that edge. Keying the
+    limiter on it collapses the whole audience into a handful of buckets,
+    so a live-event crowd trips the 300/min cap for everyone (this is the
+    2026-06-01 429 storm). Prefer the real client IP that Cloudflare
+    forwards in ``CF-Connecting-IP``; fall back to the left-most
+    ``X-Forwarded-For`` hop, then to the peer address for
+    non-proxied/local requests (tests, direct hits).
+    """
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_client_ip, default_limits=["300/minute"])
