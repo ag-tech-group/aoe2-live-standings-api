@@ -67,6 +67,7 @@ def audit(
     target_user_id: str | None = None,
     target_profile_id: int | None = None,
     target_team_id: int | None = None,
+    target_tournament_player_id: int | None = None,
     target_placeholder_name: str | None = None,
     **extra: Any,
 ) -> None:
@@ -94,6 +95,8 @@ def audit(
         payload["target_profile_id"] = target_profile_id
     if target_team_id is not None:
         payload["target_team_id"] = target_team_id
+    if target_tournament_player_id is not None:
+        payload["target_tournament_player_id"] = target_tournament_player_id
     if target_placeholder_name is not None:
         payload["target_placeholder_name"] = target_placeholder_name
     payload.update(extra)

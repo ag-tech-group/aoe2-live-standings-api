@@ -15,10 +15,17 @@ class TeamMemberRead(BaseModel):
     member's status here matches their standings row in the same poll.
     """
 
-    profile_id: int
-    # Null when the poller hasn't picked the profile up yet — the
-    # team-mgmt query left-joins ``Player``, so a linked-but-not-polled
-    # member surfaces here without an alias rather than vanishing.
+    # The roster-row surrogate id — the management key for team-member
+    # mutations (#167). Stable across a placeholder's promotion to a
+    # polled identity.
+    tournament_player_id: int
+    # The polled-identity id. Null for a placeholder entrant whose
+    # ``profile_id`` hasn't been minted yet — the roster row carries
+    # only ``name`` until promotion (see ``TournamentPlayer``).
+    profile_id: int | None
+    # The polled identity's display name. Null when the poller hasn't
+    # picked the profile up yet (linked-but-not-polled member). For a
+    # placeholder, this falls back to the roster row's ``name``.
     alias: str | None
     # ISO 3166-1 alpha-2, lowercase — same shape as ``StandingRow.country``.
     # Null when upstream returns no country, or when ``Player`` hasn't
@@ -110,16 +117,22 @@ class TeamUpdate(BaseModel):
 
 
 class TeamMemberCreate(BaseModel):
-    """Request body for adding a profile to a team."""
+    """Request body for adding a roster row to a team.
 
-    profile_id: int = Field(gt=0)
+    Keys on the roster row's surrogate ``id`` (``tournament_player_id``)
+    rather than the polled ``profile_id`` so a placeholder entrant — a
+    roster row whose ``profile_id`` hasn't been minted yet — can be
+    teamed (#167).
+    """
+
+    tournament_player_id: int = Field(gt=0)
 
 
 class TeamCaptainSet(BaseModel):
     """Request body for ``PATCH /teams/{team_id}/captain`` — designates the captain.
 
-    The profile must already be a member of the team; the endpoint
+    The roster row must already be a member of the team; the endpoint
     atomically clears any existing captain on the team and sets this one.
     """
 
-    profile_id: int = Field(gt=0)
+    tournament_player_id: int = Field(gt=0)

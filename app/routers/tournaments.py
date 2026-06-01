@@ -485,7 +485,13 @@ async def _team_by_profile(
     session: AsyncSession,
     tournament_id: int,
 ) -> dict[int, StandingTeam]:
-    """Map each teamed profile to its team within the tournament.
+    """Map each teamed *polled* profile to its team within the tournament.
+
+    Joins through ``TournamentPlayer`` since ``TeamMember`` now keys on
+    the roster row's surrogate id (#167). Placeholder team memberships
+    have no ``profile_id`` and are skipped here — the per-player
+    standings endpoint keys its render on ``profile_id`` and renders
+    placeholders separately.
 
     Scoped to the tournament's teams; a profile appears at most once,
     since a player belongs to at most one team per tournament. Profiles
@@ -493,9 +499,14 @@ async def _team_by_profile(
     with ``team = null``.
     """
     stmt = (
-        select(TeamMember.profile_id, Team.id, Team.name, Team.initials)
+        select(TournamentPlayer.profile_id, Team.id, Team.name, Team.initials)
+        .select_from(TeamMember)
         .join(Team, Team.id == TeamMember.team_id)
-        .where(Team.tournament_id == tournament_id)
+        .join(TournamentPlayer, TournamentPlayer.id == TeamMember.tournament_player_id)
+        .where(
+            Team.tournament_id == tournament_id,
+            TournamentPlayer.profile_id.is_not(None),
+        )
     )
     rows = (await session.execute(stmt)).all()
     return {
@@ -732,15 +743,19 @@ async def get_team_standings(
         .all()
     )
 
-    # LEFT JOIN both ``Player`` and ``PlayerRating`` so every team_members
-    # row is returned, with rating fields null for members the poller
-    # hasn't rated yet. The leaderboard filter sits in the JOIN ON
-    # condition, not WHERE — moving it to WHERE would re-filter the outer
-    # join back to inner-join behaviour and re-introduce the #166 bug.
+    # Join through ``TournamentPlayer`` so placeholder roster rows
+    # (which have no ``profile_id``) surface alongside polled identities,
+    # then LEFT JOIN ``Player`` + ``PlayerRating`` so members the poller
+    # hasn't rated yet are listed with null rating fields. Leaderboard
+    # filter sits in the JOIN ON condition, not WHERE — moving it to
+    # WHERE would re-filter the outer join back to inner-join behaviour
+    # and re-introduce the #166 bug.
     member_stmt = (
         select(
             TeamMember.team_id,
-            TeamMember.profile_id,
+            TournamentPlayer.id.label("tournament_player_id"),
+            TournamentPlayer.profile_id,
+            TournamentPlayer.name,
             Player.alias,
             Player.country,
             PlayerRating.current_rating,
@@ -749,11 +764,12 @@ async def get_team_standings(
             TeamMember.is_captain,
         )
         .join(Team, Team.id == TeamMember.team_id)
-        .outerjoin(Player, Player.profile_id == TeamMember.profile_id)
+        .join(TournamentPlayer, TournamentPlayer.id == TeamMember.tournament_player_id)
+        .outerjoin(Player, Player.profile_id == TournamentPlayer.profile_id)
         .outerjoin(
             PlayerRating,
             and_(
-                PlayerRating.profile_id == TeamMember.profile_id,
+                PlayerRating.profile_id == TournamentPlayer.profile_id,
                 PlayerRating.leaderboard_id == tournament.leaderboard_id,
             ),
         )
@@ -761,17 +777,23 @@ async def get_team_standings(
     )
     member_rows = (await session.execute(member_stmt)).all()
 
-    # Fetch live-match status for every member in one query, using the same
-    # helper the per-player ``/standings`` endpoint uses. Sharing the helper
-    # is the reason a member's ``in_match`` here matches their standings row
-    # within the same poll cycle — both read from the same snapshot.
-    live_match_ids = await _live_match_by_profile(session, [row.profile_id for row in member_rows])
+    # Fetch live-match status for every polled member in one query,
+    # using the same helper the per-player ``/standings`` endpoint
+    # uses. Sharing the helper is why a member's ``in_match`` here
+    # matches their standings row within the same poll cycle — both
+    # read from the same snapshot. Placeholders (no profile_id) can't
+    # be in a live match yet.
+    live_match_ids = await _live_match_by_profile(
+        session, [row.profile_id for row in member_rows if row.profile_id is not None]
+    )
 
     members_by_team: dict[int, list[TeamMemberRead]] = {}
     timestamps: list[datetime | None] = []
     for (
         team_id,
+        tournament_player_id,
         profile_id,
+        roster_name,
         alias,
         country,
         current_rating,
@@ -781,13 +803,16 @@ async def get_team_standings(
     ) in member_rows:
         members_by_team.setdefault(team_id, []).append(
             TeamMemberRead(
+                tournament_player_id=tournament_player_id,
                 profile_id=profile_id,
-                alias=alias,
+                # Polled identities prefer ``Player.alias``; placeholders
+                # fall back to the roster row's organizer-set ``name``.
+                alias=alias if alias is not None else roster_name,
                 country=country,
                 current_rating=current_rating,
                 max_rating=max_rating,
-                in_match=profile_id in live_match_ids,
-                live_match_id=live_match_ids.get(profile_id),
+                in_match=profile_id is not None and profile_id in live_match_ids,
+                live_match_id=live_match_ids.get(profile_id) if profile_id else None,
                 is_captain=is_captain,
             )
         )
