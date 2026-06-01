@@ -25,6 +25,7 @@ from app.models import (
 )
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
+from app.poller.parsers import DEFAULT_MATCHTYPE_TO_LEADERBOARD
 from app.poller.player_stats import tick_player_stats
 from app.poller.recent_matches import tick_recent_matches
 from tests.conftest import async_session_maker as session_maker_for_tasks
@@ -289,13 +290,39 @@ class TestLoadLeaderboards:
         assert {lb.leaderboard_id for lb in rows} == {3, 4}
         assert mapping == {6: 3, 7: 4, 8: 4}
 
-    async def test_upstream_error_logs_and_returns_empty(
+    async def test_upstream_error_returns_static_floor(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession
     ):
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/getAvailableLeaderboards").respond(500)
             mapping = await load_leaderboards(upstream_client, session_maker_for_tasks)
 
-        assert mapping == {}
+        # The table stays unchanged on failure, but the worker still gets the
+        # static floor so it can tag core-ladder matches instead of writing
+        # null leaderboard_id everywhere.
+        assert mapping == DEFAULT_MATCHTYPE_TO_LEADERBOARD
         rows = (await session.execute(select(Leaderboard))).scalars().all()
         assert rows == []
+
+    async def test_empty_matchtypes_falls_back_to_floor(
+        self, upstream_client: httpx.AsyncClient, session: AsyncSession
+    ):
+        # Upstream regression observed 2026-06-01: leaderboards present but with
+        # missing/empty matchtypes. Previously the derived map came back empty
+        # and every match was written with null leaderboard_id, silently
+        # emptying tournament standings. The floor now backstops that.
+        payload = {
+            "leaderboards": [
+                {"id": 3, "name": "1v1 RM Ranked", "isranked": 1},
+                {"id": 4, "name": "Team RM Ranked", "isranked": 1, "matchtypes": []},
+            ]
+        }
+        with respx.mock(base_url=_TEST_BASE_URL) as mock:
+            mock.get("/community/leaderboard/getAvailableLeaderboards").respond(json=payload)
+            mapping = await load_leaderboards(upstream_client, session_maker_for_tasks)
+
+        # Rows still upsert; the map falls back to the static floor so the core
+        # ladder (matchtype 6 -> leaderboard 3) keeps tagging matches.
+        rows = (await session.execute(select(Leaderboard))).scalars().all()
+        assert {lb.leaderboard_id for lb in rows} == {3, 4}
+        assert mapping == DEFAULT_MATCHTYPE_TO_LEADERBOARD

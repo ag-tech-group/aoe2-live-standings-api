@@ -278,6 +278,22 @@ def parse_available_leaderboards(payload: dict[str, Any]) -> list[dict[str, Any]
     return rows
 
 
+# Defensive floor for the ``matchtype_id -> leaderboard_id`` map. Upstream
+# ``getAvailableLeaderboards`` is the source of truth, but on 2026-06-01 it
+# returned 17 leaderboards with *empty* ``matchtypes`` arrays — so the derived
+# map came back empty, every match was written with ``leaderboard_id = NULL``,
+# and the tournament-scoped queries (which filter on ``leaderboard_id``)
+# silently emptied the live standings. ``load_leaderboards`` merges the upstream
+# map over this floor: upstream still wins and extends it when healthy, but the
+# core ladder is always mapped even when upstream omits its matchtypes.
+#
+# Only 1v1 RM Ranked (matchtype 6 -> leaderboard 3) is encoded — it's the
+# platform's primary ladder and the only one any tournament currently tracks.
+# Extend this as other ladders' matchtype IDs are confirmed from a healthy
+# payload; do not guess IDs (a wrong entry mis-tags matches).
+DEFAULT_MATCHTYPE_TO_LEADERBOARD: dict[int, int] = {6: 3}
+
+
 def matchtype_to_leaderboard_map(payload: dict[str, Any]) -> dict[int, int]:
     """Build a ``matchtype_id -> leaderboard_id`` lookup from getAvailableLeaderboards.
 
