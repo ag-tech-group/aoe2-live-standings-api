@@ -523,6 +523,32 @@ class TestStandingsPlaceholderTail:
         assert ghost["games"] == 0
         assert ghost["win_pct"] is None
 
+    async def test_rows_expose_tournament_player_id(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Every standings row — rated, unrated, and placeholder — carries its
+        # roster-row surrogate id (#167) so the FE can drive team assignment
+        # straight off the standings without a separate lookup.
+        rated = make_player(10, alias="rated")
+        rated.ratings.append(make_player_rating(10, leaderboard_id=3, current_rating=2000))
+        session.add(rated)
+        tournament = make_tournament("cup", profile_ids=[10], leaderboard_id=3)
+        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        session.add(tournament)
+        await session.commit()
+
+        expected_ids = {
+            tp.id
+            for tp in (
+                await session.execute(
+                    select(TournamentPlayer).where(TournamentPlayer.tournament_id == tournament.id)
+                )
+            ).scalars()
+        }
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert all(isinstance(row["tournament_player_id"], int) for row in items)
+        assert {row["tournament_player_id"] for row in items} == expected_ids
+
     async def test_placeholder_tail_sorted_alphabetically(
         self, client: AsyncClient, session: AsyncSession
     ):

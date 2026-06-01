@@ -129,6 +129,34 @@ class TestListPlayers:
         assert by_id[1]["presentation"] == {"bio": "hi"}
         assert by_id[2]["presentation"] == {}
 
+    async def test_roster_exposes_tournament_player_id(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Every roster item — polled and placeholder — carries its
+        # tournament_player_id (#167), the key the team-management endpoints
+        # take. The FE sources it here to assign players (including
+        # placeholders) to teams.
+        session.add(make_player(1, alias="polled"))
+        tournament = make_tournament("cup", profile_ids=[1])
+        tournament.tracked_players.append(TournamentPlayer(name="placeholder"))
+        session.add(tournament)
+        await session.commit()
+
+        expected_ids = {
+            tp.id
+            for tp in (
+                await session.execute(
+                    select(TournamentPlayer).where(TournamentPlayer.tournament_id == tournament.id)
+                )
+            ).scalars()
+        }
+        items = (await client.get("/v1/tournaments/cup/players")).json()["items"]
+        assert all(isinstance(item["tournament_player_id"], int) for item in items)
+        assert {item["tournament_player_id"] for item in items} == expected_ids
+        # Placeholder row: profile_id null, but the management key is present.
+        placeholder = next(item for item in items if item["profile_id"] is None)
+        assert isinstance(placeholder["tournament_player_id"], int)
+
 
 class TestGetPlayer:
     async def test_profile_outside_roster_returns_404(

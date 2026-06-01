@@ -600,6 +600,7 @@ async def get_standings(
         if player is not None:
             items.append(
                 StandingRow(
+                    tournament_player_id=entry.id,
                     profile_id=player.profile_id,
                     alias=player.alias,
                     country=player.country,
@@ -626,6 +627,7 @@ async def get_standings(
         else:
             items.append(
                 StandingRow(
+                    tournament_player_id=entry.id,
                     profile_id=None,
                     alias=entry.name or "",
                     country=None,

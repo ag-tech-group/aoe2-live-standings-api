@@ -57,6 +57,7 @@ def _placeholder_player_read(entry: TournamentPlayer) -> PlayerRead:
     one (FE renders ``presentation.displayName ?? alias``).
     """
     return PlayerRead(
+        tournament_player_id=entry.id,
         profile_id=None,
         alias=entry.name or "",
         country=None,
@@ -133,6 +134,10 @@ async def list_players(
     timestamps: list[datetime | None] = []
     for entry, player in rows:
         if player is not None:
+            # tournament_player_id lives on the roster row (TournamentPlayer),
+            # not the polled Player; stamp it on the source so model_validate
+            # picks it up, mirroring how presentation is folded in below.
+            player.tournament_player_id = entry.id
             player_read = PlayerRead.model_validate(player)
             player_read.presentation = entry.presentation
             if leaderboard_id is not None:
@@ -208,6 +213,9 @@ async def get_player(
     timestamps.extend(r.updated_at for r in player.ratings)
     timestamps.extend(m.updated_at for m in matches)
 
+    # tournament_player_id lives on the roster row, not the polled Player —
+    # stamp it on the source so model_validate picks it up (see list_players).
+    player.tournament_player_id = roster_entry.id
     detail = PlayerDetail.model_validate(player)
     return detail.model_copy(
         update={
