@@ -33,8 +33,13 @@ locals {
       description      = "DB read path"
     }
     standings = {
-      path             = "/v1/tournaments/default/standings"
-      expected_content = "\"items\""
+      # ``current`` is a reserved slug the API resolves to the active
+      # tournament (see ``CURRENT_TOURNAMENT_ALIAS``) — keeps this probe
+      # tournament-agnostic across event rollovers. Matching on
+      # ``profile_id`` (rather than the looser ``items``) ensures the
+      # roster is actually populated, not just an empty pipeline.
+      path             = "/v1/tournaments/current/standings"
+      expected_content = "\"profile_id\""
       description      = "End-to-end worker→DB→api pipeline (standings depend on the worker writing)"
     }
     leaderboards = {

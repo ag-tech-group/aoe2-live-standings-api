@@ -148,6 +148,94 @@ class TestGetTournamentDetail:
         )
 
 
+class TestCurrentSlugAlias:
+    """``GET /v1/tournaments/current`` resolves to the active tournament.
+
+    The literal slug ``"current"`` is reserved and never matches a real
+    row — it resolves via ``get_tournament``'s active-tournament query.
+    External probes (Cloud Monitoring uptime, Sentry uptime) use this
+    so checks survive tournament rollovers without an infra redeploy.
+    """
+
+    async def test_no_tournaments_returns_404(self, client: AsyncClient):
+        assert (await client.get("/v1/tournaments/current")).status_code == 404
+
+    async def test_resolves_to_most_recently_started(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Three tournaments, all started in the past; the one with the
+        # latest start_date wins regardless of created_at.
+        session.add(make_tournament("old", start_date=datetime(2026, 1, 1, tzinfo=UTC)))
+        session.add(make_tournament("newest", start_date=datetime(2026, 5, 1, tzinfo=UTC)))
+        session.add(make_tournament("middle", start_date=datetime(2026, 3, 1, tzinfo=UTC)))
+        await session.commit()
+
+        response = await client.get("/v1/tournaments/current")
+        assert response.status_code == 200
+        assert response.json()["slug"] == "newest"
+
+    async def test_prefers_started_over_future_scheduled(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A future tournament has the latest start_date but hasn't
+        # started yet — the alias prefers a started tournament even
+        # though its start_date is older.
+        session.add(make_tournament("active", start_date=datetime(2026, 5, 1, tzinfo=UTC)))
+        session.add(make_tournament("upcoming", start_date=datetime(2099, 1, 1, tzinfo=UTC)))
+        await session.commit()
+
+        response = await client.get("/v1/tournaments/current")
+        assert response.status_code == 200
+        assert response.json()["slug"] == "active"
+
+    async def test_falls_back_to_most_recent_when_none_started(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # No tournament has a start_date in the past — fall back to
+        # the most recently created row. Explicit ``created_at`` is set
+        # because SQLite's ``CURRENT_TIMESTAMP`` only has second-
+        # precision and rapid commits would tie.
+        session.add(make_tournament("first", created_at=datetime(2026, 1, 1, tzinfo=UTC)))
+        session.add(
+            make_tournament(
+                "future",
+                start_date=datetime(2099, 1, 1, tzinfo=UTC),
+                created_at=datetime(2026, 2, 1, tzinfo=UTC),
+            )
+        )
+        session.add(make_tournament("second", created_at=datetime(2026, 3, 1, tzinfo=UTC)))
+        await session.commit()
+
+        response = await client.get("/v1/tournaments/current")
+        assert response.status_code == 200
+        # ``second`` is the most recently created and resolves over the
+        # null-start_date ``first`` row and the future-scheduled one.
+        assert response.json()["slug"] == "second"
+
+    async def test_standings_subroute_resolves_via_alias(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The same resolver is shared with every per-tournament read,
+        # so ``GET /v1/tournaments/current/standings`` should land on
+        # the resolved tournament's roster without any router-side
+        # duplication.
+        active = make_tournament(
+            "active",
+            profile_ids=[1],
+            start_date=datetime(2026, 5, 1, tzinfo=UTC),
+        )
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(active)
+        await session.commit()
+
+        response = await client.get("/v1/tournaments/current/standings")
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert [row["profile_id"] for row in items] == [1]
+
+
 class TestTournamentStandings:
     async def test_unknown_tournament_returns_404(self, client: AsyncClient):
         assert (await client.get("/v1/tournaments/nope/standings")).status_code == 404
@@ -1408,6 +1496,16 @@ class TestCreateTournament:
         for bad_slug in ("Spring Cup", "-leading", "trailing-", "Caps"):
             response = await client.post("/v1/tournaments", json={**self._BODY, "slug": bad_slug})
             assert response.status_code == 422, f"expected 422 for slug={bad_slug!r}"
+
+    async def test_reserved_current_slug_returns_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # ``current`` is the active-tournament alias resolved by
+        # ``get_tournament``; allowing a literal row with that slug
+        # would make the row unreachable and ambiguous.
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json={**self._BODY, "slug": "current"})
+        assert response.status_code == 422
 
     async def test_start_after_grand_finals_returns_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
