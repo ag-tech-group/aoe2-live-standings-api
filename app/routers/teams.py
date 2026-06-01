@@ -193,7 +193,7 @@ async def remove_team_member(
     )
 
 
-@router.put("/{team_id}/captain", status_code=204)
+@router.patch("/{team_id}/captain", status_code=204)
 @limiter.limit("20/minute")
 async def set_team_captain(
     request: Request,
@@ -206,7 +206,7 @@ async def set_team_captain(
 
     Atomic: clears any existing captain on the team, then sets the new
     one. The target profile must already be a member of the team (404
-    otherwise). Idempotent — re-PUTting the current captain is a 204
+    otherwise). Idempotent — re-PATCHing the current captain is a 204
     no-op with no audit event.
     """
     member = (
