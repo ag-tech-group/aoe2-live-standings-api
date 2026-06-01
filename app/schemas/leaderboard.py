@@ -102,6 +102,12 @@ class StandingRow(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    # The roster-row surrogate id (``tournament_players.id``) — the stable
+    # management key (#167), present on every row including placeholders, so
+    # the FE can drive team assignment (``POST /teams/{id}/members``) straight
+    # off the standings without a separate lookup. Stable across a
+    # placeholder's promotion to a polled identity.
+    tournament_player_id: int
     # Null on placeholder rows (announced-but-unjoined streamers without
     # a ``profile_id`` yet — see class docstring). Non-null on every
     # rated and unrated roster row.

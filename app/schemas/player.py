@@ -45,6 +45,10 @@ class PlayerRead(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    # The roster-row surrogate id (``tournament_players.id``) — stable across a
+    # placeholder's promotion to a polled identity, and the key the team-
+    # management endpoints take (#167). Always present, including placeholders.
+    tournament_player_id: int
     profile_id: int | None
     alias: str
     country: str | None
