@@ -376,22 +376,37 @@ async def _tournament_record_by_profile(
     tournament: Tournament,
     profile_ids: list[int],
 ) -> dict[int, TournamentRecord]:
-    """Map each profile to its win/loss record within the tournament window.
+    """Map each profile to its stats within the tournament window.
 
-    Counts completed matches on the tournament's leaderboard whose
-    ``started_at`` falls inside ``[start_date, grand_finals_date]`` —
-    a null bound is treated as open. Every profile gets an entry;
-    those with no matches in the window get a zero record.
+    Pulls every completed match on the tournament's leaderboard whose
+    ``started_at`` falls inside ``[start_date, grand_finals_date]`` — a
+    null bound is treated as open — and folds it into one ``TournamentRecord``
+    per profile: counts, streak, peak rating, latest-match timestamp, and
+    a capped recent-results list. Every profile gets an entry; those with
+    no in-window matches get a zero record (counts/streak 0, others null/empty).
     """
     records = {
-        profile_id: TournamentRecord(games_played=0, wins=0, losses=0, streak=0)
+        profile_id: TournamentRecord(
+            games_played=0,
+            wins=0,
+            losses=0,
+            streak=0,
+            peak_rating=None,
+            last_match_at=None,
+            recent_results=[],
+        )
         for profile_id in profile_ids
     }
     if not profile_ids:
         return records
 
     stmt = (
-        select(MatchPlayer.profile_id, MatchPlayer.outcome)
+        select(
+            MatchPlayer.profile_id,
+            MatchPlayer.outcome,
+            MatchPlayer.new_rating,
+            Match.started_at,
+        )
         .join(Match, Match.match_id == MatchPlayer.match_id)
         .where(
             Match.leaderboard_id == tournament.leaderboard_id,
@@ -405,11 +420,12 @@ async def _tournament_record_by_profile(
     if tournament.grand_finals_date is not None:
         stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
 
-    outcomes: dict[int, list[MatchOutcome]] = {}
-    for profile_id, outcome in (await session.execute(stmt)).all():
-        outcomes.setdefault(profile_id, []).append(outcome)
+    rows_by_profile: dict[int, list[tuple[MatchOutcome, int | None, datetime]]] = {}
+    for profile_id, outcome, new_rating, started_at in (await session.execute(stmt)).all():
+        rows_by_profile.setdefault(profile_id, []).append((outcome, new_rating, started_at))
 
-    for profile_id, outs in outcomes.items():
+    for profile_id, rows in rows_by_profile.items():
+        outs = [o for o, _, _ in rows]
         wins = sum(1 for o in outs if o == MatchOutcome.WIN)
         # `outs` is newest-first; the streak is the leading run of one outcome.
         lead = outs[0]
@@ -418,11 +434,16 @@ async def _tournament_record_by_profile(
             if outcome != lead:
                 break
             run += 1
+        ratings = [r for _, r, _ in rows if r is not None]
         records[profile_id] = TournamentRecord(
             games_played=len(outs),
             wins=wins,
             losses=len(outs) - wins,
             streak=run if lead == MatchOutcome.WIN else -run,
+            peak_rating=max(ratings) if ratings else None,
+            # `rows` is newest-first; row 0's started_at is the latest.
+            last_match_at=rows[0][2],
+            recent_results=outs[:_RECENT_RESULTS_LIMIT],
         )
     return records
 
@@ -572,7 +593,15 @@ async def get_standings(
                     losses=0,
                     streak=0,
                     recent_results=[],
-                    tournament_record=TournamentRecord(games_played=0, wins=0, losses=0, streak=0),
+                    tournament_record=TournamentRecord(
+                        games_played=0,
+                        wins=0,
+                        losses=0,
+                        streak=0,
+                        peak_rating=None,
+                        last_match_at=None,
+                        recent_results=[],
+                    ),
                     rank=None,
                     rank_total=None,
                     in_match=False,

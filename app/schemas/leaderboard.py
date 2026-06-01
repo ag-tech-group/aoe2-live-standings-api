@@ -27,12 +27,13 @@ class LeaderboardRead(BaseModel):
 
 
 class TournamentRecord(BaseModel):
-    """A player's win/loss record within a tournament's date window.
+    """A player's stats within a tournament's date window.
 
     Counts only completed matches on the tournament's leaderboard between
     its ``start_date`` and ``grand_finals_date`` (a null bound is treated as open).
-    Distinct from the lifetime-ladder ``wins`` / ``losses`` / ``streak``
-    on ``StandingRow``.
+    Distinct from the lifetime-ladder ``wins`` / ``losses`` / ``streak`` /
+    ``max_rating`` / ``last_match_at`` / ``recent_results`` on ``StandingRow``;
+    every field here is in-window only.
     """
 
     games_played: int
@@ -40,6 +41,27 @@ class TournamentRecord(BaseModel):
     losses: int
     # Positive = current win streak, negative = loss streak, 0 = no games.
     streak: int
+    # Highest post-match rating (``MatchPlayer.new_rating``) the player
+    # reached on completed in-window matches. Null when no in-window match
+    # carried a non-null rating — either zero in-window games, or all
+    # in-window games were unranked.
+    peak_rating: int | None
+    # Latest in-window ``Match.started_at`` for any of the player's
+    # completed matches. Backs the "Active 1h / Idle 3d" badge. Null when
+    # the player has no completed in-window matches.
+    last_match_at: datetime | None
+    # Win/loss outcomes of the player's most-recent completed in-window
+    # matches, newest-first, capped server-side. Empty when no in-window
+    # games. The tournament-scoped sibling of ``StandingRow.recent_results``.
+    recent_results: list[MatchOutcome]
+
+    @computed_field
+    @property
+    def win_pct(self) -> float | None:
+        """Win percentage (0–100, 1 dp) over in-window games; null when none."""
+        if self.games_played == 0:
+            return None
+        return round(self.wins / self.games_played * 100, 1)
 
 
 class StandingTeam(BaseModel):
