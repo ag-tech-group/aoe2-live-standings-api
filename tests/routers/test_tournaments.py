@@ -323,7 +323,7 @@ class TestTournamentStandings:
         assert (
             response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
         )
-        assert response.headers["Vary"] == "Cookie"
+        assert "Cookie" not in response.headers.get("Vary", "")
 
     async def test_cache_control_header_authenticated(
         self, client: AsyncClient, session: AsyncSession
@@ -337,7 +337,7 @@ class TestTournamentStandings:
         client.cookies.set("criticalbit_access", "any-value")
         response = await client.get("/v1/tournaments/cup/standings")
         assert response.headers["Cache-Control"] == "private, no-store"
-        assert response.headers["Vary"] == "Cookie"
+        assert "Cookie" not in response.headers.get("Vary", "")
 
     async def test_team_folded_onto_standings_rows(
         self, client: AsyncClient, session: AsyncSession
