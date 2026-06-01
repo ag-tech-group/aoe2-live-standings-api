@@ -16,6 +16,7 @@ from app.schemas.player import (
     RosterPlayerUpdate,
 )
 from app.schemas.team import (
+    TeamCaptainSet,
     TeamCreate,
     TeamMemberCreate,
     TeamMemberRead,
@@ -46,6 +47,7 @@ __all__ = [
     "RosterPlayerUpdate",
     "StandingRow",
     "StandingTeam",
+    "TeamCaptainSet",
     "TeamCreate",
     "TeamMemberCreate",
     "TeamMemberRead",

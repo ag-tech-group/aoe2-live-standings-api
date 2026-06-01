@@ -54,6 +54,9 @@ class AuditAction(StrEnum):
     TEAM_MEMBER_ADD = "team_member_add"
     TEAM_MEMBER_REMOVE = "team_member_remove"
 
+    TEAM_CAPTAIN_SET = "team_captain_set"
+    TEAM_CAPTAIN_UNSET = "team_captain_unset"
+
 
 def audit(
     action: AuditAction,

@@ -365,3 +365,193 @@ class TestRemoveTeamMember:
 
         response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/members/199325")
         assert response.status_code == 404
+
+
+class TestSetTeamCaptain:
+    """PUT /v1/tournaments/{slug}/teams/{team_id}/captain — owner-gated."""
+
+    async def test_owner_sets_captain(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.put(
+            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 2}
+        )
+        assert response.status_code == 204
+        captain = (
+            await session.execute(
+                select(TeamMember.profile_id).where(
+                    TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
+                )
+            )
+        ).scalar_one_or_none()
+        assert captain == 2
+
+    async def test_setting_existing_captain_is_idempotent_noop(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        team = make_team("Red", profile_ids=[1, 2])
+        team.members[0].is_captain = True  # profile 1 is already captain
+        tournament.teams = [team]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.put(
+            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 1}
+        )
+        assert response.status_code == 204
+        captains = (
+            (
+                await session.execute(
+                    select(TeamMember.profile_id).where(
+                        TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert captains == [1]
+
+    async def test_setting_replaces_previous_captain(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        team = make_team("Red", profile_ids=[1, 2])
+        team.members[0].is_captain = True  # profile 1 starts as captain
+        tournament.teams = [team]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.put(
+            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 2}
+        )
+        assert response.status_code == 204
+        captains = (
+            (
+                await session.execute(
+                    select(TeamMember.profile_id).where(
+                        TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert captains == [2]
+
+    async def test_setting_non_member_is_404(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.put(
+            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 9999}
+        )
+        assert response.status_code == 404
+
+    async def test_unauthenticated_is_401(self, client: AsyncClient, session: AsyncSession):
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.put(
+            f"/v1/tournaments/cup/teams/{team_id}/captain", json={"profile_id": 1}
+        )
+        assert response.status_code == 401
+
+
+class TestClearTeamCaptain:
+    """DELETE /v1/tournaments/{slug}/teams/{team_id}/captain — owner-gated."""
+
+    async def test_owner_clears_captain(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        team = make_team("Red", profile_ids=[1])
+        team.members[0].is_captain = True
+        tournament.teams = [team]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/captain")
+        assert response.status_code == 204
+        captain = (
+            await session.execute(
+                select(TeamMember.profile_id).where(
+                    TeamMember.team_id == team_id, TeamMember.is_captain.is_(True)
+                )
+            )
+        ).scalar_one_or_none()
+        assert captain is None
+
+    async def test_clearing_when_no_captain_is_204(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+        team_id = tournament.teams[0].id
+
+        response = await client.delete(f"/v1/tournaments/cup/teams/{team_id}/captain")
+        assert response.status_code == 204
+
+
+class TestCaptainOnTeamStandings:
+    """``is_captain`` surfaces on TeamMemberRead in the team-standings view."""
+
+    async def test_is_captain_true_for_designated_member(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        for profile_id in (1, 2):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=2000)
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        team = make_team("Red", profile_ids=[1, 2])
+        team.members[1].is_captain = True  # profile 2 is captain
+        tournament.teams = [team]
+        session.add(tournament)
+        await session.commit()
+
+        members = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ]
+        captain_flags = {m["profile_id"]: m["is_captain"] for m in members}
+        assert captain_flags == {1: False, 2: True}
+
+    async def test_is_captain_false_when_team_has_no_captain(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.teams = [make_team("Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        member = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0][
+            "members"
+        ][0]
+        assert member["is_captain"] is False
