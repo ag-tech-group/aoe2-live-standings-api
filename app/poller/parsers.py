@@ -100,7 +100,12 @@ def parse_player_stats(
                 "profile_id": profile_id,
                 "leaderboard_id": row["leaderboard_id"],
                 "current_rating": row.get("rating", 0),
-                "max_rating": row.get("highestrating", 0),
+                # Relic omits / zeroes ``highestrating`` for accounts with
+                # no wins on a ladder, which would violate the peak ≥
+                # current invariant. Floor at ``current_rating`` so
+                # downstream consumers (team aggregates, the per-player
+                # Peak field) never see a peak below current.
+                "max_rating": max(row.get("highestrating") or 0, row.get("rating") or 0),
                 "wins": row.get("wins", 0),
                 "losses": row.get("losses", 0),
                 "streak": row.get("streak", 0),
