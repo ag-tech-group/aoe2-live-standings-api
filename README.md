@@ -335,8 +335,6 @@ aoe2-live-standings-api/
 | `POLLING_ENABLED`        | Optional | Start the three upstream pollers in this process (worker service) | `true`                                                  |
 | `LISTENER_ENABLED`       | Optional | Start the LISTEN/NOTIFY consumer in this process (api service)    | `true`                                                  |
 | `UPSTREAM_BASE_URL`      | Optional | Relic upstream base URL                           | `https://aoe-api.worldsedgelink.com`                                        |
-| `TRACKED_PROFILE_IDS`    | Optional | Comma-separated profile IDs for the seed tournament's roster — used only to bootstrap a tournament when the database has none | (empty) |
-| `TOURNAMENT_*`           | Optional | Seed tournament's `SLUG` / `NAME` / `LEADERBOARD_ID` / `START_DATE` / `GRAND_FINALS_DATE` (see `app/config.py`) | (see config) |
 | `AUTH_JWKS_URL`          | Optional | JWKS endpoint used to verify the write API's access tokens | `https://auth-api.criticalbit.gg/auth/jwks` |
 | `AUTH_TOKEN_ISSUER`      | Optional | Expected JWT `iss` claim; when set, tokens with a different issuer are rejected | (empty — issuer not checked) |
 

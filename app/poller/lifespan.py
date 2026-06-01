@@ -43,7 +43,6 @@ from app.poller.live_matches import run_live_matches_poller
 from app.poller.live_streams import run_twitch_live_poller, run_youtube_live_poller
 from app.poller.player_stats import run_player_stats_poller
 from app.poller.recent_matches import run_recent_matches_poller
-from app.poller.roster import ensure_seed_tournament
 
 logger = structlog.get_logger(__name__)
 
@@ -67,8 +66,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.polling_enabled:
         client = build_upstream_client()
         matchtype_map = await load_leaderboards(client, async_session_maker)
-        async with async_session_maker() as session:
-            await ensure_seed_tournament(session)
         tasks.extend(
             [
                 asyncio.create_task(
