@@ -6,6 +6,7 @@ The runners themselves are thin wrappers around the ticks plus
 ``asyncio.sleep`` — tested manually if we ever doubt the loop scaffolding.
 """
 
+import asyncio
 from datetime import UTC, datetime
 
 import httpx
@@ -23,7 +24,7 @@ from app.models import (
     Player,
     PlayerRating,
 )
-from app.poller.leaderboards import load_leaderboards
+from app.poller.leaderboards import load_leaderboards, run_leaderboards_loader
 from app.poller.live_matches import tick_live_matches
 from app.poller.parsers import DEFAULT_MATCHTYPE_TO_LEADERBOARD
 from app.poller.player_stats import tick_player_stats
@@ -326,3 +327,49 @@ class TestLoadLeaderboards:
         rows = (await session.execute(select(Leaderboard))).scalars().all()
         assert {lb.leaderboard_id for lb in rows} == {3, 4}
         assert mapping == DEFAULT_MATCHTYPE_TO_LEADERBOARD
+
+
+class TestRunLeaderboardsLoader:
+    async def test_updates_shared_map_in_place(
+        self, upstream_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # lifespan seeds the map with the floor; the loader enriches that same
+        # dict in place so the recent-matches poller (which holds the reference)
+        # picks up upstream mappings without a restart.
+        matchtype_map = dict(DEFAULT_MATCHTYPE_TO_LEADERBOARD)
+
+        async def fake_load(client, session_maker):
+            return {6: 3, 7: 3, 8: 4}
+
+        async def stop_after_first(_seconds):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr("app.poller.leaderboards.load_leaderboards", fake_load)
+        monkeypatch.setattr(asyncio, "sleep", stop_after_first)
+
+        with pytest.raises(asyncio.CancelledError):
+            await run_leaderboards_loader(upstream_client, session_maker_for_tasks, matchtype_map)
+
+        assert matchtype_map == {6: 3, 7: 3, 8: 4}
+
+    async def test_load_failure_keeps_floor_and_survives(
+        self, upstream_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A DB error during the upsert (the connection-saturation case) must be
+        # caught and retried, never killing the task or clobbering the seeded
+        # floor — this is what lets the worker start during a DB incident (#177).
+        matchtype_map = dict(DEFAULT_MATCHTYPE_TO_LEADERBOARD)
+
+        async def fake_load_raises(client, session_maker):
+            raise RuntimeError("remaining connection slots are reserved")
+
+        async def stop_after_first(_seconds):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr("app.poller.leaderboards.load_leaderboards", fake_load_raises)
+        monkeypatch.setattr(asyncio, "sleep", stop_after_first)
+
+        with pytest.raises(asyncio.CancelledError):
+            await run_leaderboards_loader(upstream_client, session_maker_for_tasks, matchtype_map)
+
+        assert matchtype_map == DEFAULT_MATCHTYPE_TO_LEADERBOARD

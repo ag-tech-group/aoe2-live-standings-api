@@ -6,8 +6,9 @@ The same image runs as two Cloud Run services in production (issue #14):
   Its lifespan starts only the LISTEN/NOTIFY listener, which republishes
   nudges from the DB to the local ``EventHub`` for SSE fan-out.
 - The **worker** service has ``LISTENER_ENABLED=false`` and ``POLLING_ENABLED=true``.
-  Its lifespan loads leaderboards, seeds a tournament if needed, and
-  starts the three long-running polling tasks (30s / 60s / 15s).
+  Its lifespan starts the leaderboards loader and the long-running polling
+  tasks (30s / 60s / 15s) — all background tasks, so startup never blocks on
+  the DB or upstream (#177).
 
 In local dev both flags default true, so a single uvicorn process runs
 everything — mono mode. In tests, ``ASGITransport`` bypasses the lifespan
@@ -38,9 +39,10 @@ from app.poller.broadcast import (
     build_broadcast_http_client,
 )
 from app.poller.client import build_upstream_client
-from app.poller.leaderboards import load_leaderboards
+from app.poller.leaderboards import run_leaderboards_loader
 from app.poller.live_matches import run_live_matches_poller
 from app.poller.live_streams import run_twitch_live_poller, run_youtube_live_poller
+from app.poller.parsers import DEFAULT_MATCHTYPE_TO_LEADERBOARD
 from app.poller.player_stats import run_player_stats_poller
 from app.poller.recent_matches import run_recent_matches_poller
 
@@ -65,9 +67,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if settings.polling_enabled:
         client = build_upstream_client()
-        matchtype_map = await load_leaderboards(client, async_session_maker)
+        # Seed the matchtype->leaderboard map with the static floor and let the
+        # loader enrich/refresh it from upstream in the background. This must
+        # NOT block startup on a DB/upstream call: the worker has to bind its
+        # port to pass Cloud Run's health check, and a degraded DB at startup
+        # would otherwise wedge the whole deploy (#177). The recent-matches
+        # poller reads this same dict each cycle, so in-place updates from the
+        # loader land without a restart.
+        matchtype_map: dict[int, int] = dict(DEFAULT_MATCHTYPE_TO_LEADERBOARD)
         tasks.extend(
             [
+                asyncio.create_task(
+                    run_leaderboards_loader(client, async_session_maker, matchtype_map),
+                    name="load_leaderboards",
+                ),
                 asyncio.create_task(
                     run_player_stats_poller(client, async_session_maker),
                     name="poll_player_stats",

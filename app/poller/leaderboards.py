@@ -1,14 +1,16 @@
-"""One-shot loader for the leaderboard metadata table.
+"""Leaderboard metadata loader.
 
 ``getAvailableLeaderboards`` rarely changes (new ladders land when Relic
-publishes them); we call it once at startup, upsert each leaderboard
-into the ``leaderboards`` table, and return the
-``matchtype_id -> leaderboard_id`` map the recent-matches poller needs.
-Daily refresh would be a v1.x ergonomic; the v1 trade-off is that adding
-a leaderboard requires a restart.
+publishes them). ``load_leaderboards`` does one fetch + upsert and returns the
+``matchtype_id -> leaderboard_id`` map the recent-matches poller needs;
+``run_leaderboards_loader`` runs it in the background on a retry/refresh loop so
+worker startup never blocks on the DB or upstream (#177), and a newly published
+leaderboard is picked up on the next refresh rather than only on restart.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import httpx
 import structlog
@@ -24,6 +26,11 @@ from app.poller.upserts import upsert_leaderboard
 logger = structlog.get_logger(__name__)
 
 _ENDPOINT = "/community/leaderboard/getAvailableLeaderboards"
+
+# Background loader cadence: retry quickly until upstream returns real
+# matchtypes (more than the static floor), then refresh slowly.
+_DEFAULT_RETRY_SECONDS = 60
+_DEFAULT_REFRESH_SECONDS = 1800
 
 
 async def load_leaderboards(
@@ -65,3 +72,40 @@ async def load_leaderboards(
     mapping = {**DEFAULT_MATCHTYPE_TO_LEADERBOARD, **upstream_map}
     logger.info("load_leaderboards_ok", count=len(rows), matchtypes=len(mapping))
     return mapping
+
+
+async def run_leaderboards_loader(
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker,
+    matchtype_map: dict[int, int],
+    retry_seconds: int = _DEFAULT_RETRY_SECONDS,
+    refresh_seconds: int = _DEFAULT_REFRESH_SECONDS,
+) -> None:
+    """Keep ``matchtype_map`` populated from upstream without blocking startup.
+
+    Mutates the caller's ``matchtype_map`` in place, so the recent-matches
+    poller — which reads the same dict each cycle — picks up new mappings with
+    no restart. The caller seeds the map with ``DEFAULT_MATCHTYPE_TO_LEADERBOARD``
+    and it never regresses below that floor: ``load_leaderboards`` already merges
+    the floor, and a failed load leaves the current contents untouched.
+
+    Retries on the short ``retry_seconds`` cadence until upstream returns real
+    matchtypes (more than the floor), then settles into the slow
+    ``refresh_seconds`` refresh. Re-raises ``CancelledError`` so lifespan
+    shutdown unwinds cleanly; any other error (e.g. a DB upsert failing under
+    connection saturation) is logged and retried rather than killing the task —
+    that resilience is the point of #177: a degraded DB at startup can no longer
+    wedge the worker deploy.
+    """
+    while True:
+        try:
+            loaded = await load_leaderboards(client, session_maker)
+            matchtype_map.update(loaded)
+            got_upstream = len(loaded) > len(DEFAULT_MATCHTYPE_TO_LEADERBOARD)
+            sleep_for = refresh_seconds if got_upstream else retry_seconds
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("load_leaderboards_loader_failed", error=str(e))
+            sleep_for = retry_seconds
+        await asyncio.sleep(sleep_for)
