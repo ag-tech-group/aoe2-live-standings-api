@@ -27,8 +27,8 @@ logger = structlog.get_logger(__name__)
 
 _ENDPOINT = "/community/leaderboard/getAvailableLeaderboards"
 
-# Background loader cadence: retry quickly until upstream returns real
-# matchtypes (more than the static floor), then refresh slowly.
+# Background loader cadence: a successful load refreshes slowly; a failed one
+# (fetch error or a DB upsert failing under saturation) retries quickly.
 _DEFAULT_RETRY_SECONDS = 60
 _DEFAULT_REFRESH_SECONDS = 1800
 
@@ -44,18 +44,26 @@ async def load_leaderboards(
     upstream call per match. The upstream map is merged *over*
     ``DEFAULT_MATCHTYPE_TO_LEADERBOARD`` so the core ranked ladder is always
     mapped even when upstream omits its ``matchtypes`` (see that constant for
-    the 2026-06-01 incident this guards against). On hard failure the table
-    stays unchanged, ``/v1/leaderboards`` returns the last successful snapshot,
-    and the static floor is returned so the worker can still tag core-ladder
-    matches.
+    the 2026-06-01 incident this guards against).
+
+    Raises on a fetch/parse failure — the table stays unchanged and
+    ``/v1/leaderboards`` keeps its last snapshot. ``run_leaderboards_loader``
+    catches that, keeps the lifespan-seeded floor, and retries soon. A
+    *successful* load that merely has no matchtypes is not a failure: it returns
+    the floor and logs ``load_leaderboards_no_matchtypes``, so the loader treats
+    it as a normal (slow-refresh) cycle rather than retrying in a tight loop.
     """
     try:
         response = await client.get(_ENDPOINT, params={"title": "age2"})
         response.raise_for_status()
         payload = response.json()
     except (httpx.HTTPError, ValueError) as e:
+        # Re-raise so the loader can tell a fetch failure (retry soon, keep the
+        # seeded floor) apart from a healthy load that simply lacks matchtypes
+        # (settle into the slow refresh). Swallowing it here would collapse both
+        # into "returned the floor" and force the tight-retry loop of #182.
         logger.error("load_leaderboards_failed", error=str(e))
-        return dict(DEFAULT_MATCHTYPE_TO_LEADERBOARD)
+        raise
 
     rows = parse_available_leaderboards(payload)
     async with session_maker() as session:
@@ -87,22 +95,23 @@ async def run_leaderboards_loader(
     poller — which reads the same dict each cycle — picks up new mappings with
     no restart. The caller seeds the map with ``DEFAULT_MATCHTYPE_TO_LEADERBOARD``
     and it never regresses below that floor: ``load_leaderboards`` already merges
-    the floor, and a failed load leaves the current contents untouched.
+    the floor on success, and a failed load leaves the current contents untouched.
 
-    Retries on the short ``retry_seconds`` cadence until upstream returns real
-    matchtypes (more than the floor), then settles into the slow
-    ``refresh_seconds`` refresh. Re-raises ``CancelledError`` so lifespan
-    shutdown unwinds cleanly; any other error (e.g. a DB upsert failing under
-    connection saturation) is logged and retried rather than killing the task —
-    that resilience is the point of #177: a degraded DB at startup can no longer
-    wedge the worker deploy.
+    A successful load (with or without matchtypes) settles into the slow
+    ``refresh_seconds`` refresh; a failure — a fetch error, or a DB upsert
+    failing under connection saturation — keeps the seeded floor and retries on
+    the short ``retry_seconds`` cadence. Re-raises ``CancelledError`` so lifespan
+    shutdown unwinds cleanly; any other error is logged and retried rather than
+    killing the task — that resilience is the point of #177: a degraded DB at
+    startup can no longer wedge the worker deploy.
     """
     while True:
         try:
-            loaded = await load_leaderboards(client, session_maker)
-            matchtype_map.update(loaded)
-            got_upstream = len(loaded) > len(DEFAULT_MATCHTYPE_TO_LEADERBOARD)
-            sleep_for = refresh_seconds if got_upstream else retry_seconds
+            matchtype_map.update(await load_leaderboards(client, session_maker))
+            # A successful load — even one upstream returned with no matchtypes —
+            # is settled state: retrying fast wouldn't change a persistently
+            # empty upstream, and would just re-log + re-upsert every cycle (#182).
+            sleep_for = refresh_seconds
         except asyncio.CancelledError:
             raise
         except Exception as e:
