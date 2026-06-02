@@ -39,7 +39,6 @@ def setup_telemetry(app: FastAPI) -> None:
         return
 
     from opentelemetry import trace
-    from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
@@ -72,11 +71,14 @@ def setup_telemetry(app: FastAPI) -> None:
     trace.set_tracer_provider(provider)
 
     FastAPIInstrumentor.instrument_app(app)
-    # SQLAlchemy + asyncpg are imported by `app.database` at module
-    # load; instrumentation hooks them at this point, after the
-    # provider is set so spans go to the right exporter.
+    # `app.database` imported SQLAlchemy at module load; hook it here, after
+    # the provider is set, so its spans go to the right exporter. DB calls are
+    # instrumented at the SQLAlchemy layer ONLY: asyncpg was also instrumented
+    # before, but that emits a second span for every query (SQLAlchemy span +
+    # asyncpg span), ~doubling DB span volume and feeding the Cloud Trace
+    # write-quota exhaustion under launch traffic (#214). The SQLAlchemy span
+    # carries the statement and is the layer worth keeping.
     from app.database import engine
 
     SQLAlchemyInstrumentor().instrument(engine=engine.sync_engine)
-    AsyncPGInstrumentor().instrument()
     HTTPXClientInstrumentor().instrument()
