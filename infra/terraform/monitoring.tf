@@ -141,6 +141,51 @@ resource "google_logging_metric" "sse_subscriber_count" {
   }
 }
 
+# Dead-tab leak / SSE-seat early-warning (#204). With the FE EventSource
+# cleanup + `timeout=600` (#204) and the halved read-tier pool (#206), the
+# live `sse_subscriber_count` should track real concurrent viewers
+# (cross-check PostHog active users). A sustained TOTAL far above that —
+# summed across api instances — means either a dead-tab regression (FE
+# cleanup or the SSE timeout broke) or genuine capacity pressure climbing
+# toward the maxScale × concurrency seat ceiling (~22,000). Either is worth
+# a look, routed to the same Sentry surface.
+#
+# THRESHOLD IS A PLACEHOLDER. We don't yet know real peak (peak = a Hera
+# live stream). Tune to ~1.5× the observed peak once #194 reveals the real
+# concurrent-seat number during a Hera broadcast. 10,000 is ~45% of the 22k
+# ceiling — above the streamer-grind baseline but below a genuine marquee
+# peak; revisit after the next match.
+resource "google_monitoring_alert_policy" "sse_seat_leak" {
+  display_name = "SSE seats high — dead-tab leak or capacity pressure (#204)"
+  combiner     = "OR"
+  severity     = "WARNING"
+
+  notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
+
+  conditions {
+    display_name = "total SSE subscribers > 10,000 sustained 5 minutes"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.sse_subscriber_count.name}\" AND resource.type=\"cloud_run_revision\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 10000
+
+      # Each api instance logs its current seat count; ALIGN_MEAN gives that
+      # instance's level per window, REDUCE_SUM totals across instances.
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_MEAN"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  documentation {
+    content   = "Total concurrent SSE subscribers (summed across api instances) has been > 10,000 for 5 minutes. With the FE EventSource cleanup + the 600s SSE timeout (#204) this should track real viewers — cross-check PostHog active users. If it's far above real viewers → **dead-tab regression**: confirm the FE still closes EventSource on pagehide/visibilitychange and that the api `timeout` is still 600s (infra/terraform/run.tf). If real viewers really are this high → **genuine capacity pressure**: watch num_backends and consider the maxScale / Cloud SQL tier levers (#195). Threshold is a placeholder — tune to ~1.5× the observed Hera-stream peak."
+    mime_type = "text/markdown"
+  }
+}
+
 # Bridge freshly-created metrics into a queryable state before any
 # alert policy references them. Cloud Monitoring takes up to a few
 # minutes to make a new log-based metric resolvable by `metric.type=`,
