@@ -170,11 +170,13 @@ resource "google_monitoring_alert_policy" "sse_seat_leak" {
       comparison      = "COMPARISON_GT"
       threshold_value = 10000
 
-      # Each api instance logs its current seat count; ALIGN_MEAN gives that
-      # instance's level per window, REDUCE_SUM totals across instances.
+      # The metric is a DELTA distribution (a log value_extractor), so the
+      # aligner must be a percentile — ALIGN_MEAN is rejected for
+      # DELTA+DISTRIBUTION. ALIGN_PERCENTILE_50 gives each instance's median
+      # seat count per window; REDUCE_SUM totals across instances.
       aggregations {
         alignment_period     = "60s"
-        per_series_aligner   = "ALIGN_MEAN"
+        per_series_aligner   = "ALIGN_PERCENTILE_50"
         cross_series_reducer = "REDUCE_SUM"
       }
     }
