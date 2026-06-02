@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>The King's Gauntlet — Launch Day Metrics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#eceef1; --card:#ffffff; --ink:#1c2026; --muted:#6c727a; --border:#d9dce1;
+    --brand:#2b5aa6; --brand-fg:#f7f9fc; --hero:#14171c;
+    --orange:#e2702a; --teal:#2f9c93; --blue:#3a6ea5; --amber:#e0a32e; --danger:#d83a2c; --ok:#2f8f5b;
+    --display:'Bebas Neue','Oswald','Arial Narrow',sans-serif;
+    --body:'Inter',-apple-system,'Segoe UI',Roboto,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:14px;line-height:1.5;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .wrap{max-width:980px;margin:0 auto;padding:0 22px 60px}
+  a{color:var(--brand);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* Hero */
+  .hero{background:linear-gradient(135deg,#14171c 0%,#1d2430 60%,#172033 100%);color:#eef1f5;padding:46px 0 40px;border-bottom:3px solid var(--brand)}
+  .hero .wrap{padding-bottom:0}
+  .eyebrow{font-family:var(--body);font-weight:600;letter-spacing:.18em;text-transform:uppercase;font-size:11px;color:#7f9bc7}
+  .hero h1{font-family:var(--display);font-weight:400;font-size:74px;line-height:.92;letter-spacing:.02em;margin:8px 0 6px}
+  .hero .sub{color:#aeb6c2;font-size:15px;max-width:680px}
+  .hero .meta{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.13);color:#cdd4de;border-radius:999px;padding:5px 12px;font-size:12px;font-weight:500}
+  .chip b{color:#fff;font-weight:600}
+
+  /* Sections */
+  section{margin-top:34px}
+  h2{font-family:var(--display);font-weight:400;font-size:30px;letter-spacing:.02em;margin:0 0 4px;display:flex;align-items:center;gap:11px}
+  h2 .bar{width:6px;height:26px;background:var(--brand);border-radius:2px;display:inline-block}
+  .lede{color:var(--muted);margin:0 0 18px;max-width:760px}
+
+  /* KPI grid */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 16px 14px;box-shadow:0 1px 2px rgba(20,30,50,.04)}
+  .kpi .n{font-family:var(--display);font-weight:400;font-size:40px;line-height:1;letter-spacing:.01em}
+  .kpi .l{color:var(--muted);font-size:12px;margin-top:7px;font-weight:500}
+  .kpi .d{font-size:11px;margin-top:3px;color:#9aa1aa}
+  .kpi.good .n{color:var(--ok)} .kpi.warn .n{color:var(--orange)} .kpi.bad .n{color:var(--danger)} .kpi.brand .n{color:var(--brand)}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px 22px;box-shadow:0 1px 2px rgba(20,30,50,.04)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  figcaption{color:var(--muted);font-size:12px;margin-top:10px}
+
+  /* bar lists */
+  .blist{display:flex;flex-direction:column;gap:9px;margin-top:4px}
+  .row{display:grid;grid-template-columns:128px 1fr 74px;align-items:center;gap:10px;font-size:13px}
+  .row .lab{color:var(--ink);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .track{background:#eef0f3;border-radius:6px;height:13px;overflow:hidden}
+  .fill{height:100%;border-radius:6px}
+  .row .val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;font-weight:600}
+
+  /* legend */
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:12px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  /* stacked cache bar */
+  .stack{display:flex;height:30px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
+  .stack > div{display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600}
+
+  /* timeline */
+  .tl{position:relative;margin-top:6px;padding-left:26px}
+  .tl:before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:2px;background:var(--border)}
+  .ev{position:relative;padding:0 0 16px 4px}
+  .ev:before{content:"";position:absolute;left:-23px;top:3px;width:12px;height:12px;border-radius:50%;background:var(--brand);border:2px solid #fff;box-shadow:0 0 0 1px var(--border)}
+  .ev.bad:before{background:var(--danger)} .ev.ok:before{background:var(--ok)} .ev.warn:before{background:var(--orange)}
+  .ev .t{font-weight:700;font-variant-numeric:tabular-nums;font-size:13px}
+  .ev .x{color:var(--muted);font-size:13px}
+
+  /* verdict callout */
+  .verdict{border-left:5px solid var(--brand);background:#f3f6fb;border-radius:0 12px 12px 0;padding:16px 20px}
+  .verdict.amber{border-color:var(--orange);background:#fdf4ec}
+  .verdict h3{margin:0 0 6px;font-size:15px}
+  .verdict p{margin:0;color:#3c424b}
+
+  table.t{width:100%;border-collapse:collapse;font-size:13px}
+  table.t th,table.t td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  table.t th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+  table.t td .pri{display:inline-block;font-size:11px;font-weight:700;border-radius:5px;padding:1px 7px}
+  .p1{background:#fde7e2;color:#b5331f} .p2{background:#fdf1dd;color:#9a6207} .p3{background:#e8eef7;color:#2b5aa6}
+  .tag{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+  footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--border);color:var(--muted);font-size:12px}
+  .src{display:flex;flex-wrap:wrap;gap:18px;margin-top:8px}
+
+  @media print{
+    body{background:#fff}
+    .hero{background:#14171c !important}
+    section{break-inside:avoid}
+    .card,.kpi,.ev{break-inside:avoid}
+    .wrap{max-width:none}
+    a{color:var(--ink)}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Launch Day Report &middot; Age of Empires II: DE</div>
+    <h1>The King's Gauntlet</h1>
+    <div class="sub">Live standings platform — opening-day traffic, edge performance, and the incident timeline. Hosted by Hera.</div>
+    <div class="meta">
+      <span class="chip">Event day <b>2026&#8209;06&#8209;01</b></span>
+      <span class="chip">Window <b>15:00&#8211;04:00 UTC</b></span>
+      <span class="chip"><b>11k</b> visitors</span>
+      <span class="chip"><b>148k</b> page views</span>
+      <span class="chip"><b>8.42M</b> API requests</span>
+      <span class="chip">Status <b style="color:#6ee0a3">recovered, 0 data loss</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- EXECUTIVE SUMMARY -->
+  <section>
+    <h2><span class="bar"></span>Executive summary</h2>
+    <p class="lede">Opening day drew ~11k unique visitors and 148k page views, peaking at ~2,590 unique viewers in the 17:00 UTC hour. The platform absorbed it but hit its engineered ceilings during the peak, surfacing three same-day, viewer-facing incidents — all configuration/edge issues, all fixed by 20:00 UTC with no data loss. The edge and database-throughput layers have enormous headroom; the binding constraint for growth is long-lived SSE connections at the API tier.</p>
+    <div class="kpis">
+      <div class="kpi brand"><div class="n">11k</div><div class="l">Unique visitors</div><div class="d">13.4k incl. bots (Cloudflare)</div></div>
+      <div class="kpi brand"><div class="n">148k</div><div class="l">Page views</div><div class="d">~13.2k sessions</div></div>
+      <div class="kpi"><div class="n">~400</div><div class="l">Peak concurrent viewers</div><div class="d">17:11 UTC marquee spike</div></div>
+      <div class="kpi good"><div class="n">86%</div><div class="l">API edge cache-hit</div><div class="d">coalescing working</div></div>
+    </div>
+  </section>
+
+  <!-- AUDIENCE & TRAFFIC -->
+  <section>
+    <h2><span class="bar"></span>Audience &amp; traffic</h2>
+    <p class="lede">Near-zero until the 15:00 UTC pre-show, then a sharp ramp to a 17:00 peak and a long, well-behaved decay through to ~04:00. Page views fall faster than unique viewers through the evening — the audience tunes in for marquee moments and drifts.</p>
+    <div class="card">
+      <svg viewBox="0 0 720 280" width="100%" role="img" aria-label="Hourly traffic">
+        <!-- storm band -->
+        <rect x="159.5" y="20" width="161" height="220" fill="rgba(216,58,44,.07)"/>
+        <text x="240" y="15" text-anchor="middle" font-size="10" fill="#b5331f" font-weight="700">conn-exhaustion + 429 storm → fixed 20:00</text>
+        <!-- gridlines + left axis (pageviews) -->
+        <g font-size="10" fill="#9aa1aa">
+          <line x1="60" y1="240" x2="690" y2="240" stroke="#d9dce1"/>
+          <line x1="60" y1="166.7" x2="690" y2="166.7" stroke="#eef0f3"/><text x="56" y="170" text-anchor="end">10k</text>
+          <line x1="60" y1="93.3" x2="690" y2="93.3" stroke="#eef0f3"/><text x="56" y="97" text-anchor="end">20k</text>
+          <line x1="60" y1="20" x2="690" y2="20" stroke="#eef0f3"/><text x="56" y="24" text-anchor="end">30k</text>
+          <text x="56" y="243" text-anchor="end">0</text>
+          <!-- right axis (users) -->
+          <text x="700" y="243" text-anchor="start" fill="#2f9c93">0</text>
+          <text x="700" y="158" text-anchor="start" fill="#2f9c93">1k</text>
+          <text x="700" y="73" text-anchor="start" fill="#2f9c93">2k</text>
+          <text x="700" y="24" text-anchor="start" fill="#2f9c93">2.6k</text>
+        </g>
+        <!-- pageview bars -->
+        <g>
+          <rect x="69.5" y="170.4" width="26" height="69.6" rx="2" fill="#2b5aa6"/>
+          <rect x="114.5" y="144.4" width="26" height="95.6" rx="2" fill="#2b5aa6"/>
+          <rect x="159.5" y="20.2" width="26" height="219.8" rx="2" fill="#e2702a"/>
+          <rect x="204.5" y="66.4" width="26" height="173.6" rx="2" fill="#2b5aa6"/>
+          <rect x="249.5" y="101.7" width="26" height="138.3" rx="2" fill="#2b5aa6"/>
+          <rect x="294.5" y="131.8" width="26" height="108.2" rx="2" fill="#2b5aa6"/>
+          <rect x="339.5" y="170.1" width="26" height="69.9" rx="2" fill="#2b5aa6"/>
+          <rect x="384.5" y="187.3" width="26" height="52.7" rx="2" fill="#2b5aa6"/>
+          <rect x="429.5" y="193.1" width="26" height="46.9" rx="2" fill="#2b5aa6"/>
+          <rect x="474.5" y="206.5" width="26" height="33.5" rx="2" fill="#2b5aa6"/>
+          <rect x="519.5" y="214.4" width="26" height="25.6" rx="2" fill="#2b5aa6"/>
+          <rect x="564.5" y="218.1" width="26" height="21.9" rx="2" fill="#2b5aa6"/>
+          <rect x="609.5" y="220.2" width="26" height="19.8" rx="2" fill="#2b5aa6"/>
+          <rect x="654.5" y="231.6" width="26" height="8.4" rx="2" fill="#2b5aa6"/>
+        </g>
+        <!-- unique users line -->
+        <polyline fill="none" stroke="#2f9c93" stroke-width="2.5"
+          points="82.5,119.9 127.5,80.1 172.5,20 217.5,41.3 262.5,63.4 307.5,58.2 352.5,110.8 397.5,136.6 442.5,149.8 487.5,174.3 532.5,186.3 577.5,195.6 622.5,198.2 667.5,222.7"/>
+        <g fill="#2f9c93">
+          <circle cx="82.5" cy="119.9" r="2.5"/><circle cx="127.5" cy="80.1" r="2.5"/><circle cx="172.5" cy="20" r="3.2"/><circle cx="217.5" cy="41.3" r="2.5"/><circle cx="262.5" cy="63.4" r="2.5"/><circle cx="307.5" cy="58.2" r="2.5"/><circle cx="352.5" cy="110.8" r="2.5"/><circle cx="397.5" cy="136.6" r="2.5"/><circle cx="442.5" cy="149.8" r="2.5"/><circle cx="487.5" cy="174.3" r="2.5"/><circle cx="532.5" cy="186.3" r="2.5"/><circle cx="577.5" cy="195.6" r="2.5"/><circle cx="622.5" cy="198.2" r="2.5"/><circle cx="667.5" cy="222.7" r="2.5"/>
+        </g>
+        <!-- hour labels -->
+        <g font-size="10" fill="#6c727a" text-anchor="middle">
+          <text x="82.5" y="258">15</text><text x="127.5" y="258">16</text><text x="172.5" y="258">17</text><text x="217.5" y="258">18</text><text x="262.5" y="258">19</text><text x="307.5" y="258">20</text><text x="352.5" y="258">21</text><text x="397.5" y="258">22</text><text x="442.5" y="258">23</text><text x="487.5" y="258">00</text><text x="532.5" y="258">01</text><text x="577.5" y="258">02</text><text x="622.5" y="258">03</text><text x="667.5" y="258">04</text>
+          <text x="375" y="274" font-size="11" fill="#9aa1aa">Hour of day (UTC)</text>
+        </g>
+      </svg>
+      <div class="legend">
+        <span><i class="dot" style="background:#2b5aa6"></i>Page views / hr (left axis)</span>
+        <span><i class="dot" style="background:#e2702a"></i>Peak hour — 29,967</span>
+        <span><i class="dot" style="background:#2f9c93"></i>Unique viewers / hr (right axis)</span>
+      </div>
+      <figcaption>Source: PostHog <code>$pageview</code>, project <code>hera-streamer-invitational-2026</code>. The 7-minute edge outage (17:31–17:38) sits inside the 17:00 bucket.</figcaption>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <strong>Top countries</strong> <span class="tag">— by API requests, 24h</span>
+        <div class="blist" style="margin-top:12px">
+          <div class="row"><span class="lab">United States</span><span class="track"><span class="fill" style="width:100%;background:#2b5aa6"></span></span><span class="val">2.06M</span></div>
+          <div class="row"><span class="lab">Germany</span><span class="track"><span class="fill" style="width:53%;background:#3a6ea5"></span></span><span class="val">1.09M</span></div>
+          <div class="row"><span class="lab">Canada</span><span class="track"><span class="fill" style="width:26%;background:#3a6ea5"></span></span><span class="val">535k</span></div>
+          <div class="row"><span class="lab">Sweden</span><span class="track"><span class="fill" style="width:18%;background:#3a6ea5"></span></span><span class="val">368k</span></div>
+          <div class="row"><span class="lab">United Kingdom</span><span class="track"><span class="fill" style="width:18%;background:#3a6ea5"></span></span><span class="val">365k</span></div>
+          <div class="row"><span class="lab">Netherlands</span><span class="track"><span class="fill" style="width:15%;background:#3a6ea5"></span></span><span class="val">317k</span></div>
+          <div class="row"><span class="lab">Poland</span><span class="track"><span class="fill" style="width:11%;background:#3a6ea5"></span></span><span class="val">230k</span></div>
+        </div>
+        <figcaption>A genuinely global audience — Cloudflare zone analytics.</figcaption>
+      </div>
+      <div class="card">
+        <strong>Session shape</strong>
+        <div class="kpis" style="grid-template-columns:1fr 1fr;margin-top:12px">
+          <div class="kpi"><div class="n">13.2k</div><div class="l">Sessions</div></div>
+          <div class="kpi"><div class="n">2,590</div><div class="l">Peak unique / hr</div></div>
+          <div class="kpi"><div class="n">410</div><div class="l">Peak unique / min</div><div class="d">17:11 UTC</div></div>
+          <div class="kpi"><div class="n">0</div><div class="l">Uncaught FE errors</div><div class="d">$exception, all day</div></div>
+        </div>
+        <figcaption>The front end degraded gracefully — retries, not crashes.</figcaption>
+      </div>
+    </div>
+  </section>
+
+  <!-- EDGE & CACHING -->
+  <section>
+    <h2><span class="bar"></span>Edge &amp; caching <span class="tag" style="font-family:var(--body);font-size:13px;align-self:center">— Cloudflare</span></h2>
+    <p class="lede">Cloudflare fronted the entire event. The zone absorbed ~9M requests and served 29 GB — the vast majority from cache — while the front-end Worker stayed far inside its paid-plan budget.</p>
+    <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
+      <div class="kpi"><div class="n">9.01M</div><div class="l">Total zone requests</div><div class="d">24h &middot; 86.9% from cache</div></div>
+      <div class="kpi good"><div class="n">714k</div><div class="l">Worker requests</div><div class="d">24h &middot; vs 10M/mo included</div></div>
+      <div class="kpi"><div class="n">29 GB</div><div class="l">Data served</div><div class="d">90% cached</div></div>
+    </div>
+  </section>
+
+  <!-- INCIDENT TIMELINE -->
+  <section>
+    <h2><span class="bar"></span>Incident timeline <span class="tag" style="font-family:var(--body);font-size:13px;align-self:center">2026-06-01 UTC</span></h2>
+    <p class="lede">Three viewer-facing incidents, all configuration/edge — not raw capacity — and all resolved same-day with no data loss.</p>
+    <div class="card">
+      <div class="tl">
+        <div class="ev"><span class="t">15:00</span> &mdash; <span class="x">Pre-show ramp begins; traffic climbs from a standing start.</span></div>
+        <div class="ev warn"><span class="t">17:10–18:40</span> &mdash; <span class="x">Peak. API pinned at 20/20 instances; Cloud SQL connections climb to the 100 cap (stale-revision accumulation) → intermittent 5xx.</span></div>
+        <div class="ev bad"><span class="t">17:31–17:38</span> &mdash; <span class="x"><b>Edge outage (7 min).</b> The front-end Worker hits Cloudflare's free 100k-req/day cap (error 1027) — full site-shell blackout. Visible as a 7-minute hole in page views.</span></div>
+        <div class="ev bad"><span class="t">18:50–19:50</span> &mdash; <span class="x"><b>429 storm.</b> Rate limiter keyed on Cloudflare's edge IP + <code>Vary: Cookie</code> defeating CDN coalescing → ~80% of reads rejected; 4xx peaks at ~99k / 10 min. Client retries (<code>standings.retry</code>) hit 951/hr.</span></div>
+        <div class="ev ok"><span class="t">20:00</span> &mdash; <span class="x"><b>Resolved.</b> DB tier bump to 200 connections (#173) + limiter/cache fix (#176) deploy. 429s, 5xx, and retries collapse to ~0.</span></div>
+        <div class="ev ok"><span class="t">20:10–21:25</span> &mdash; <span class="x">Zero-downtime schema re-key (#179/#181) and stats windowing (#185) land cleanly under live traffic — 0× 5xx through both rollovers.</span></div>
+      </div>
+      <figcaption>Fingerprints independently confirmed across PostHog (page-view blackout + retry spike), Cloudflare (429/500 counts), and Cloud Monitoring (instance + connection saturation).</figcaption>
+    </div>
+  </section>
+
+  <footer>
+    <div><b>The King's Gauntlet — Launch Day Metrics.</b> Prepared 2026-06-02. Figures are 24h aggregates for the 2026-06-01 event window unless noted; SSE/active-viewer figures are instantaneous peaks.</div>
+  </footer>
+
+</div>
+</body>
+</html>
