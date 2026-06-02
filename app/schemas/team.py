@@ -16,16 +16,16 @@ class TeamMemberRead(BaseModel):
     """
 
     # The roster-row surrogate id — the management key for team-member
-    # mutations (#167). Stable across a placeholder's promotion to a
+    # mutations (#167). Stable across an unlinked row's linking to a
     # polled identity.
     tournament_player_id: int
-    # The polled-identity id. Null for a placeholder entrant whose
-    # ``profile_id`` hasn't been minted yet — the roster row carries
-    # only ``name`` until promotion (see ``TournamentPlayer``).
+    # The polled-identity id. Null for an unlinked entrant whose
+    # ``profile_id`` hasn't been linked yet — the roster row carries
+    # only ``name`` until linked (see ``TournamentPlayer``).
     profile_id: int | None
     # The polled identity's display name. Null when the poller hasn't
-    # picked the profile up yet (linked-but-not-polled member). For a
-    # placeholder, this falls back to the roster row's ``name``.
+    # picked the profile up yet (linked-but-not-polled member). For an
+    # unlinked member, this falls back to the roster row's ``name``.
     alias: str | None
     # ISO 3166-1 alpha-2, lowercase — same shape as ``StandingRow.country``.
     # Null when upstream returns no country, or when ``Player`` hasn't
@@ -120,9 +120,8 @@ class TeamMemberCreate(BaseModel):
     """Request body for adding a roster row to a team.
 
     Keys on the roster row's surrogate ``id`` (``tournament_player_id``)
-    rather than the polled ``profile_id`` so a placeholder entrant — a
-    roster row whose ``profile_id`` hasn't been minted yet — can be
-    teamed (#167).
+    rather than the polled ``profile_id`` so an unlinked entrant — a
+    roster row with no ``profile_id`` yet — can be teamed (#167).
     """
 
     tournament_player_id: int = Field(gt=0)

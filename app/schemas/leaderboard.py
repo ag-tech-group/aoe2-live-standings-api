@@ -102,10 +102,10 @@ class StandingRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     # The roster-row surrogate id (``tournament_players.id``) — the stable
-    # management key (#167), present on every row including placeholders, so
+    # management key (#167), present on every row including unlinked ones, so
     # the FE can drive team assignment (``POST /teams/{id}/members``) straight
-    # off the standings without a separate lookup. Stable across a
-    # placeholder's promotion to a polled identity.
+    # off the standings without a separate lookup. Stable across an
+    # unlinked row's linking to a polled identity.
     tournament_player_id: int
     # The optional enrichment link to a polled identity; null on an unlinked
     # row (#187). Address rows by tournament_player_id, not this.
@@ -125,7 +125,7 @@ class StandingRow(BaseModel):
     presentation: dict
     # Null when the roster member has no rating row on this tournament's
     # leaderboard yet (e.g. a brand-new account that hasn't played its
-    # first ranked match), and on placeholder rows. The other lifetime-
+    # first ranked match), and on unlinked rows. The other lifetime-
     # ladder fields below are 0 in those cases, and ``recent_results`` /
     # ``tournament_record`` are empty/zero.
     current_rating: int | None
@@ -154,7 +154,7 @@ class StandingRow(BaseModel):
     # offline/unknown.
     stream_live: bool
     last_match_at: datetime | None
-    # Null on placeholder rows (no polled refresh applies); the row's
+    # Null on unlinked rows (no polled refresh applies); the row's
     # ``last_polled_at`` envelope simply doesn't consider these.
     updated_at: datetime | None
 
