@@ -52,6 +52,12 @@ _LISTENER_PING_SECONDS = 30
 # nudges resume quickly once it recovers.
 _LISTENER_RECONNECT_SECONDS = 5
 
+# Cadence for sampling the live SSE subscriber count into the logs, where
+# the `sse_subscriber_count` log-based metric turns it into a Cloud
+# Monitoring series. 30s matches the standings poll cadence — fine enough
+# to watch seats fill during a live match without flooding the logs.
+_SUBSCRIBER_SAMPLE_SECONDS = 30
+
 
 class EventType(StrEnum):
     """SSE event names. Sent in the SSE ``event:`` field."""
@@ -110,6 +116,25 @@ class EventHub:
 # Module-level singleton — imported by the stream router (subscribe) and
 # by the NOTIFY listener (publish).
 hub = EventHub()
+
+
+async def sample_subscriber_count(event_hub: EventHub) -> None:
+    """Periodically log the live SSE subscriber count for Cloud Monitoring.
+
+    ``event_hub`` already knows how many SSE connections are open on this
+    instance; this samples that on a fixed cadence and emits it as a
+    structured ``sse_subscriber_count`` event. The ``sse_subscriber_count``
+    log-based metric (``infra/terraform/monitoring.tf``) extracts ``count``
+    into a per-instance Cloud Monitoring series — the only direct read on
+    SSE-seat demand, which is the api tier's binding resource (#194).
+
+    Runs on the read tier (``listener_enabled``) beside the NOTIFY listener;
+    the ``asyncio.sleep`` surfaces ``CancelledError`` at lifespan shutdown so
+    the task exits cleanly.
+    """
+    while True:
+        await asyncio.sleep(_SUBSCRIBER_SAMPLE_SECONDS)
+        logger.info("sse_subscriber_count", count=event_hub.subscriber_count)
 
 
 async def emit_nudge(session: AsyncSession, event: EventType) -> None:
