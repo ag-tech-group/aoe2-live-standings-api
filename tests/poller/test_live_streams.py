@@ -61,9 +61,9 @@ async def roster_row_ids(session: AsyncSession) -> dict[int, int]:
     """
     tournament = Tournament(slug="test", name="Test", leaderboard_id=3)
     tournament.tracked_players = [
-        TournamentPlayer(profile_id=1),
-        TournamentPlayer(profile_id=2),
-        TournamentPlayer(profile_id=9),
+        TournamentPlayer(profile_id=1, name="p1"),
+        TournamentPlayer(profile_id=2, name="p2"),
+        TournamentPlayer(profile_id=9, name="p9"),
     ]
     session.add(tournament)
     await session.commit()

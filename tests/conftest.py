@@ -267,7 +267,12 @@ def make_tournament(
     }
     defaults.update(overrides)
     tournament = Tournament(**defaults)
-    tournament.tracked_players = [TournamentPlayer(profile_id=pid) for pid in (profile_ids or [])]
+    # name is NOT NULL (#187); polled rows get a deterministic display label
+    # mirroring prod, where Phase 1 backfilled name from the polled alias.
+    # Tests that assert on the display name / sort order set it explicitly.
+    tournament.tracked_players = [
+        TournamentPlayer(profile_id=pid, name=f"p{pid}") for pid in (profile_ids or [])
+    ]
     tournament.owners = [TournamentOwner(user_id=uid) for uid in (owner_ids or [])]
     return tournament
 

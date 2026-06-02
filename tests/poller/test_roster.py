@@ -13,9 +13,15 @@ from app.poller.roster import (
 class TestGetTrackedProfileIds:
     async def test_returns_union_across_tournaments(self, session: AsyncSession):
         first = Tournament(slug="a", name="A", leaderboard_id=3)
-        first.tracked_players = [TournamentPlayer(profile_id=1), TournamentPlayer(profile_id=2)]
+        first.tracked_players = [
+            TournamentPlayer(profile_id=1, name="p1"),
+            TournamentPlayer(profile_id=2, name="p2"),
+        ]
         second = Tournament(slug="b", name="B", leaderboard_id=4)
-        second.tracked_players = [TournamentPlayer(profile_id=2), TournamentPlayer(profile_id=9)]
+        second.tracked_players = [
+            TournamentPlayer(profile_id=2, name="p2"),
+            TournamentPlayer(profile_id=9, name="p9"),
+        ]
         session.add_all([first, second])
         await session.commit()
 
@@ -31,7 +37,7 @@ class TestGetStreamUrlsByRosterRow:
         """#147: placeholder rows participate in broadcast-live detection."""
         tournament = Tournament(slug="cup", name="Cup", leaderboard_id=3)
         polled = TournamentPlayer(
-            profile_id=1, presentation={"streamUrls": ["https://twitch.tv/p1"]}
+            profile_id=1, name="p1", presentation={"streamUrls": ["https://twitch.tv/p1"]}
         )
         placeholder = TournamentPlayer(
             name="iyouxin", presentation={"streamUrls": ["https://twitch.tv/iyouxin"]}

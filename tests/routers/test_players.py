@@ -42,14 +42,17 @@ class TestListPlayers:
         tatoh = make_player(409748, alias="AB | TaToH")
         tatoh.ratings.append(make_player_rating(409748, leaderboard_id=3, current_rating=2454))
         session.add_all([hera, tatoh])
-        session.add(make_tournament("cup", profile_ids=[199325, 409748]))
+        # Display name = roster `name` (set to the alias, mirroring the prod
+        # Phase 1 backfill); the list sorts and renders by it.
+        tournament = make_tournament("cup", profile_ids=[199325, 409748])
+        for tp in tournament.tracked_players:
+            tp.name = {199325: "VIT | Hera", 409748: "AB | TaToH"}[tp.profile_id]
+        session.add(tournament)
         await session.commit()
 
         payload = (await client.get("/v1/tournaments/cup/players")).json()
         aliases = [p["alias"] for p in payload["items"]]
         assert aliases == ["AB | TaToH", "VIT | Hera"]
-        # A linked row whose name predates the backfill surfaces `name`
-        # falling back to the polled alias.
         assert [p["name"] for p in payload["items"]] == ["AB | TaToH", "VIT | Hera"]
         assert payload["last_polled_at"] is not None
         hera_payload = next(p for p in payload["items"] if p["profile_id"] == 199325)
@@ -186,6 +189,7 @@ class TestGetPlayer:
             match.players.append(make_match_player(match_id, profile_id=1))
             session.add(match)
         tournament = make_tournament("cup", profile_ids=[1])
+        tournament.tracked_players[0].name = "Hera"
         session.add(tournament)
         await session.commit()
         tpid = tournament.tracked_players[0].id
@@ -518,17 +522,20 @@ class TestUnlinkedRosterCRUD:
         response = await client.post("/v1/tournaments/cup/players", json={})
         assert response.status_code == 422
 
-    async def test_add_with_numeric_name_is_422(
+    async def test_add_with_numeric_name_succeeds(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # Transitional guard (#187 Phase 3 retires it): a purely numeric
-        # display name can't be confused with the surrogate id.
+        # #187 Phase 3 retired the numeric-name guard (addressing is by
+        # surrogate id now), so a numeric display name is accepted.
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
         response = await client.post("/v1/tournaments/cup/players", json={"name": "12345"})
-        assert response.status_code == 422
+        assert response.status_code == 204
+        row = (await session.execute(select(TournamentPlayer))).scalar_one()
+        assert row.name == "12345"
+        assert row.profile_id is None
 
     async def test_add_duplicate_name_is_409(
         self, client: AsyncClient, session: AsyncSession, auth_as

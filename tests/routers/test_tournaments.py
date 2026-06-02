@@ -489,7 +489,11 @@ class TestStandingsUnratedRoster:
         session.add(rated)
         for profile_id, alias in ((10, "Charlie"), (20, "Alice"), (30, "Bob")):
             session.add(make_player(profile_id, alias=alias))
-        session.add(make_tournament("cup", profile_ids=[10, 20, 30, 50], leaderboard_id=3))
+        tournament = make_tournament("cup", profile_ids=[10, 20, 30, 50], leaderboard_id=3)
+        # Roster name = alias (mirrors the prod backfill); standings sort by name.
+        for tp in tournament.tracked_players:
+            tp.name = {10: "Charlie", 20: "Alice", 30: "Bob", 50: "rated"}[tp.profile_id]
+        session.add(tournament)
         await session.commit()
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]

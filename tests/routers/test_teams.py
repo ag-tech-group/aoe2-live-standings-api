@@ -219,13 +219,14 @@ class TestTeamStandings:
         assert by_pid[2]["current_rating"] is None
         assert by_pid[2]["max_rating"] is None
 
-    async def test_member_without_polled_player_is_listed_with_null_alias(
+    async def test_member_without_polled_player_falls_back_to_roster_name(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # ``TeamMember`` with a profile_id whose ``Player`` row hasn't
-        # been written by the poller yet — the standings query
-        # left-joins ``Player`` so the row surfaces with null
-        # alias/country rather than vanishing.
+        # ``TeamMember`` with a profile_id whose ``Player`` row hasn't been
+        # written by the poller yet — the standings left-joins ``Player`` so
+        # the row surfaces with its roster ``name`` as the display alias
+        # (#187: name is always present) and null country/ratings, rather
+        # than vanishing.
         rated = make_player(1)
         rated.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(rated)
@@ -237,7 +238,7 @@ class TestTeamStandings:
         row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
         assert row["member_count"] == 2
         by_pid = {m["profile_id"]: m for m in row["members"]}
-        assert by_pid[999]["alias"] is None
+        assert by_pid[999]["alias"] == "p999"
         assert by_pid[999]["country"] is None
         assert by_pid[999]["current_rating"] is None
         assert by_pid[999]["max_rating"] is None
