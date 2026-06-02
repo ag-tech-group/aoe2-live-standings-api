@@ -20,9 +20,16 @@ from __future__ import annotations
 from typing import Any
 
 import sentry_sdk
+from sentry_sdk.integrations.logging import ignore_logger
 
 from app.config import settings
 from app.logging import PII_KEY_PATTERN
+
+# Loggers whose records are operational transport noise rather than
+# application errors — registered with the Sentry logging integration as
+# ignored so they never become Sentry events (#214). Currently just the
+# Cloud Trace span exporter, which logs every failed span export at ERROR.
+_NOISY_LOGGERS = ("opentelemetry.exporter.cloud_trace",)
 
 
 def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
@@ -78,3 +85,13 @@ def init_sentry() -> None:
         # FastAPI handlers and lifespan tasks.
         enable_logs=True,
     )
+
+    # Keep operational transport noise out of Sentry. The Cloud Trace span
+    # exporter logs at ERROR on every failed BatchWriteSpans — e.g.
+    # RESOURCE_EXHAUSTED once launch-traffic span volume exceeds the Cloud
+    # Trace write quota — and with enable_logs=True that flooded Sentry with
+    # thousands of issues in hours, drowning real errors (#214). A dropped
+    # span degrades tracing, not the app, and surfaces via Cloud Trace's own
+    # quota metrics instead.
+    for logger_name in _NOISY_LOGGERS:
+        ignore_logger(logger_name)

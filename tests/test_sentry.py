@@ -54,6 +54,32 @@ class TestInitSentry:
 
         assert calls[0]["traces_sample_rate"] == 1.0
 
+    def test_ignores_cloud_trace_exporter_logger(self, monkeypatch: pytest.MonkeyPatch):
+        # The Cloud Trace span exporter logs at ERROR on every failed
+        # BatchWriteSpans (e.g. RESOURCE_EXHAUSTED once span volume exceeds
+        # the Cloud Trace quota); with enable_logs=True those flooded Sentry
+        # with thousands of issues, drowning real errors (#214). init must
+        # register that logger as ignored so its transport noise never
+        # becomes a Sentry event.
+        monkeypatch.setattr("app.sentry.settings.sentry_dsn", "https://abc@o.example.com/1")
+        monkeypatch.setattr("sentry_sdk.init", lambda **kwargs: None)
+        ignored: list[str] = []
+        monkeypatch.setattr("app.sentry.ignore_logger", lambda name: ignored.append(name))
+
+        init_sentry()
+
+        assert "opentelemetry.exporter.cloud_trace" in ignored
+
+    def test_does_not_register_ignores_when_dsn_empty(self, monkeypatch: pytest.MonkeyPatch):
+        # No DSN → no init, so there's nothing to ignore either.
+        monkeypatch.setattr("app.sentry.settings.sentry_dsn", "")
+        ignored: list[str] = []
+        monkeypatch.setattr("app.sentry.ignore_logger", lambda name: ignored.append(name))
+
+        init_sentry()
+
+        assert ignored == []
+
 
 class TestScrubPii:
     """`_scrub_pii` recursively redacts PII-pattern keys anywhere in
