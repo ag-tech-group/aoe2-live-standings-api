@@ -233,3 +233,63 @@ resource "google_monitoring_alert_policy" "upstream_rate_limited" {
     mime_type = "text/markdown"
   }
 }
+
+# API-side 429 rate-limit storm (#188). The viewer-facing complement to
+# the upstream_rate_limited signal above: that one catches the *worker*
+# being throttled by worldsedgelink; this one catches *our* API throwing
+# 429s back at viewers.
+#
+# Why this needs its own alert rather than riding Sentry: a 429 is a
+# handled response, not an exception. slowapi's stock
+# `_rate_limit_exceeded_handler` (registered in app/main.py) returns it
+# without raising or logging, and app/sentry.py sets no
+# `failed_request_status_codes`, so the SDK default captures only 5xx. A
+# 429 storm therefore produces zero Sentry issues — which is exactly why
+# the 2026-06-01 storm (#176) was silent. "Rate of a response code" is an
+# SLI; Cloud Run's built-in request_count metric is the right tool, and
+# routing it through the same sentry_pubsub channel keeps every infra
+# alert in one triage surface.
+#
+# Permanent, not event-window: a CDN-fronted limiter/cache
+# misconfiguration is a structural failure mode, not a Hera-specific one,
+# so this lives here with the other permanent alerts rather than in the
+# event-window-disposable capacity_alerts.tf that #188 first proposed.
+resource "google_monitoring_alert_policy" "api_429_storm" {
+  display_name = "API 429 rate-limit storm (viewers being rejected)"
+  combiner     = "OR"
+  severity     = "CRITICAL"
+
+  notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
+
+  conditions {
+    display_name = "429 responses > 20/min sustained 2 minutes"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"run.googleapis.com/request_count\"",
+        "resource.type=\"cloud_run_revision\"",
+        "resource.labels.service_name=\"${google_cloud_run_v2_service.api.name}\"",
+        "metric.labels.response_code=\"429\"",
+      ])
+      duration        = "120s" # 2 minutes (whole-minute required)
+      comparison      = "COMPARISON_GT"
+      threshold_value = 20 # 429s per 60s window; normal is ~0
+
+      # request_count is a DELTA metric split per-revision. ALIGN_DELTA
+      # yields the 429 count in each 60s window; REDUCE_SUM collapses the
+      # per-revision series so a storm spread across two revisions during
+      # a deploy rollover still sums to the true total. NB: ALIGN_RATE
+      # would give a per-*second* rate — threshold 20 would then mean
+      # ~1200/min and silently miss the "hundreds/min" storm this guards.
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_DELTA"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  documentation {
+    content   = "The api service is returning 429s to viewers at storm rate (>20/min sustained 2 minutes; steady-state is ~0). Viewers are being rate-limited at the edge. Check (a) `cf-cache-status` is HIT under load — a cache-miss storm means the Cloudflare cache rule (#178) regressed or `Vary: Cookie` crept back; (b) the limiter keys on `CF-Connecting-IP`, not the Cloudflare edge IP (#176) — otherwise every viewer shares one bucket; (c) Cloud Run isn't refusing requests upstream of the limiter. Background: docs/launch-lessons-learned.md (429 storm) and the 2026-06-01 incident."
+    mime_type = "text/markdown"
+  }
+}
