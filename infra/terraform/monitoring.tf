@@ -82,6 +82,15 @@ locals {
     "resource.type=\"cloud_run_revision\"",
     "resource.labels.service_name=\"${google_cloud_run_v2_service.worker.name}\"",
   ])
+
+  # Mirror of worker_log_filter for the read (api) tier — the SSE hub and
+  # its subscriber-count samples live on the api service, so its metric is
+  # locked to the api service the same way the poller metrics lock to the
+  # worker.
+  api_log_filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.api.name}\"",
+  ])
 }
 
 # Successful-tick counters — one per task. The absence-of-data alert
@@ -97,6 +106,38 @@ resource "google_logging_metric" "poll_ok" {
     metric_kind = "DELTA"
     value_type  = "INT64"
     unit        = "1"
+  }
+}
+
+# Live SSE subscriber gauge (#194). The api tier's binding resource is the
+# request slots held open by long-lived SSE streams, not throughput or DB
+# load — but until now we could only *infer* concurrent seats from Cloud
+# Run instance scaling. The api app samples `hub.subscriber_count` every
+# 30s and logs it as `sse_subscriber_count`; this metric extracts that
+# value into a per-instance distribution so finals capacity planning reads
+# the real number instead of guessing. No alert hangs off it (a planning
+# signal, not a paging condition), so it's intentionally left out of the
+# wait_for_metric_propagation bridge below.
+resource "google_logging_metric" "sse_subscriber_count" {
+  name        = "sse_subscriber_count"
+  description = "Concurrent SSE subscribers held open on each api instance (sampled every 30s)."
+  filter      = "${local.api_log_filter} AND jsonPayload.event=\"sse_subscriber_count\""
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "DISTRIBUTION"
+    unit        = "1"
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.count)"
+
+  bucket_options {
+    explicit_buckets {
+      # Seats per instance: 0 at idle up past the 800-concurrency cap, with
+      # finer buckets low (most instances hold tens–hundreds) and a 1200
+      # ceiling matching the #197 concurrency target.
+      bounds = [0, 1, 2, 5, 10, 25, 50, 100, 200, 400, 800, 1200]
+    }
   }
 }
 

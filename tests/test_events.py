@@ -1,6 +1,11 @@
 """Unit tests for the SSE event hub."""
 
-from app.events import EventHub, EventType
+import asyncio
+
+import pytest
+from structlog.testing import capture_logs
+
+from app.events import EventHub, EventType, sample_subscriber_count
 
 
 class TestEventHub:
@@ -52,3 +57,31 @@ class TestEventHub:
         nudge = queue.get_nowait()
         assert nudge.event == EventType.LIVE
         assert nudge.polled_at is not None
+
+
+class TestSampleSubscriberCount:
+    async def test_logs_the_live_count_each_tick(self, monkeypatch):
+        """The sampler emits the hub's current subscriber count as a log event."""
+        hub = EventHub()
+        hub.subscribe()
+        hub.subscribe()
+        hub.subscribe()
+
+        # Let one tick run, then break the loop by cancelling the next sleep.
+        ticks = 0
+
+        async def fake_sleep(_seconds):
+            nonlocal ticks
+            ticks += 1
+            if ticks >= 2:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr("app.events.asyncio.sleep", fake_sleep)
+
+        with capture_logs() as logs:
+            with pytest.raises(asyncio.CancelledError):
+                await sample_subscriber_count(hub)
+
+        samples = [log for log in logs if log["event"] == "sse_subscriber_count"]
+        assert len(samples) == 1
+        assert samples[0]["count"] == 3

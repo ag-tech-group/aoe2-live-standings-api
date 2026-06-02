@@ -32,7 +32,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.database import async_session_maker
-from app.events import listen_for_nudges
+from app.events import hub, listen_for_nudges, sample_subscriber_count
 from app.poller.broadcast import (
     TwitchLiveClient,
     YouTubeLiveClient,
@@ -61,6 +61,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             asyncio.create_task(
                 listen_for_nudges(settings.database_url),
                 name="listen_nudges",
+            )
+        )
+        # Sample the SSE subscriber count on the read tier — these instances
+        # host the hub the listener fans nudges out to, so this is where the
+        # live-seat number lives (#194).
+        tasks.append(
+            asyncio.create_task(
+                sample_subscriber_count(hub),
+                name="sample_sse_subscribers",
             )
         )
         logger.info("listener_starting")
