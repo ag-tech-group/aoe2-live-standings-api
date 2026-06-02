@@ -1663,12 +1663,15 @@ class TestProgression:
             )
             match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
             session.add(match)
-        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        session.add(tournament)
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/progression")).json()
         assert len(body["items"]) == 1
         series = body["items"][0]
+        # The stable per-series key (#187) maps to the roster row.
+        assert series["tournament_player_id"] == tournament.tracked_players[0].id
         assert series["profile_id"] == 1
         assert series["alias"] == "hera"
         assert [p["rating"] for p in series["points"]] == [1490, 1510, 1530]

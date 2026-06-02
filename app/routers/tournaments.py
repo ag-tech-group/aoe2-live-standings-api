@@ -687,15 +687,27 @@ async def get_progression(
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
-    roster = select(TournamentPlayer.profile_id).where(
-        TournamentPlayer.tournament_id == tournament.id
-    )
     stmt = (
-        select(Player.profile_id, Player.alias, Match.completed_at, MatchPlayer.new_rating)
+        select(
+            TournamentPlayer.id,
+            Player.profile_id,
+            Player.alias,
+            Match.completed_at,
+            MatchPlayer.new_rating,
+        )
         .join(MatchPlayer, MatchPlayer.profile_id == Player.profile_id)
         .join(Match, Match.match_id == MatchPlayer.match_id)
+        # Join the roster row (at most one per profile per tournament) — scopes
+        # to the roster AND yields its tournament_player_id, the stable series
+        # key (#187), replacing the old profile_id IN-subquery.
+        .join(
+            TournamentPlayer,
+            and_(
+                TournamentPlayer.profile_id == Player.profile_id,
+                TournamentPlayer.tournament_id == tournament.id,
+            ),
+        )
         .where(
-            Player.profile_id.in_(roster),
             Match.leaderboard_id == tournament.leaderboard_id,
             Match.completed_at.is_not(None),
             MatchPlayer.new_rating.is_not(None),
@@ -714,10 +726,15 @@ async def get_progression(
 
     series: dict[int, PlayerProgression] = {}
     timestamps: list[datetime | None] = []
-    for profile_id, alias, completed_at, rating in rows:
+    for tournament_player_id, profile_id, alias, completed_at, rating in rows:
         player_series = series.get(profile_id)
         if player_series is None:
-            player_series = PlayerProgression(profile_id=profile_id, alias=alias, points=[])
+            player_series = PlayerProgression(
+                tournament_player_id=tournament_player_id,
+                profile_id=profile_id,
+                alias=alias,
+                points=[],
+            )
             series[profile_id] = player_series
         player_series.points.append(RatingPoint(completed_at=completed_at, rating=rating))
         timestamps.append(completed_at)
