@@ -311,3 +311,42 @@ Refining #177's background leaderboards loader: it fast-retried every 60s while 
 | Consider PgBouncer (or Cloud SQL connection pooling) if `maxScale` grows past the current 200-connection headroom | infra | future | — |
 | Alerting: Cloud SQL `num_backends` vs cap; 429 rate; Cloud Run revision count per service | infra | TODO | — |
 | Adopt a deploy-freeze around marquee matches (no API deploys at peak) | infra | DONE | [docs/deploy-freeze.md](deploy-freeze.md) ([#198](https://github.com/ag-tech-group/aoe2-live-standings-api/issues/198)) |
+
+---
+
+<!-- Appended 2026-06-02 by the Sentry triage / observability session. Day-after
+     triage of the launch-window Sentry backlog across both projects: one new
+     self-inflicted observability incident (Cloud Trace -> Sentry flood, fixed
+     #216), one new FE crash (standings sort, fixed web#315), and the meta-lesson
+     that tied ~15 of the API issues together. Promote the bullets into the
+     checklist above as needed. -->
+
+## Observability incident write-up (Sentry)
+
+### Cloud Trace span exporter flooded Sentry with its own transport errors
+
+- **Symptom (what we saw):** the single largest issue in the API project — `ResourceExhausted: Resource has been exhausted (e.g. check quota)` (Sentry `AOE2-…-1D`), **5,707 events in ~14h** (logger `opentelemetry.exporter.cloud_trace`, `grpc_status:8`), with a `RetryError: Timeout of 120.0s` sibling (`-1E`). At the events' `client_sample_rate ≈ 0.1` that is **~57k real occurrences** — it buried the genuinely-actionable errors.
+- **Impact:** no user-facing impact, but two real costs — actionable errors were drowned out, and traces were being **dropped** at peak (observability loss exactly when you want it). Latent: re-escalates at every traffic peak until fixed.
+- **Root cause (two layers):** (1) the OpenTelemetry → Google **Cloud Trace** span exporter logs at ERROR on every failed `BatchWriteSpans`; under launch-traffic span volume the export blew past Cloud Trace's per-minute write **quota** → `RESOURCE_EXHAUSTED` on every batch. (2) `sentry_sdk.init(enable_logs=True)` brings ERROR-level log records into Sentry **as issues**, so each export failure *became an issue* — self-inflicted. Span volume was amplified by **double instrumentation**: `SQLAlchemyInstrumentor` *and* `AsyncPGInstrumentor` were both on, so every DB query emitted two spans (ORM + raw driver), multiplied across the high-frequency pollers + long-lived SSE requests.
+- **Why it wasn't caught earlier:** trace export is a background, best-effort path; it only exceeds quota under real concurrency, and the failures only became *loud* because `enable_logs=True` routed them into the issue stream. A dropped span has no functional symptom.
+- **Fix (PR):** #216 — (a) `ignore_logger("opentelemetry.exporter.cloud_trace")` in `app/sentry.py` so the exporter's transport errors never become Sentry events; (b) drop the redundant `AsyncPGInstrumentor` (keep SQLAlchemy) to roughly halve DB span volume. Both ship via the normal CI → Cloud Run deploy. `OTEL_TRACES_SAMPLE_RATIO` (`0.1` on both services in `infra/terraform/run.tf`) is the remaining linear lever, left as an ops knob.
+- **Detect faster:** alert on Cloud Trace's own quota metric (the Cloud Trace API's `serviceruntime` quota-exceeded signal), not on the Sentry issue count — the issue flood is a lagging, noisy proxy.
+- **Lesson for future projects:** **an observability exporter's own transport failures are not application errors — keep them out of the error stream** (ignore the exporter's logger at the reporting boundary). With logs-as-issues enabled, any noisy library logger can self-DoS your Sentry. **Don't double-instrument one call path** (ORM + driver) — it multiplies span volume against a backend quota for no extra signal. And if you already run Sentry tracing, question whether a second tracing backend (Cloud Trace) earns its span cost at all.
+
+## Frontend incident write-up (Sentry) — continued
+
+### Standings sort comparator threw on a missing `name`
+
+- **Symptom:** `TypeError: Cannot read properties of undefined (reading 'localeCompare')` (Firefox: `…e.name is undefined`) on `/kings-gauntlet/`. Sentry `HERA-…-H` (Chrome) + `-J` (Firefox — same bug, two engines), ~42 events, active.
+- **Impact:** the throw is inside `[...rows].sort(comparePeakRank)` in a `useMemo`, so one bad row **crashes the entire standings table render**, not just that row.
+- **Root cause:** `comparePeakRank` did `a.name.localeCompare(b.name)` unconditionally. The generated DTO marks `name` required and the live API always sends it (built from the NOT NULL `tournament_players.name`), and the SSE stream only *invalidates* queries (never writes partial rows) — so the `undefined` came from a **stale pre-#187 API revision** served during a rollover window (same class as the schema-drift errors). But a sort comparator must be *total* regardless of upstream.
+- **Fix (PR):** web#315 — coerce `name` at the adapter boundary (`dto.name ?? dto.alias ?? ""`) so the `StandingsRow.name: string` contract holds for *every* consumer, plus a null-safe comparator as defence in depth.
+- **Lesson for future projects:** **a sort comparator must never throw** — it runs over whatever the cache holds, including a partial/old-shape row from a stale revision. Enforce the field's type at the adapter boundary (one chokepoint), not at each consumer.
+
+## Generalizable bullets (promote into the checklist above)
+
+- [ ] **An observability exporter's transport errors are not app errors.** A trace/metric exporter that logs failures at ERROR + Sentry `enable_logs=True` turns a backend quota blip into a self-inflicted issue flood that buries real errors. `ignore_logger` the exporter's logger; alert on the backend's own quota metric instead.
+- [ ] **Don't double-instrument one call path.** ORM + driver instrumentation (SQLAlchemy + asyncpg) emits two spans per query, multiplying volume against a per-minute trace quota for no extra signal. Pick one layer; question a second tracing backend if Sentry tracing already covers it.
+- [ ] **Stale-revision rollovers produce a *class* of transient Sentry errors — triage by release tag, don't code-fix each.** A Cloud Run rollover (esp. expand→contract migrations) briefly serves old + new revisions together; the mismatched one throws `UndefinedColumn` / `UndefinedTable`, returns an old-shape response that crashes a stricter consumer, or leaks a stale value (here, a `None` profile_id into an upstream batch → 400). The day-after backlog had ~15 of these — all already-fixed, all from the migration window. **Before investigating a scary Sentry error, check its `release` / revision tag + last-seen and correlate with the deploy/migration window**; a whole cluster is often one already-shipped fix's old-revision tail. Resolve them — they auto-regress if genuinely live.
+- [ ] **A sort comparator must be total (never throw).** It runs over whatever the cache holds, including a partial row from a stale revision; enforce the field's type at the adapter boundary, not each call site.
+- [ ] **Sentry's `Fixes <ISSUE-ID>` commit trailer is not a guarantee.** It did **not** auto-resolve `AOE2-…-1D` on merge here — resolve manually after the deploy lands and verify, rather than assuming the trailer closed it. (Extends the resolution-hygiene bullet above.)
