@@ -38,24 +38,38 @@ resource "google_cloud_run_v2_service" "api" {
 
     # Each open SSE connection holds a request slot for its whole lifetime.
     # The default concurrency of 80 would cap concurrent viewers per
-    # instance at 80; 800 buys headroom on each instance, and the
-    # `max_instance_count = 20` scaling below gives 16000 concurrent
-    # streams' worth of capacity.
+    # instance at 80; 1200 (with the `max_instance_count = 22` scaling
+    # below) gives 26,400 concurrent streams' worth of capacity.
     #
-    # Concurrency stays at 800 (not raised alongside the instance count)
-    # to keep per-instance memory pressure off the hot path — see the
-    # memory limit below; raising both at once was flagged as needing a
-    # stress test in #84 and we chose the horizontal-scale route instead.
-    max_instance_request_concurrency = 800
+    # Raised 800 -> 1200 in #197. Unlike adding instances, concurrency adds
+    # NO database connections (those scale with instance count x pool, not
+    # with concurrency), so it's the cheap seat-multiplier once memory
+    # holds — the lever the 1Gi limit below was provisioned for in #84.
+    # Memory at 1200/instance under sustained SSE load is validated by a
+    # monitored rollout rather than a synthetic test: the
+    # `sse_subscriber_count` metric (#194) plus per-instance memory
+    # utilization are watched at the next live match, with a revert to 800
+    # ready if either climbs unsafe.
+    max_instance_request_concurrency = 1200
 
     scaling {
       # min=1 keeps a warm instance so the LISTEN/NOTIFY connection stays
-      # open continuously. max=20 (raised from 10 for #84 event-window
-      # hardening) gives 800 × 20 = 16,000 concurrent SSE seats — well
-      # over the 9,000-viewer High-active projection in
-      # docs/event-traffic-cost-model.md. Revert to 10 after the event.
+      # open continuously. max=22 (#195) with concurrency=1200 gives
+      # 26,400 concurrent SSE seats (~1.65x the saturated launch peak).
+      #
+      # 22 is the connection-budget ceiling WITHOUT pooling. Each api
+      # instance holds 4 DB connections (3 pool + 1 LISTEN); a deploy
+      # flurry briefly doubles live revisions (SSE stickiness), so peak
+      # backends ~= 8 * maxScale + 6. At 22 that's 182, under the ~197
+      # effective cap (200 - 3 superuser); 24 would hit 198. Validated by
+      # launch: maxScale=20 produced exactly 166 backends on the deploy
+      # flurry. Going past ~24 (toward the #195 target of 40 — steady-safe
+      # at 166 but flurry-fatal at 326) needs PgBouncer (#196) to multiplex
+      # the per-instance pools onto few DB connections; held until that
+      # lands. Supersedes the emergency maxScale=10 cap from the 2026-06-01
+      # outage.
       min_instance_count = 1
-      max_instance_count = 20
+      max_instance_count = 22
     }
 
     volumes {
