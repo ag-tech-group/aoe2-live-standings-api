@@ -94,24 +94,11 @@ class RosterPlayerCreate(BaseModel):
     for an entry whose account hasn't minted yet — it stays first-class and
     can be linked later via PATCH. ``presentation`` is optional and can be
     set later via PATCH.
-
-    ``name`` is rejected if it parses as an integer — transitional, until
-    #187 Phase 3 retires the validator — so a display label can't be
-    confused with the numeric surrogate id used in URL routing.
     """
 
     name: str = Field(min_length=1, max_length=64)
     profile_id: int | None = Field(default=None, gt=0)
     presentation: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("name")
-    @classmethod
-    def _name_not_numeric(cls, value: str) -> str:
-        # Defensive until #187 Phase 3 removes it: a purely numeric display
-        # name could be confused with the surrogate id in URLs / tooling.
-        if value.isdigit():
-            raise ValueError("name must not be an integer")
-        return value
 
     @field_validator("presentation")
     @classmethod

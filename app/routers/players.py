@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -58,8 +58,8 @@ def _unlinked_player_read(entry: TournamentPlayer) -> PlayerRead:
     return PlayerRead(
         tournament_player_id=entry.id,
         profile_id=None,
-        name=entry.name or "",
-        alias=entry.name or "",
+        name=entry.name,
+        alias=entry.name,
         country=None,
         steam_id=None,
         level=None,
@@ -113,7 +113,7 @@ async def list_players(
             or_(Player.profile_id.is_not(None), TournamentPlayer.profile_id.is_(None)),
         )
         .options(selectinload(Player.ratings))
-        .order_by(func.coalesce(TournamentPlayer.name, Player.alias))
+        .order_by(TournamentPlayer.name)
     )
     rows = (await session.execute(stmt)).all()
 
@@ -126,7 +126,7 @@ async def list_players(
             # the source so model_validate picks them up, mirroring how
             # presentation is folded in below.
             player.tournament_player_id = entry.id
-            player.name = entry.name or player.alias
+            player.name = entry.name
             player_read = PlayerRead.model_validate(player)
             player_read.presentation = entry.presentation
             if leaderboard_id is not None:
@@ -208,7 +208,7 @@ async def get_player(
     # tournament_player_id and the display name live on the roster row, not
     # the polled Player — stamp them so model_validate picks them up.
     player.tournament_player_id = roster_entry.id
-    player.name = roster_entry.name or player.alias
+    player.name = roster_entry.name
     detail = PlayerDetail.model_validate(player)
     return detail.model_copy(
         update={

@@ -89,9 +89,9 @@ class TournamentPlayer(Base):
     optional enrichment link, not an alternate identity (#187 dropped the
     old ``profile_id`` XOR ``name`` two-class split).
 
-    ``name`` is NULLABLE in the schema only transitionally — the #187 Phase
-    3 contract migration makes it NOT NULL once every serving revision
-    writes it. The application already requires it on create.
+    ``name`` is NOT NULL (#187 Phase 3): every roster row has a display
+    label. The application sets it on create; the poller never writes this
+    table.
 
     No FK to ``players``: a profile is added as *input* to the poller,
     before any ``Player`` row exists for it; an unlinked row has no
@@ -106,7 +106,7 @@ class TournamentPlayer(Base):
         ForeignKey("tournaments.id", ondelete="CASCADE"),
     )
     profile_id: Mapped[int | None] = mapped_column(nullable=True)
-    name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str] = mapped_column(String(64))
     # Opaque per-player presentation data for this tournament — stream
     # links, bio text, etc. — set by an owner via PATCH and rendered by the
     # consumer. The API stores it but never interprets it (a pass-through

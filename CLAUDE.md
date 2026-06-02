@@ -28,7 +28,7 @@ Domain entities live in `app/models/`. Three groups:
 - **Tournament-scoped config** (`Tournament`, `TournamentPlayer`, `TournamentOwner`, `Team`, `TeamMember`): organizer-curated; the worker never writes; survives every poll cycle.
 - **Plumbing** (`IdempotencyKey`).
 
-`TournamentPlayer` carries either a `profile_id` (a polled identity) **xor** a `name` (an announced placeholder whose `profile_id` hasn't minted yet — typically a brand-new account). The XOR is enforced by `ck_tournament_players_profile_id_xor_name`. The poller filters `profile_id IS NOT NULL`, so placeholder rows are skipped naturally.
+`TournamentPlayer` is one first-class entity (#187): every row has a `name` (the display label, NOT NULL) and an optional `profile_id` linking it to a polled identity. An unlinked row (a `name` with no `profile_id` yet — typically a brand-new account) is fully first-class: addressable and teamable by its surrogate `id`. `profile_id` is an enrichment link, not an alternate identity; the poller filters `profile_id IS NOT NULL`, so unlinked rows are skipped naturally. (The old `profile_id` XOR `name` two-class split and its `ck_tournament_players_profile_id_xor_name` constraint were removed in #187, expand→transition→contract.)
 
 The polling worker lives in `app/poller/`. It runs as the same Python process but on a separate Cloud Run service (`aoe2-live-standings-api-worker`) with `cpu_idle=false` so background tasks keep ticking between requests. Tasks: live matches (~15s), player stats (~30s), recent matches (~60s), Twitch live (~60s, opt-in), YouTube live (~30m, quota-bound, opt-in).
 
@@ -39,17 +39,15 @@ The polling worker lives in `app/poller/`. It runs as the same Python process bu
 - Tournament-config reads (`GET /tournaments`, `GET /tournaments/{slug}`) use the **static** `_TOURNAMENT_CONFIG_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"`.
 - Default middleware Cache-Control since #103 is `no-store`, so cacheable endpoints **must** opt in explicitly.
 
-**Standings sort order** (per-player `/standings`): rated rows by `current_rating` DESC (NULLS LAST), then unrated polled rows by `profile_id` ASC, then placeholders by `name` ASC. Postgres's default NULLS-FIRST under DESC is the trap; always pair `.desc()` with `.nulls_last()`.
+**Standings sort order** (per-player `/standings`): rated rows by `current_rating` DESC (NULLS LAST), then every unrated row — linked or not — by display `name` ASC (#187 unified the old three-tier sort that special-cased an unlinked tail). Postgres's default NULLS-FIRST under DESC is the trap; always pair `.desc()` with `.nulls_last()`.
 
 **Team standings rank on peak** (`/teams/standings`, #158): `combined_rating_sum` / `combined_rating_average` aggregate each member's lifetime `max_rating`, not `current_rating`; teams sort by that peak-based sum desc. Members within a team are ordered by `max_rating` desc (NULLS LAST). The names of the aggregate fields stay `combined_rating_*` — their meaning changed in #158; only the docstrings called it out. Same field on each member: `current_rating` and `max_rating` are both surfaced so the FE can render a current-vs-peak overlay.
 
 **`current` magic slug** (`CURRENT_TOURNAMENT_ALIAS` in `app/routers/tournaments.py`): the literal slug `"current"` is reserved by `get_tournament` and resolves to the most-recently-started tournament (with fallback to most-recently-created). `TournamentCreate.slug` rejects it on create (422) so a real row can't shadow the alias. Use it from external probes (Cloud Monitoring uptime check on `/v1/tournaments/current/standings`, future Sentry uptime) so they survive event rollovers without an infra redeploy. **Event-specific FEs pin to their literal slug** — `/current` is for tournament-agnostic infra, not for app code that should track one specific event.
 
-**Polymorphic URL dispatch on `/players/{lookup}`** (PATCH/DELETE only — GET `/players/{profile_id}` stays profile_id-keyed):
-- Numeric lookup → looks up by `profile_id`.
-- Non-numeric → looks up by `name` (placeholder).
-- `RosterPlayerCreate._name_not_numeric` rejects all-digit names so the dispatch can't alias.
-- Promotion (placeholder → polled identity) is a `PATCH` with `{profile_id}` in the body — atomic: `name` clears, `profile_id` sets, presentation bag carries through.
+**Roster addressing by `tournament_player_id`** (#187): `GET`/`PATCH`/`DELETE /players/{tournament_player_id}` all key on the surrogate id — the old polymorphic profile_id/name URL dispatch is gone. `POST /players` takes a required `name` + optional `profile_id`.
+- Linking (was "promotion"): `PATCH {profile_id}` links an unlinked row to a polled identity — additive, the `name` is **kept** (no longer cleared). The link is immutable once set; 409 if the profile is already rostered.
+- `GET /players/{tournament_player_id}` returns the unified detail; an unlinked (or not-yet-polled) row carries empty polled enrichment rather than a 404.
 
 **The `presentation` bag** (a `dict` on `TournamentPlayer`):
 - Opaque to the API. The FE defines the keys.

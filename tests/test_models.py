@@ -199,8 +199,8 @@ class TestTournament:
             start_date=datetime(2026, 6, 1, tzinfo=UTC),
             grand_finals_date=datetime(2026, 6, 14, tzinfo=UTC),
         )
-        tournament.tracked_players.append(TournamentPlayer(profile_id=199325))
-        tournament.tracked_players.append(TournamentPlayer(profile_id=347269))
+        tournament.tracked_players.append(TournamentPlayer(profile_id=199325, name="Hera"))
+        tournament.tracked_players.append(TournamentPlayer(profile_id=347269, name="TaToH"))
         session.add(tournament)
         await session.commit()
 
@@ -227,7 +227,7 @@ class TestTournament:
 
     async def test_cascade_delete_tournament_removes_players(self, session: AsyncSession):
         tournament = Tournament(slug="temp", name="Temp", leaderboard_id=3)
-        tournament.tracked_players.append(TournamentPlayer(profile_id=1))
+        tournament.tracked_players.append(TournamentPlayer(profile_id=1, name="p1"))
         session.add(tournament)
         await session.commit()
 
