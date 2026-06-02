@@ -129,8 +129,8 @@ async def _resolve_roster_row(
     """Resolve ``tournament_player_id`` to a roster row in this tournament, or 404.
 
     The team-mgmt URLs key on the roster-row surrogate ``id`` (#167) so
-    placeholder entrants — which have no ``profile_id`` — can be teamed
-    just like polled identities. This helper enforces that the row
+    unlinked entrants — which have no ``profile_id`` — can be teamed
+    just like linked ones. This helper enforces that the row
     belongs to the same tournament as the team being edited; a caller
     passing a roster id from another tournament gets a 404 (the
     resource is unreachable from this URL path).
@@ -159,8 +159,8 @@ async def add_team_member(
 ) -> None:
     """Add a roster row to a team — owner-gated.
 
-    Keys on ``tournament_player_id`` so a placeholder entrant (a roster
-    row whose ``profile_id`` hasn't been minted yet) can be teamed —
+    Keys on ``tournament_player_id`` so an unlinked entrant (a roster
+    row with no ``profile_id`` yet) can be teamed —
     the original #167 ask. 404 if the id isn't a roster row in this
     tournament; 409 if it's already on the team. Team membership is
     separate from the tournament roster — this does not add or modify

@@ -212,8 +212,8 @@ class TeamMember(Base):
     """A roster row's membership in a team.
 
     Keys on ``tournament_player_id`` rather than ``profile_id`` so
-    placeholder entrants (a roster row with no ``profile_id`` minted
-    yet) can be teamed — the original #167 ask. The FK cascades on
+    unlinked entrants (a roster row with no ``profile_id`` yet) can be
+    teamed — the original #167 ask. The FK cascades on
     roster-row delete, so removing a player from the tournament also
     removes their team memberships.
     """

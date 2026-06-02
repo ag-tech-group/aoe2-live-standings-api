@@ -36,10 +36,10 @@ class LiveStream(Base):
     clobbering the other's — and a player live on both platforms gets a row
     for each. Backs the ``stream_live`` flag on the standings row.
 
-    Keyed on ``tournament_player_id`` rather than ``profile_id`` so a
-    placeholder roster row (``profile_id IS NULL``, set since the unify
+    Keyed on ``tournament_player_id`` rather than ``profile_id`` so an
+    unlinked roster row (``profile_id IS NULL``, allowed since the unify
     migration) can still be reported as live: every roster entry has a
-    stable surrogate id, polled or not. The FK cascades on delete so
+    stable surrogate id, linked or not. The FK cascades on delete so
     removing a roster row tears down any live-stream snapshot for it.
     """
 

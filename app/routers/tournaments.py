@@ -488,9 +488,9 @@ async def _team_by_tournament_player(
     """Map each teamed roster row to its team within the tournament.
 
     Keyed on ``tournament_player_id`` — the surrogate ``team_members``
-    already keys on (#181) and every standings row carries (#184) — so a
-    *placeholder* member (a roster row whose ``profile_id`` hasn't minted
-    yet) surfaces its team like a polled one. Keying on ``profile_id``
+    already keys on (#181) and every standings row carries (#184) — so an
+    *unlinked* member (a roster row with no ``profile_id`` yet) surfaces
+    its team like a linked one. Keying on ``profile_id``
     instead stranded such members at ``team = null`` even when rostered on
     a team (#187): the join back to ``TournamentPlayer`` and its
     ``profile_id IS NOT NULL`` filter both dropped them.
@@ -538,22 +538,23 @@ async def get_standings(
     tournament: Tournament = Depends(get_tournament),
     session: AsyncSession = Depends(get_async_session),
 ) -> ListEnvelope[StandingRow]:
-    """The tournament's roster — polled identities ranked, placeholders at tail.
+    """The tournament's roster — rated rows ranked, then every other row by name.
 
     One query over ``tournament_players`` left-joined to ``Player`` (the
-    polled identity, when one exists) and ``PlayerRating`` (when the
-    polled identity has a rating on the tournament's leaderboard). Three
-    row shapes fall out of the same SELECT, ordered by:
+    polled identity, when one is linked) and ``PlayerRating`` (when that
+    identity has a rating on the tournament's leaderboard), ordered by:
 
-    1. ranked polled rows first, by current_rating DESC (NULLS LAST);
-    2. unrated polled rows next, by profile_id ASC;
-    3. placeholder rows last, by name ASC.
+    1. rated rows first, by current_rating DESC (NULLS LAST);
+    2. then every unrated row — linked or not — by ``name`` ASC.
+
+    (#187 unified the old three-tier sort that special-cased an unlinked
+    tail; ``name`` is NOT NULL, so it's the sole display-order key.)
 
     The leaderboard filter lives in the join condition, not the WHERE
     clause — putting it in WHERE would re-filter the outer-join right
-    back to inner-join behaviour. The outer filter keeps a real entry
+    back to inner-join behaviour. The outer filter keeps a linked entry
     visible only once its ``Player`` row has been polled (no half-state
-    where a newly-added profile_id surfaces without an alias).
+    where a newly-linked profile_id surfaces without an alias).
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -569,8 +570,8 @@ async def get_standings(
         )
         .where(
             TournamentPlayer.tournament_id == tournament.id,
-            # Polled-row visibility gate (see docstring): a real entry
-            # only surfaces once its ``Player`` row exists. Placeholder
+            # Linked-row visibility gate (see docstring): a linked entry
+            # only surfaces once its ``Player`` row exists. Unlinked
             # rows pass through this OR via the right disjunct.
             or_(Player.profile_id.is_not(None), TournamentPlayer.profile_id.is_(None)),
         )
@@ -811,7 +812,7 @@ async def get_team_standings(
     # using the same helper the per-player ``/standings`` endpoint
     # uses. Sharing the helper is why a member's ``in_match`` here
     # matches their standings row within the same poll cycle — both
-    # read from the same snapshot. Placeholders (no profile_id) can't
+    # read from the same snapshot. Unlinked rows (no profile_id) can't
     # be in a live match yet.
     live_match_ids = await _live_match_by_profile(
         session, [row.profile_id for row in member_rows if row.profile_id is not None]
@@ -835,7 +836,7 @@ async def get_team_standings(
             TeamMemberRead(
                 tournament_player_id=tournament_player_id,
                 profile_id=profile_id,
-                # Polled identities prefer ``Player.alias``; placeholders
+                # Polled identities prefer ``Player.alias``; unlinked rows
                 # fall back to the roster row's organizer-set ``name``.
                 alias=alias if alias is not None else roster_name,
                 country=country,
