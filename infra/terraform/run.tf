@@ -31,31 +31,41 @@ resource "google_cloud_run_v2_service" "api" {
     service_account = google_service_account.cloud_run.email
 
     # SSE connections (`GET /v1/stream`) are long-lived. The timeout is the
-    # hard ceiling before Cloud Run recycles a request; at the cap (3600s)
-    # an idle stream lives ~1h, then EventSource reconnects transparently.
-    # Normal REST handlers finish in ms — the high ceiling never bites them.
-    timeout = "3600s"
+    # hard ceiling before Cloud Run recycles a request; EventSource then
+    # reconnects transparently. Dropped 3600s -> 600s: behind Cloudflare +
+    # Cloud Run a closed browser tab's disconnect often isn't propagated to
+    # the origin (the proxy keeps the upstream warm, so the handler's
+    # `is_disconnected()` never fires), so a dead tab's stream lingers — and
+    # each lingering stream pins a Cloud Run instance, which holds a DB pool,
+    # inflating num_backends (observed: ~30 real users but 150+ backends).
+    # A 10-min ceiling caps that leak — dead tabs recycle in <=10min instead
+    # of <=1h, so idle instances scale down and release pools far sooner.
+    # Live viewers just reconnect every 10min (transparent; the nudge refetch
+    # is CDN-coalesced). Normal REST handlers finish in ms — never bitten.
+    timeout = "600s"
 
     # Each open SSE connection holds a request slot for its whole lifetime.
     # The default concurrency of 80 would cap concurrent viewers per
-    # instance at 80; 1200 (with the `max_instance_count = 22` scaling
-    # below) gives 26,400 concurrent streams' worth of capacity.
+    # instance at 80; 1000 (with the `max_instance_count = 22` scaling
+    # below) gives 22,000 concurrent streams' worth of capacity.
     #
-    # Raised 800 -> 1200 in #197. Unlike adding instances, concurrency adds
-    # NO database connections (those scale with instance count x pool, not
-    # with concurrency), so it's the cheap seat-multiplier once memory
-    # holds — the lever the 1Gi limit below was provisioned for in #84.
-    # Memory at 1200/instance under sustained SSE load is validated by a
-    # monitored rollout rather than a synthetic test: the
-    # `sse_subscriber_count` metric (#194) plus per-instance memory
-    # utilization are watched at the next live match, with a revert to 800
-    # ready if either climbs unsafe.
-    max_instance_request_concurrency = 1200
+    # Raised 800 -> 1000 in #197. 1000 is Cloud Run's hard per-instance
+    # concurrency ceiling — the issue's 1200 target is rejected by the API
+    # ("must be between 0 and 1000"), so 1000 is as far as this lever goes.
+    # Unlike adding instances, concurrency adds NO database connections
+    # (those scale with instance count x pool, not with concurrency), so
+    # it's the cheap seat-multiplier once memory holds — the lever the 1Gi
+    # limit below was provisioned for in #84. Memory at 1000/instance under
+    # sustained SSE load is validated by a monitored rollout rather than a
+    # synthetic test: the `sse_subscriber_count` metric (#194) plus
+    # per-instance memory utilization are watched at the next live match,
+    # with a revert to 800 ready if either climbs unsafe.
+    max_instance_request_concurrency = 1000
 
     scaling {
       # min=1 keeps a warm instance so the LISTEN/NOTIFY connection stays
-      # open continuously. max=22 (#195) with concurrency=1200 gives
-      # 26,400 concurrent SSE seats (~1.65x the saturated launch peak).
+      # open continuously. max=22 (#195) with concurrency=1000 gives
+      # 22,000 concurrent SSE seats (~1.375x the saturated launch peak).
       #
       # 22 is the connection-budget ceiling WITHOUT pooling. Each api
       # instance holds 4 DB connections (3 pool + 1 LISTEN); a deploy
