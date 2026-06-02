@@ -310,3 +310,4 @@ Refining #177's background leaderboards loader: it fast-retried every 60s while 
 | Add the Cloudflare Cache Rule (cookie-agnostic cache key + bypass on `criticalbit_access`) for robust coalescing + admin read-after-write freshness | infra | TODO (low-urgency — #176's `Vary` drop already restored coalescing) | [#178](https://github.com/ag-tech-group/aoe2-live-standings-api/issues/178) |
 | Consider PgBouncer (or Cloud SQL connection pooling) if `maxScale` grows past the current 200-connection headroom | infra | future | — |
 | Alerting: Cloud SQL `num_backends` vs cap; 429 rate; Cloud Run revision count per service | infra | TODO | — |
+| Adopt a deploy-freeze around marquee matches (no API deploys at peak) | infra | DONE | [docs/deploy-freeze.md](deploy-freeze.md) ([#198](https://github.com/ag-tech-group/aoe2-live-standings-api/issues/198)) |
