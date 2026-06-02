@@ -18,6 +18,7 @@ from app.logging import setup_logging
 from app.middleware.idempotency import IdempotencyMiddleware
 from app.poller.lifespan import lifespan
 from app.routers import (
+    fan_votes_router,
     leaderboards_router,
     live_router,
     matches_router,
@@ -195,6 +196,7 @@ ROUTERS = (
     leaderboards_router,
     tournaments_router,
     teams_router,
+    fan_votes_router,
     owners_router,
     matches_router,
     live_router,

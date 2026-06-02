@@ -1,4 +1,11 @@
 from app.schemas.common import ListEnvelope, compute_last_polled_at
+from app.schemas.fan_vote import (
+    FanVoteAllocation,
+    FanVoteBallotRead,
+    FanVoteBallotSubmit,
+    FanVoteTallies,
+    FanVoteTallyEntry,
+)
 from app.schemas.leaderboard import (
     LeaderboardRead,
     PlayerProgression,
@@ -25,6 +32,7 @@ from app.schemas.team import (
     TeamUpdate,
 )
 from app.schemas.tournament import (
+    FanVoteBudgets,
     TournamentCreate,
     TournamentOwnerCreate,
     TournamentOwnerRead,
@@ -33,6 +41,12 @@ from app.schemas.tournament import (
 )
 
 __all__ = [
+    "FanVoteAllocation",
+    "FanVoteBallotRead",
+    "FanVoteBallotSubmit",
+    "FanVoteBudgets",
+    "FanVoteTallies",
+    "FanVoteTallyEntry",
     "LeaderboardRead",
     "ListEnvelope",
     "MatchDetail",

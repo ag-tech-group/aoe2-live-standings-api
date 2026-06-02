@@ -57,6 +57,14 @@ class Tournament(Base):
     # An empty list (the default) means host-live detection is off and
     # `host_stream_live` always reports false.
     host_stream_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Community Hype voting (#209): the size of each voter's wallet, per
+    # category. The server-authoritative cap the PUT validates ballots
+    # against and the FE renders the wallet from (surfaced as the nested
+    # ``fan_vote_budgets`` on the tournament read). Per-tournament config so
+    # different events can tune them; the server_default backfills existing
+    # rows and matches the launch event (100 Hype each, players and teams).
+    fan_vote_budget_players: Mapped[int] = mapped_column(server_default=text("100"))
+    fan_vote_budget_teams: Mapped[int] = mapped_column(server_default=text("100"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

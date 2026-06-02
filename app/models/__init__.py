@@ -1,3 +1,4 @@
+from app.models.fan_vote import FanAllocation, FanVoteCategory
 from app.models.idempotency import IdempotencyKey
 from app.models.leaderboard import Leaderboard
 from app.models.match import LiveMatchPlayer, Match, MatchOutcome, MatchPlayer, MatchState
@@ -12,6 +13,8 @@ from app.models.tournament import (
 )
 
 __all__ = [
+    "FanAllocation",
+    "FanVoteCategory",
     "HostLiveStream",
     "IdempotencyKey",
     "Leaderboard",

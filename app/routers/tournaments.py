@@ -37,6 +37,7 @@ from app.models import (
     TournamentPlayer,
 )
 from app.schemas import (
+    FanVoteBudgets,
     ListEnvelope,
     PlayerProgression,
     RatingPoint,
@@ -186,6 +187,8 @@ async def create_tournament(
         grand_finals_date=payload.grand_finals_date,
         prize_pool_cents=payload.prize_pool_cents,
         host_stream_urls=payload.host_stream_urls,
+        fan_vote_budget_players=payload.fan_vote_budget_players,
+        fan_vote_budget_teams=payload.fan_vote_budget_teams,
     )
     tournament.owners = [TournamentOwner(user_id=user_id)]
     session.add(tournament)
@@ -351,13 +354,22 @@ async def _live_match_by_profile(
 def _serialize_tournament(
     tournament: Tournament, live_host_tournaments: set[int]
 ) -> TournamentRead:
-    """Build a TournamentRead, splicing in the derived ``host_stream_live``.
+    """Build a TournamentRead, splicing in derived/nested presentation fields.
 
-    The flag lives outside the ORM model — it's a per-request fold from
-    the broadcast-live snapshot. Attaching it as a transient attribute
-    keeps ``from_attributes=True`` on the schema working uniformly.
+    Two fields don't map 1:1 from a column, so they're attached as
+    transient attributes before validation (``from_attributes=True`` then
+    reads them uniformly):
+
+    - ``host_stream_live`` — a per-request fold from the broadcast-live
+      snapshot.
+    - ``fan_vote_budgets`` — the two ``fan_vote_budget_*`` columns folded
+      into the nested object the FE consumes (#209).
     """
     tournament.host_stream_live = tournament.id in live_host_tournaments
+    tournament.fan_vote_budgets = FanVoteBudgets(
+        players=tournament.fan_vote_budget_players,
+        teams=tournament.fan_vote_budget_teams,
+    )
     return TournamentRead.model_validate(tournament)
 
 

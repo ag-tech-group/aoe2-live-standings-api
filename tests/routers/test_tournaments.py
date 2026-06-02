@@ -115,6 +115,26 @@ class TestGetTournamentDetail:
         # No URLs configured → never live.
         assert body["host_stream_live"] is False
 
+    async def test_fan_vote_budgets_default_to_100(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # #209: the detail read exposes the per-category Hype wallet so the
+        # FE renders it authoritatively. Default event budget is 100/100.
+        session.add(make_tournament("cup"))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["fan_vote_budgets"] == {"players": 100, "teams": 100}
+
+    async def test_fan_vote_budgets_reflect_custom_values(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add(make_tournament("cup", fan_vote_budget_players=250, fan_vote_budget_teams=0))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["fan_vote_budgets"] == {"players": 250, "teams": 0}
+
     async def test_host_stream_live_reflects_host_live_streams_table(
         self, client: AsyncClient, session: AsyncSession
     ):
@@ -1320,6 +1340,49 @@ class TestUpdateTournament:
         response = await client.patch("/v1/tournaments/cup", json={"prize_pool_cents": -1})
         assert response.status_code == 422
 
+    async def test_can_update_fan_vote_budgets(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={"fan_vote_budget_players": 300},
+        )
+        assert response.status_code == 200
+        # The edited category changes; the other keeps its default.
+        assert response.json()["fan_vote_budgets"] == {"players": 300, "teams": 100}
+
+    async def test_explicit_null_fan_vote_budget_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The columns are non-null; an explicit null is rejected, mirroring
+        # name / leaderboard_id (unlike the nullable dates / prize pool).
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={"fan_vote_budget_teams": None},
+        )
+        assert response.status_code == 422
+
+    async def test_over_max_fan_vote_budget_on_update_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={"fan_vote_budget_players": 100_001},
+        )
+        assert response.status_code == 422
+
     async def test_can_set_host_stream_urls(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
@@ -1536,6 +1599,41 @@ class TestCreateTournament:
                 **self._BODY,
                 "host_stream_urls": [f"https://twitch.tv/h{i}" for i in range(6)],
             },
+        )
+        assert response.status_code == 422
+
+    async def test_fan_vote_budgets_default_to_100_on_create(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 201
+        assert response.json()["fan_vote_budgets"] == {"players": 100, "teams": 100}
+
+    async def test_custom_fan_vote_budgets_round_trip(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={**self._BODY, "fan_vote_budget_players": 500, "fan_vote_budget_teams": 0},
+        )
+        assert response.status_code == 201
+        assert response.json()["fan_vote_budgets"] == {"players": 500, "teams": 0}
+
+    async def test_negative_fan_vote_budget_on_create_returns_422(
+        self, client: AsyncClient, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={**self._BODY, "fan_vote_budget_players": -1},
+        )
+        assert response.status_code == 422
+
+    async def test_over_max_fan_vote_budget_on_create_returns_422(
+        self, client: AsyncClient, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={**self._BODY, "fan_vote_budget_teams": 100_001},
         )
         assert response.status_code == 422
 

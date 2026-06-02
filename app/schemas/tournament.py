@@ -14,6 +14,24 @@ _MAX_HOST_STREAM_URLS = 5
 # keeps the JSON payload tight.
 _MAX_HOST_STREAM_URL_LENGTH = 256
 
+# Sanity ceiling on a Hype wallet (#209). The launch event uses 100; the
+# cap is generous headroom for other events while bounding a single
+# voter's per-target influence and guarding against typo'd giant values.
+# A budget of 0 disables a category (e.g. teams on a 1v1 event).
+_MAX_FAN_VOTE_BUDGET = 100_000
+
+
+class FanVoteBudgets(BaseModel):
+    """Per-category Hype wallet sizes for a tournament (#209).
+
+    The server-authoritative cap each voter may spend per category. The FE
+    renders the wallet from these values; the ``PUT /fan-votes`` endpoint
+    validates a submitted ballot's per-category coin sum against them.
+    """
+
+    players: int
+    teams: int
+
 
 def _validated_host_stream_urls(urls: list[str]) -> list[str]:
     """Each entry must be a non-empty string within the length cap.
@@ -58,6 +76,10 @@ class TournamentRead(BaseModel):
     # Derived: any host channel currently broadcasting on any platform.
     # False when no host URLs are configured.
     host_stream_live: bool = False
+    # Community Hype voting wallet sizes (#209) — the per-category budgets
+    # the FE renders and the PUT validates against. The router splices this
+    # in from the two ``fan_vote_budget_*`` columns (see _serialize_tournament).
+    fan_vote_budgets: FanVoteBudgets
     created_at: datetime
 
 
@@ -86,6 +108,11 @@ class TournamentCreate(BaseModel):
         default_factory=list,
         max_length=_MAX_HOST_STREAM_URLS,
     )
+    # Hype voting wallet sizes (#209). Default to the launch event's 100/100;
+    # an organizer may set any value in [0, _MAX_FAN_VOTE_BUDGET] (0 disables
+    # a category). Backs the non-null columns, so no explicit null.
+    fan_vote_budget_players: int = Field(default=100, ge=0, le=_MAX_FAN_VOTE_BUDGET)
+    fan_vote_budget_teams: int = Field(default=100, ge=0, le=_MAX_FAN_VOTE_BUDGET)
 
     @field_validator("slug")
     @classmethod
@@ -123,8 +150,18 @@ class TournamentUpdate(BaseModel):
     grand_finals_date: datetime | None = None
     prize_pool_cents: int | None = Field(default=None, ge=0)
     host_stream_urls: list[str] | None = Field(default=None, max_length=_MAX_HOST_STREAM_URLS)
+    # Hype voting wallet sizes (#209). Omit to leave unchanged; explicit
+    # null is rejected (the columns are non-null). See _MAX_FAN_VOTE_BUDGET.
+    fan_vote_budget_players: int | None = Field(default=None, ge=0, le=_MAX_FAN_VOTE_BUDGET)
+    fan_vote_budget_teams: int | None = Field(default=None, ge=0, le=_MAX_FAN_VOTE_BUDGET)
 
-    @field_validator("name", "leaderboard_id", "host_stream_urls")
+    @field_validator(
+        "name",
+        "leaderboard_id",
+        "host_stream_urls",
+        "fan_vote_budget_players",
+        "fan_vote_budget_teams",
+    )
     @classmethod
     def _reject_explicit_null(cls, value: object) -> object:
         # A field-validator runs only for fields actually present in the

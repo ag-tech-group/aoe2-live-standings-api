@@ -2,11 +2,15 @@
 
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import (
+    FanAllocation,
+    FanVoteCategory,
     Match,
     MatchOutcome,
     MatchPlayer,
@@ -236,3 +240,126 @@ class TestTournament:
 
         remaining = (await session.execute(select(TournamentPlayer))).scalars().all()
         assert remaining == []
+
+    async def test_fan_vote_budgets_default_to_100(self, session: AsyncSession):
+        # Created without budgets, the server_default backfills both to 100
+        # (the launch event's wallet) — #209.
+        session.add(Tournament(slug="defaults", name="Defaults", leaderboard_id=3))
+        await session.commit()
+
+        loaded = (
+            await session.execute(select(Tournament).where(Tournament.slug == "defaults"))
+        ).scalar_one()
+        assert loaded.fan_vote_budget_players == 100
+        assert loaded.fan_vote_budget_teams == 100
+
+
+class TestFanAllocation:
+    """The Hype voting ballot table (#209)."""
+
+    async def _tournament(self, session: AsyncSession) -> Tournament:
+        tournament = Tournament(slug="hype", name="Hype", leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        return tournament
+
+    async def test_create_and_roundtrip_category_enum(self, session: AsyncSession):
+        tournament = await self._tournament(session)
+        session.add(
+            FanAllocation(
+                tournament_id=tournament.id,
+                voter_token="voter-abc",
+                category=FanVoteCategory.PLAYERS,
+                target_id=42,
+                coins=60,
+                ip_hash="deadbeef",
+            )
+        )
+        await session.commit()
+
+        loaded = (await session.execute(select(FanAllocation))).scalar_one()
+        assert loaded.category == FanVoteCategory.PLAYERS
+        assert loaded.target_id == 42
+        assert loaded.coins == 60
+        assert loaded.ip_hash == "deadbeef"
+        # Timestamps stamped by the server defaults.
+        assert loaded.created_at is not None
+        assert loaded.updated_at is not None
+
+    async def test_ip_hash_is_optional(self, session: AsyncSession):
+        tournament = await self._tournament(session)
+        session.add(
+            FanAllocation(
+                tournament_id=tournament.id,
+                voter_token="voter-abc",
+                category=FanVoteCategory.TEAMS,
+                target_id=7,
+                coins=0,
+            )
+        )
+        await session.commit()
+
+        loaded = (await session.execute(select(FanAllocation))).scalar_one()
+        assert loaded.ip_hash is None
+        # coins=0 is allowed (clears a target without removing the row).
+        assert loaded.coins == 0
+
+    async def test_unique_voter_target_per_category(self, session: AsyncSession):
+        # The key the PUT upserts against: one row per (voter, category,
+        # target). A second insert with the same tuple violates it.
+        tournament = await self._tournament(session)
+        for _ in range(2):
+            session.add(
+                FanAllocation(
+                    tournament_id=tournament.id,
+                    voter_token="voter-abc",
+                    category=FanVoteCategory.PLAYERS,
+                    target_id=42,
+                    coins=10,
+                )
+            )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+    async def test_same_target_different_category_coexists(self, session: AsyncSession):
+        # players:42 and teams:42 are distinct ballots — the unique key
+        # includes category, so a player id and a team id may collide.
+        tournament = await self._tournament(session)
+        session.add_all(
+            [
+                FanAllocation(
+                    tournament_id=tournament.id,
+                    voter_token="voter-abc",
+                    category=FanVoteCategory.PLAYERS,
+                    target_id=42,
+                    coins=10,
+                ),
+                FanAllocation(
+                    tournament_id=tournament.id,
+                    voter_token="voter-abc",
+                    category=FanVoteCategory.TEAMS,
+                    target_id=42,
+                    coins=20,
+                ),
+            ]
+        )
+        await session.commit()
+
+        rows = (await session.execute(select(FanAllocation))).scalars().all()
+        assert len(rows) == 2
+
+    async def test_coins_must_be_non_negative(self, session: AsyncSession):
+        tournament = await self._tournament(session)
+        session.add(
+            FanAllocation(
+                tournament_id=tournament.id,
+                voter_token="voter-abc",
+                category=FanVoteCategory.PLAYERS,
+                target_id=42,
+                coins=-1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
