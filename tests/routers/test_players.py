@@ -1,4 +1,9 @@
-"""Player + roster endpoints under /v1/tournaments/{slug}/players."""
+"""Player + roster endpoints under /v1/tournaments/{slug}/players.
+
+Roster rows are one first-class entity (#187): every row has a ``name`` and
+an optional ``profile_id`` link. List / detail / PATCH / DELETE all address
+a row by its surrogate ``tournament_player_id``.
+"""
 
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -43,6 +48,9 @@ class TestListPlayers:
         payload = (await client.get("/v1/tournaments/cup/players")).json()
         aliases = [p["alias"] for p in payload["items"]]
         assert aliases == ["AB | TaToH", "VIT | Hera"]
+        # A linked row whose name predates the backfill surfaces `name`
+        # falling back to the polled alias.
+        assert [p["name"] for p in payload["items"]] == ["AB | TaToH", "VIT | Hera"]
         assert payload["last_polled_at"] is not None
         hera_payload = next(p for p in payload["items"] if p["profile_id"] == 199325)
         assert hera_payload["ratings"][0]["current_rating"] == 2788
@@ -132,13 +140,13 @@ class TestListPlayers:
     async def test_roster_exposes_tournament_player_id(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # Every roster item — polled and placeholder — carries its
+        # Every roster item — linked and unlinked — carries its
         # tournament_player_id (#167), the key the team-management endpoints
-        # take. The FE sources it here to assign players (including
-        # placeholders) to teams.
-        session.add(make_player(1, alias="polled"))
+        # and PATCH/DELETE take. The FE sources it here to assign players
+        # (including unlinked ones) to teams.
+        session.add(make_player(1, alias="linked"))
         tournament = make_tournament("cup", profile_ids=[1])
-        tournament.tracked_players.append(TournamentPlayer(name="placeholder"))
+        tournament.tracked_players.append(TournamentPlayer(name="unlinked"))
         session.add(tournament)
         await session.commit()
 
@@ -153,19 +161,19 @@ class TestListPlayers:
         items = (await client.get("/v1/tournaments/cup/players")).json()["items"]
         assert all(isinstance(item["tournament_player_id"], int) for item in items)
         assert {item["tournament_player_id"] for item in items} == expected_ids
-        # Placeholder row: profile_id null, but the management key is present.
-        placeholder = next(item for item in items if item["profile_id"] is None)
-        assert isinstance(placeholder["tournament_player_id"], int)
+        # Unlinked row: profile_id null, but the addressing key is present.
+        unlinked = next(item for item in items if item["profile_id"] is None)
+        assert isinstance(unlinked["tournament_player_id"], int)
 
 
 class TestGetPlayer:
-    async def test_profile_outside_roster_returns_404(
+    async def test_unknown_tournament_player_id_returns_404(
         self, client: AsyncClient, session: AsyncSession
     ):
-        session.add(make_player(2, alias="outsider"))
+        session.add(make_player(1, alias="solo"))
         session.add(make_tournament("cup", profile_ids=[1]))
         await session.commit()
-        assert (await client.get("/v1/tournaments/cup/players/2")).status_code == 404
+        assert (await client.get("/v1/tournaments/cup/players/99999")).status_code == 404
 
     async def test_returns_player_with_ratings_and_recent_matches(
         self, client: AsyncClient, session: AsyncSession
@@ -177,11 +185,15 @@ class TestGetPlayer:
             match = make_match(match_id)
             match.players.append(make_match_player(match_id, profile_id=1))
             session.add(match)
-        session.add(make_tournament("cup", profile_ids=[1]))
+        tournament = make_tournament("cup", profile_ids=[1])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
-        payload = (await client.get("/v1/tournaments/cup/players/1")).json()
+        payload = (await client.get(f"/v1/tournaments/cup/players/{tpid}")).json()
+        assert payload["profile_id"] == 1
         assert payload["alias"] == "Hera"
+        assert payload["name"] == "Hera"
         assert payload["last_polled_at"] is not None
         assert len(payload["ratings"]) == 1
         assert len(payload["recent_matches"]) == 3
@@ -195,11 +207,13 @@ class TestGetPlayer:
             match = make_match(100 + i)
             match.players.append(make_match_player(100 + i, profile_id=1))
             session.add(match)
-        session.add(make_tournament("cup", profile_ids=[1]))
+        tournament = make_tournament("cup", profile_ids=[1])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
         payload = (
-            await client.get("/v1/tournaments/cup/players/1", params={"match_limit": 2})
+            await client.get(f"/v1/tournaments/cup/players/{tpid}", params={"match_limit": 2})
         ).json()
         assert len(payload["recent_matches"]) == 2
 
@@ -208,6 +222,7 @@ class TestGetPlayer:
     ):
         session.add(make_tournament("cup", profile_ids=[1]))
         await session.commit()
+        # Query validation fires before the lookup, so any id 422s here.
         response = await client.get("/v1/tournaments/cup/players/1", params={"match_limit": 999})
         assert response.status_code == 422
 
@@ -218,24 +233,54 @@ class TestGetPlayer:
         tournament.tracked_players[0].presentation = {"bio": "AoE2"}
         session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
-        payload = (await client.get("/v1/tournaments/cup/players/1")).json()
+        payload = (await client.get(f"/v1/tournaments/cup/players/{tpid}")).json()
         assert payload["presentation"] == {"bio": "AoE2"}
+
+    async def test_detail_for_unlinked_returns_unified_shape(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # An unlinked entry is addressable by tournament_player_id (#187) and
+        # returns the unified shape with empty polled enrichment — no 404.
+        tournament = make_tournament("cup")
+        unlinked = TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        tournament.tracked_players.append(unlinked)
+        session.add(tournament)
+        await session.commit()
+        tpid = unlinked.id
+
+        response = await client.get(f"/v1/tournaments/cup/players/{tpid}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["profile_id"] is None
+        assert payload["name"] == "iyouxin"
+        assert payload["alias"] == "iyouxin"
+        assert payload["ratings"] == []
+        assert payload["recent_matches"] == []
+        assert payload["last_polled_at"] is None
+        assert payload["presentation"] == {"flag": "🇺🇦"}
 
 
 class TestAddRosterPlayer:
     """POST /v1/tournaments/{slug}/players — owner-gated roster add."""
 
-    async def test_owner_adds_player(self, client: AsyncClient, session: AsyncSession, auth_as):
+    async def test_owner_adds_linked_player(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
-        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 199325})
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "Hera", "profile_id": 199325},
+        )
         assert response.status_code == 204
 
-        roster = (await session.execute(select(TournamentPlayer.profile_id))).scalars().all()
-        assert roster == [199325]
+        row = (await session.execute(select(TournamentPlayer))).scalar_one()
+        assert row.profile_id == 199325
+        assert row.name == "Hera"
 
     async def test_added_player_is_visible_to_the_poller(
         self, client: AsyncClient, session: AsyncSession, auth_as
@@ -246,18 +291,32 @@ class TestAddRosterPlayer:
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
-        await client.post("/v1/tournaments/cup/players", json={"profile_id": 555})
+        await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "newbie", "profile_id": 555},
+        )
         assert 555 in await get_tracked_profile_ids(session)
 
-    async def test_adding_a_duplicate_is_409(
+    async def test_adding_a_duplicate_profile_id_is_409(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
-        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 199325})
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "dupe", "profile_id": 199325},
+        )
         assert response.status_code == 409
+
+    async def test_missing_name_is_422(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 199325})
+        assert response.status_code == 422
 
     async def test_non_positive_profile_id_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
@@ -266,19 +325,24 @@ class TestAddRosterPlayer:
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
-        response = await client.post("/v1/tournaments/cup/players", json={"profile_id": 0})
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "x", "profile_id": 0},
+        )
         assert response.status_code == 422
 
 
 class TestRemoveRosterPlayer:
-    """DELETE /v1/tournaments/{slug}/players/{profile_id} — owner-gated."""
+    """DELETE /v1/tournaments/{slug}/players/{tournament_player_id} — owner-gated."""
 
     async def test_owner_removes_player(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
-        response = await client.delete("/v1/tournaments/cup/players/199325")
+        response = await client.delete(f"/v1/tournaments/cup/players/{tpid}")
         assert response.status_code == 204
         assert (await session.execute(select(TournamentPlayer))).scalars().all() == []
 
@@ -289,22 +353,24 @@ class TestRemoveRosterPlayer:
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
-        response = await client.delete("/v1/tournaments/cup/players/199325")
+        response = await client.delete("/v1/tournaments/cup/players/99999")
         assert response.status_code == 404
 
 
 class TestUpdateRosterPlayer:
-    """PATCH /v1/tournaments/{slug}/players/{profile_id} — owner-gated presentation bag."""
+    """PATCH /v1/tournaments/{slug}/players/{tournament_player_id} — owner-gated."""
 
     async def test_owner_sets_presentation(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"presentation": {"streamUrls": ["https://twitch.tv/hera"], "bio": "GOAT"}},
         )
         assert response.status_code == 204
@@ -323,15 +389,17 @@ class TestUpdateRosterPlayer:
         # The PATCH replaces the entire object — keys absent from the new
         # body are dropped, so an empty object clears the bag.
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
         await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"presentation": {"bio": "old", "extra": 1}},
         )
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"presentation": {"bio": "new"}},
         )
         assert response.status_code == 204
@@ -348,11 +416,13 @@ class TestUpdateRosterPlayer:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"presentation": "not-an-object"},
         )
         assert response.status_code == 422
@@ -361,16 +431,18 @@ class TestUpdateRosterPlayer:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"presentation": {"bio": "x" * 9000}},
         )
         assert response.status_code == 422
 
-    async def test_profile_not_on_roster_is_404(
+    async def test_player_not_on_roster_is_404(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -378,27 +450,29 @@ class TestUpdateRosterPlayer:
         await session.commit()
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            "/v1/tournaments/cup/players/99999",
             json={"presentation": {"bio": "hi"}},
         )
         assert response.status_code == 404
 
     async def test_non_owner_is_403(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as("11111111-1111-1111-1111-111111111111")
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"presentation": {"bio": "hi"}},
         )
         assert response.status_code == 403
 
 
-class TestPlaceholderRosterCRUD:
-    """Placeholder lifecycle in the unified roster: add / list / promote / delete."""
+class TestUnlinkedRosterCRUD:
+    """Unified roster lifecycle: add (with/without link), list, link, delete."""
 
-    async def test_add_placeholder_with_name(
+    async def test_add_unlinked_with_name_only(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -416,20 +490,25 @@ class TestPlaceholderRosterCRUD:
         assert row.name == "iyouxin"
         assert row.presentation == {"flag": "🇺🇦"}
 
-    async def test_add_with_both_profile_id_and_name_is_422(
+    async def test_add_with_both_profile_id_and_name_succeeds(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
+        # The XOR is gone (#187): a linked entry with a display name is the
+        # normal shape, not a 422.
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
         response = await client.post(
             "/v1/tournaments/cup/players",
-            json={"profile_id": 199325, "name": "iyouxin"},
+            json={"profile_id": 199325, "name": "Hera"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 204
+        row = (await session.execute(select(TournamentPlayer))).scalar_one()
+        assert row.profile_id == 199325
+        assert row.name == "Hera"
 
-    async def test_add_with_neither_profile_id_nor_name_is_422(
+    async def test_add_without_name_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -442,8 +521,8 @@ class TestPlaceholderRosterCRUD:
     async def test_add_with_numeric_name_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # The polymorphic URL dispatch needs names to be non-numeric so
-        # `/players/12345` is unambiguously a profile_id.
+        # Transitional guard (#187 Phase 3 retires it): a purely numeric
+        # display name can't be confused with the surrogate id.
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
@@ -451,7 +530,7 @@ class TestPlaceholderRosterCRUD:
         response = await client.post("/v1/tournaments/cup/players", json={"name": "12345"})
         assert response.status_code == 422
 
-    async def test_add_duplicate_placeholder_name_is_409(
+    async def test_add_duplicate_name_is_409(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -463,10 +542,10 @@ class TestPlaceholderRosterCRUD:
         response = await client.post("/v1/tournaments/cup/players", json={"name": "iyouxin"})
         assert response.status_code == 409
 
-    async def test_list_includes_placeholders_interleaved_by_alpha(
+    async def test_list_interleaves_unlinked_by_alpha(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # The unified list sorts by display name regardless of row type.
+        # The unified list sorts by display name regardless of link state.
         for profile_id, alias in ((1, "Marco"), (2, "Zeke")):
             session.add(make_player(profile_id, alias=alias))
         tournament = make_tournament("cup", profile_ids=[1, 2])
@@ -478,24 +557,26 @@ class TestPlaceholderRosterCRUD:
         assert [p["alias"] for p in items] == ["Alice", "Marco", "Zeke"]
         alice = next(p for p in items if p["alias"] == "Alice")
         assert alice["profile_id"] is None
+        assert alice["name"] == "Alice"
         assert alice["updated_at"] is None
         assert alice["ratings"] == []
 
-    async def test_patch_placeholder_promotes_when_profile_id_set(
+    async def test_patch_links_profile_id_keeping_name(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # PATCH /players/iyouxin with profile_id atomically swaps the
-        # row's identity from placeholder → polled and clears `name`.
+        # PATCH with profile_id LINKS an unlinked entry to a polled identity
+        # (#187): additive — profile_id is set and the name is KEPT (the old
+        # promotion cleared name; it no longer does).
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.tracked_players.append(
-            TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
-        )
+        unlinked = TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        tournament.tracked_players.append(unlinked)
         session.add(tournament)
         await session.commit()
+        tpid = unlinked.id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/iyouxin",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"profile_id": 12345},
         )
         assert response.status_code == 204
@@ -503,23 +584,22 @@ class TestPlaceholderRosterCRUD:
         session.expire_all()
         row = (await session.execute(select(TournamentPlayer))).scalar_one()
         assert row.profile_id == 12345
-        assert row.name is None
-        # Presentation carries through unchanged.
+        assert row.name == "iyouxin"  # kept, not cleared
         assert row.presentation == {"flag": "🇺🇦"}
 
-    async def test_patch_promote_carries_new_presentation_when_supplied(
+    async def test_patch_link_carries_new_presentation_when_supplied(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.tracked_players.append(
-            TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
-        )
+        unlinked = TournamentPlayer(name="iyouxin", presentation={"flag": "🇺🇦"})
+        tournament.tracked_players.append(unlinked)
         session.add(tournament)
         await session.commit()
+        tpid = unlinked.id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/iyouxin",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"profile_id": 12345, "presentation": {"bio": "fresh"}},
         )
         assert response.status_code == 204
@@ -527,66 +607,56 @@ class TestPlaceholderRosterCRUD:
         session.expire_all()
         row = (await session.execute(select(TournamentPlayer))).scalar_one()
         assert row.profile_id == 12345
+        assert row.name == "iyouxin"
         assert row.presentation == {"bio": "fresh"}
 
-    async def test_patch_real_player_with_profile_id_is_422(
+    async def test_patch_already_linked_with_profile_id_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # profile_id is immutable on a polled-identity row; promotion only
-        # applies to placeholders.
+        # profile_id is immutable once linked.
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID]))
+        tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
+        session.add(tournament)
         await session.commit()
+        tpid = tournament.tracked_players[0].id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/199325",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"profile_id": 12345},
         )
         assert response.status_code == 422
 
-    async def test_promote_to_existing_profile_id_is_409(
+    async def test_link_to_existing_profile_id_is_409(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", profile_ids=[199325], owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        unlinked = TournamentPlayer(name="iyouxin")
+        tournament.tracked_players.append(unlinked)
         session.add(tournament)
         await session.commit()
+        tpid = unlinked.id
 
         response = await client.patch(
-            "/v1/tournaments/cup/players/iyouxin",
+            f"/v1/tournaments/cup/players/{tpid}",
             json={"profile_id": 199325},
         )
         assert response.status_code == 409
 
-    async def test_delete_placeholder_by_name(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
+    async def test_delete_unlinked_by_id(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
         tournament = make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID])
-        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
+        unlinked = TournamentPlayer(name="iyouxin")
+        tournament.tracked_players.append(unlinked)
         session.add(tournament)
         await session.commit()
+        tpid = unlinked.id
 
-        response = await client.delete("/v1/tournaments/cup/players/iyouxin")
+        response = await client.delete(f"/v1/tournaments/cup/players/{tpid}")
         assert response.status_code == 204
         assert (await session.execute(select(TournamentPlayer))).scalars().all() == []
 
-    async def test_get_player_detail_is_404_for_placeholder(
-        self, client: AsyncClient, session: AsyncSession
-    ):
-        # The detail endpoint is profile_id-only; there's no detail to
-        # show for a placeholder.
-        tournament = make_tournament("cup")
-        tournament.tracked_players.append(TournamentPlayer(name="iyouxin"))
-        session.add(tournament)
-        await session.commit()
-
-        # Numeric paths look up by profile_id; a placeholder won't be found.
-        response = await client.get("/v1/tournaments/cup/players/99999")
-        assert response.status_code == 404
-
-    async def test_placeholder_excluded_from_poller_tracked_ids(
+    async def test_unlinked_excluded_from_poller_tracked_ids(
         self, client: AsyncClient, session: AsyncSession
     ):
         tournament = make_tournament("cup", profile_ids=[199325])

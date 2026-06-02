@@ -2,7 +2,6 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
-    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -78,19 +77,24 @@ class Tournament(Base):
 
 
 class TournamentPlayer(Base):
-    """A roster entry — either a polled identity or an announced placeholder.
+    """A roster entry — one first-class tournament player (#187).
 
-    A row carries EITHER a ``profile_id`` (a real polled identity — the
-    poller fetches its data from worldsedgelink each cycle) OR a ``name``
-    (an announced placeholder whose ``profile_id`` hasn't minted yet —
-    streamers on a host's announced roster who haven't played their first
-    ranked match). XOR enforced at the schema level by a check constraint;
-    the surrogate ``id`` PK lets promotion from placeholder → real player
-    happen via PATCH on a stable URL (the host sets ``profile_id`` and
-    the row's ``name`` is cleared in the same transaction).
+    Every row has a ``name`` (the display label) and MAY also carry a
+    ``profile_id`` linking it to a polled ``Player`` (ratings, country,
+    matches, live status). An unlinked row — a ``name`` with no
+    ``profile_id`` yet, typically a streamer whose account hasn't minted —
+    is fully first-class: addressable and teamable by its surrogate ``id``,
+    just without polled enrichment until it's linked. The surrogate ``id``
+    PK is the identity everything addresses (#167); ``profile_id`` is an
+    optional enrichment link, not an alternate identity (#187 dropped the
+    old ``profile_id`` XOR ``name`` two-class split).
+
+    ``name`` is NULLABLE in the schema only transitionally — the #187 Phase
+    3 contract migration makes it NOT NULL once every serving revision
+    writes it. The application already requires it on create.
 
     No FK to ``players``: a profile is added as *input* to the poller,
-    before any ``Player`` row exists for it; placeholder rows have no
+    before any ``Player`` row exists for it; an unlinked row has no
     ``Player`` at all. Mirrors the FK-free ``profile_id`` on
     ``MatchPlayer`` / ``LiveMatchPlayer``.
     """
@@ -119,20 +123,16 @@ class TournamentPlayer(Base):
     )
 
     __table_args__ = (
-        # Exactly one of profile_id / name is set per row.
-        CheckConstraint(
-            "(profile_id IS NULL) <> (name IS NULL)",
-            name="ck_tournament_players_profile_id_xor_name",
-        ),
-        # Unique within a tournament. Postgres treats NULL as distinct in
-        # UNIQUE, so multiple placeholder rows (NULL profile_id) coexist
-        # and multiple polled rows (NULL name) coexist — the XOR check
-        # above keeps NULL paired with a non-null sibling on every row.
+        # profile_id is unique within a tournament when set; Postgres treats
+        # NULLs as distinct in UNIQUE, so any number of unlinked rows (NULL
+        # profile_id) coexist. A profile links to at most one roster row per
+        # tournament.
         UniqueConstraint(
             "tournament_id",
             "profile_id",
             name="uq_tournament_players_tournament_id_profile_id",
         ),
+        # name is unique within a tournament — display labels don't collide.
         UniqueConstraint(
             "tournament_id",
             "name",

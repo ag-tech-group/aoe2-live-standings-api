@@ -17,11 +17,12 @@ from app.poller.broadcast import extract_stream_urls
 
 
 async def get_tracked_profile_ids(session: AsyncSession) -> list[int]:
-    """Return the union of every tournament's tracked profile IDs.
+    """Return the union of every tournament's linked profile IDs.
 
-    Placeholder roster rows (``profile_id IS NULL``) are skipped — by
-    design they're announced-but-unjoined entrants the poller can't
-    fetch anything for. They appear once the host promotes them.
+    Unlinked roster rows (``profile_id IS NULL``) are skipped — only a row
+    with a profile link is pollable; there's nothing to fetch for an entry
+    whose account hasn't minted yet. It starts being polled once it's
+    linked (a PATCH sets its ``profile_id``).
     """
     rows = await session.execute(
         select(TournamentPlayer.profile_id)
@@ -55,7 +56,7 @@ async def get_host_stream_urls_by_tournament(session: AsyncSession) -> dict[int,
 async def get_stream_urls_by_roster_row(session: AsyncSession) -> dict[int, list[str]]:
     """Map each roster row's ``TournamentPlayer.id`` to its stream URLs.
 
-    Both polled and placeholder rows are included — broadcast-live detection
+    Both linked and unlinked rows are included — broadcast-live detection
     only needs a stable identity per roster entry, and the surrogate ``id``
     PK gives us one even when ``profile_id`` is null (#147). Rows with no
     stream URLs are omitted. A single polled profile that sits on several

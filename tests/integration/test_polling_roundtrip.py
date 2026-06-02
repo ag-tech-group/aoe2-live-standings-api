@@ -287,8 +287,8 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert hera["steam_id"] == "76561198449406083"
     assert {r["leaderboard_id"] for r in hera["ratings"]} == {3, 4}
 
-    # 3. Player detail — ratings + recent matches.
-    r = await pg_client.get(f"/v1/tournaments/hera-cup/players/{_HERA}")
+    # 3. Player detail — ratings + recent matches, addressed by surrogate id.
+    r = await pg_client.get(f"/v1/tournaments/hera-cup/players/{hera['tournament_player_id']}")
     assert r.status_code == 200
     detail = r.json()
     assert detail["alias"] == "VIT | Hera"

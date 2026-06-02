@@ -117,10 +117,11 @@ class TestRosterAudits:
         await session.commit()
         auth_as(DEFAULT_TEST_USER_ID)
 
-        await client.post("/v1/tournaments/cup/players", json={"profile_id": 12345})
+        await client.post("/v1/tournaments/cup/players", json={"name": "Hera", "profile_id": 12345})
         e = audit_events[0]
         assert e["action"] == AuditAction.ROSTER_ADD
         assert e["target_profile_id"] == 12345
+        assert e["target_placeholder_name"] == "Hera"
 
 
 class TestTeamAudits:
