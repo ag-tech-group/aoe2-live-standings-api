@@ -31,6 +31,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    Civilization,
     HostLiveStream,
     Leaderboard,
     LiveMatchPlayer,
@@ -72,6 +73,24 @@ async def upsert_leaderboard(session: AsyncSession, data: dict[str, Any]) -> Non
     stmt = stmt.on_conflict_do_update(
         index_elements=["leaderboard_id"],
         set_={k: getattr(stmt.excluded, k) for k in values if k != "leaderboard_id"},
+    )
+    await session.execute(stmt)
+
+
+async def upsert_civilization(session: AsyncSession, data: dict[str, Any]) -> None:
+    """Insert a Civilization, or overwrite its name on civilization_id conflict.
+
+    The poller upserts from the ``races`` array of ``getAvailableLeaderboards``
+    alongside the leaderboards; the row is authoritative on every refresh.
+    ``updated_at`` is set on both paths since ``ON CONFLICT`` bypasses the
+    ORM's ``onupdate`` (mirrors ``upsert_leaderboard``).
+    """
+    insert = dialect_insert(session)
+    values = {**data, "updated_at": func.now()}
+    stmt = insert(Civilization).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["civilization_id"],
+        set_={k: getattr(stmt.excluded, k) for k in values if k != "civilization_id"},
     )
     await session.execute(stmt)
 

@@ -22,6 +22,8 @@ from app.cache import apply_live_cache_control
 from app.database import get_async_session
 from app.limiting import limiter
 from app.models import (
+    UNKNOWN_CIVILIZATION_ID,
+    Civilization,
     HostLiveStream,
     LiveMatchPlayer,
     LiveStream,
@@ -418,6 +420,7 @@ async def _tournament_record_by_profile(
     session: AsyncSession,
     tournament: Tournament,
     profile_ids: list[int],
+    names: dict[int, str],
 ) -> dict[int, TournamentRecord]:
     """Map each profile to its stats within the tournament window.
 
@@ -515,7 +518,13 @@ async def _tournament_record_by_profile(
                 RecentMatchup(
                     outcome=r.outcome,
                     civilization_id=r.civilization_id,
+                    civilization_name=names.get(r.civilization_id),
                     opponent_civilization_id=r.opponent_civilization_id,
+                    opponent_civilization_name=(
+                        names.get(r.opponent_civilization_id)
+                        if r.opponent_civilization_id is not None
+                        else None
+                    ),
                     map_name=r.map_name,
                     completed_at=r.completed_at,
                 )
@@ -635,7 +644,10 @@ async def get_standings(
         session, tournament.leaderboard_id, profile_ids
     )
     live_match_ids = await _live_match_by_profile(session, profile_ids)
-    tournament_records = await _tournament_record_by_profile(session, tournament, profile_ids)
+    civilization_names = await _civilization_names(session)
+    tournament_records = await _tournament_record_by_profile(
+        session, tournament, profile_ids, civilization_names
+    )
     teams_by_tournament_player = await _team_by_tournament_player(session, tournament.id)
     stream_live_rows = await _stream_live_roster_rows(session, roster_row_ids)
 
@@ -712,14 +724,28 @@ async def get_standings(
     )
 
 
-def _sorted_civ_stats(counts: dict[int, list[int]]) -> list[CivStat]:
+async def _civilization_names(session: AsyncSession) -> dict[int, str]:
+    """Map ``civilization_id -> name`` from the civilizations reference table.
+
+    Folded onto each civ id the read endpoints return (#227), so a consumer
+    doesn't maintain its own id→name list. ``.get(id)`` yields ``None`` for an
+    id not in the reference (a brand-new civ before the next refresh, or the
+    missing-civ sentinel) — callers surface that as a null name.
+    """
+    rows = await session.execute(select(Civilization.civilization_id, Civilization.name))
+    return dict(rows.all())
+
+
+def _sorted_civ_stats(counts: dict[int, list[int]], names: dict[int, str]) -> list[CivStat]:
     """Build a ``CivStat`` list from ``{civ_id: [picks, wins]}``.
 
     Ordered most-played first, then civ id for a stable tie-break — the
     shared ordering of every civ list (``/civ-stats`` and team civs, #220).
+    ``names`` folds in the display name (#227); a civ id absent from it gets
+    a null name.
     """
     return [
-        CivStat(civilization_id=civ_id, picks=picks, wins=wins)
+        CivStat(civilization_id=civ_id, name=names.get(civ_id), picks=picks, wins=wins)
         for civ_id, (picks, wins) in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[0]))
     ]
 
@@ -753,12 +779,11 @@ async def _civ_counts_by_profile(
             Match.leaderboard_id == tournament.leaderboard_id,
             MatchPlayer.profile_id.in_(profile_ids),
             MatchPlayer.outcome.is_not(None),
-            # Skip rows whose civ upstream didn't report — the recent-matches
-            # parser stores those as 0 (parse_recent_matches). They're real
-            # games (they still count toward W/L), but we don't know the civ,
-            # so attributing them to a junk "civ 0" bucket would misreport
-            # pick/win rates.
-            MatchPlayer.civilization_id != 0,
+            # Skip only the missing-civ sentinel (-1), not civ 0 — id 0 is
+            # Armenians, a real civ (see _UNKNOWN_CIVILIZATION_ID in
+            # parse_recent_matches). The game still counts toward W/L; we just
+            # don't attribute an unknown civ to a junk bucket.
+            MatchPlayer.civilization_id != UNKNOWN_CIVILIZATION_ID,
         )
         .group_by(MatchPlayer.profile_id, MatchPlayer.civilization_id)
     )
@@ -809,6 +834,7 @@ async def get_civ_stats(
         return CivStats(last_polled_at=None, overall=[], by_player=[])
 
     counts, last_polled_at = await _civ_counts_by_profile(session, tournament, profile_ids)
+    names = await _civilization_names(session)
 
     # Fold the per-profile counts into the cross-entrant overall sum.
     overall: dict[int, list[int]] = {}  # civ_id -> [picks, wins]
@@ -823,7 +849,7 @@ async def get_civ_stats(
             PlayerCivStats(
                 tournament_player_id=tournament_player_id_by_profile[profile_id],
                 profile_id=profile_id,
-                civs=_sorted_civ_stats(civs),
+                civs=_sorted_civ_stats(civs, names),
             )
             for profile_id, civs in counts.items()
         ),
@@ -832,7 +858,7 @@ async def get_civ_stats(
 
     return CivStats(
         last_polled_at=last_polled_at,
-        overall=_sorted_civ_stats(overall),
+        overall=_sorted_civ_stats(overall, names),
         by_player=by_player,
     )
 
@@ -1186,7 +1212,10 @@ async def get_team_standings(
     # In-window win/loss per member — reuse the per-player record helper so a
     # team's W/L is exactly the sum of its members' ``tournament_record`` W/L —
     # plus per-member civ counts for the team civ aggregate (#220).
-    records = await _tournament_record_by_profile(session, tournament, member_profile_ids)
+    civilization_names = await _civilization_names(session)
+    records = await _tournament_record_by_profile(
+        session, tournament, member_profile_ids, civilization_names
+    )
     civ_counts, _ = await _civ_counts_by_profile(session, tournament, member_profile_ids)
 
     members_by_team: dict[int, list[TeamMemberRead]] = {}
@@ -1253,7 +1282,7 @@ async def get_team_standings(
                 # Combined in-window W/L = sum of the members' records.
                 combined_wins=sum(m.wins for m in members),
                 combined_losses=sum(m.losses for m in members),
-                civs=_sorted_civ_stats(team_civ),
+                civs=_sorted_civ_stats(team_civ, civilization_names),
                 members=members,
             )
         )

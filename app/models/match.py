@@ -6,6 +6,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
+# Sentinel stored in ``MatchPlayer.civilization_id`` when upstream omits the
+# civ. Relic's real civ ids start at 0 (0 = Armenians), so 0 can't double as
+# "unknown" — the recent-matches parser writes this instead, and the civ
+# aggregates skip it (#227).
+UNKNOWN_CIVILIZATION_ID = -1
+
 
 class MatchState(StrEnum):
     STAGING = "staging"

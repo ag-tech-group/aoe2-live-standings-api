@@ -20,8 +20,9 @@ from app.poller.parsers import (
     DEFAULT_MATCHTYPE_TO_LEADERBOARD,
     matchtype_to_leaderboard_map,
     parse_available_leaderboards,
+    parse_races,
 )
-from app.poller.upserts import upsert_leaderboard
+from app.poller.upserts import upsert_civilization, upsert_leaderboard
 
 logger = structlog.get_logger(__name__)
 
@@ -66,9 +67,15 @@ async def load_leaderboards(
         raise
 
     rows = parse_available_leaderboards(payload)
+    # The same payload carries the civilization reference (Relic's ``races``);
+    # upsert it here so the read tier can name civs without its own upstream
+    # call (#227), on the same refresh cadence as leaderboards.
+    races = parse_races(payload)
     async with session_maker() as session:
         for row in rows:
             await upsert_leaderboard(session, row)
+        for race in races:
+            await upsert_civilization(session, race)
         await session.commit()
 
     upstream_map = matchtype_to_leaderboard_map(payload)
@@ -78,7 +85,12 @@ async def load_leaderboards(
         # floor below keeps the core ladder tagged until upstream recovers.
         logger.warning("load_leaderboards_no_matchtypes", leaderboards=len(rows))
     mapping = {**DEFAULT_MATCHTYPE_TO_LEADERBOARD, **upstream_map}
-    logger.info("load_leaderboards_ok", count=len(rows), matchtypes=len(mapping))
+    logger.info(
+        "load_leaderboards_ok",
+        count=len(rows),
+        matchtypes=len(mapping),
+        civilizations=len(races),
+    )
     return mapping
 
 
