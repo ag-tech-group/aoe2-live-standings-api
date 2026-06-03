@@ -2360,6 +2360,127 @@ class TestStandingsHistory:
         assert teams[alpha_id]["points"] == [{"position": 1, "combined_peak_elo": 3100}]
         assert teams[bravo_id]["points"] == [{"position": 2, "combined_peak_elo": 2000}]
 
+    async def test_ranks_by_all_time_max_rating_not_in_window_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # #226: a player carrying a high lifetime max_rating they haven't matched
+        # in-event must rank by that max_rating (matching the standings table),
+        # not their lower in-window peak. (The kings-gauntlet repro: KnOff.)
+        for profile_id, max_rating, iw_rating in ((1, 1268, 1186), (2, 1208, 1190)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=iw_rating, max_rating=max_rating
+                )
+            )
+            session.add(player)
+            match = make_match(
+                profile_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(profile_id, profile_id=profile_id, new_rating=iw_rating)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        by_profile = {
+            p["profile_id"]: p
+            for p in (await client.get("/v1/tournaments/cup/standings/history")).json()["players"]
+        }
+        # By max_rating P1 (1268) > P2 (1208); by in-window peak P2 (1190) would
+        # have outranked P1 (1186) — the disagreement this fixes. peak_rating is
+        # the all-time max_rating (flat at the lifetime peak), matching the table.
+        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1268}
+        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1208}
+
+    async def test_in_event_high_uses_in_window_peak_so_far(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # When the all-time max_rating was set in-event (== the in-window peak),
+        # the in-window peak-so-far drives the line, so the climb shows rather
+        # than a flat line at the final peak.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1550, max_rating=1550)
+        )
+        session.add(player)
+        for match_id, day, rating in ((1, 1, 1500), (2, 2, 1550)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        points = (await client.get("/v1/tournaments/cup/standings/history")).json()["players"][0][
+            "points"
+        ]
+        # max_rating (1550) == in-window peak, so the climb shows: 1500 then 1550
+        # — not flat at 1550.
+        assert [p["peak_rating"] for p in points] == [1500, 1550]
+
+    async def test_team_combined_uses_all_time_max_rating(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Team combined ranks by sum of members' all-time max_rating (matching
+        # the Teams page), not an in-window peak sum (#226).
+        for profile_id, max_rating, iw_rating in ((1, 1300, 1100), (2, 1000, 1000)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=iw_rating, max_rating=max_rating
+                )
+            )
+            session.add(player)
+            match = make_match(
+                profile_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(profile_id, profile_id=profile_id, new_rating=iw_rating)
+            )
+            session.add(match)
+        tournament = make_tournament(
+            "cup", profile_ids=[1, 2], leaderboard_id=3, start_date=datetime(2026, 6, 1, tzinfo=UTC)
+        )
+        tournament.teams.append(make_team(tournament, "Red", profile_ids=[1]))
+        tournament.teams.append(make_team(tournament, "Blue", profile_ids=[2]))
+        session.add(tournament)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        teams = {t["team_id"]: t for t in body["teams"]}
+        red_id = tournament.teams[0].id
+        blue_id = tournament.teams[1].id
+        # Red's member has max_rating 1300 (in-window peak only 1100); combined
+        # uses 1300, so Red leads. An in-window-peak sum would be 1100 vs 1000.
+        assert teams[red_id]["points"][-1] == {"position": 1, "combined_peak_elo": 1300}
+        assert teams[blue_id]["points"][-1] == {"position": 2, "combined_peak_elo": 1000}
+
     async def test_empty_when_no_history(self, client: AsyncClient, session: AsyncSession):
         session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
         await session.commit()

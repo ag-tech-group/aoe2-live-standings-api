@@ -962,18 +962,28 @@ async def get_standings_history(
 ) -> StandingsHistory:
     """Per-entrant position + per-team combined-elo over daily buckets (#219).
 
-    Reconstructs the standings at each past day from the immutable match
-    log — for every completed in-window match on the tournament's
-    leaderboard, the post-match rating at its completion time (the same
-    source as ``/progression``). For each daily bucket (a midnight-UTC date
-    label), an entrant's ``peak_rating`` is the highest post-match rating
-    they reached on or before that day; ``position`` ranks debuted entrants
-    by ``comparePeakRank`` (peak desc, current rating desc, display name). A
-    team's ``combined_peak_elo`` sums its members' peak-so-far. Points are
-    ``null`` before the entity's first match. Because peaks are taken over
-    matches that have already completed, a past bucket's values never shift
-    as new matches arrive — the append-only invariant the live charts rely
-    on. Bounded by the tournament's date window, mirroring ``/progression``.
+    For each daily bucket (a midnight-UTC date label), an entrant's
+    ``peak_rating`` is their all-time peak (``max_rating``) **as of that
+    bucket** — ``max(pre-event baseline, in-window peak-so-far)`` — and
+    ``position`` ranks debuted entrants by ``comparePeakRank`` (peak desc,
+    current rating desc, display name), the same metric the live standings
+    table uses. So the latest bucket equals the current ``/standings`` order
+    (#226); ranking by the in-window peak alone disagreed with the table for
+    anyone carrying a lifetime peak they haven't matched in-event. A team's
+    ``combined_peak_elo`` sums its members' as-of-bucket ``max_rating``,
+    matching the Teams page. Points are ``null`` before the entity's first
+    match. Past buckets stay stable (peak-so-far is over already-completed
+    matches; the baseline is fixed) — the append-only invariant the live
+    charts rely on. The in-window rating series comes from the immutable
+    match log (same source as ``/progression``), bounded by the tournament's
+    date window.
+
+    Baseline caveat (#226): the pre-event ``max_rating`` is recovered as the
+    current ``max_rating`` when it exceeds every in-window rating (i.e. was
+    set before the event — the common case). For a player who set their
+    all-time high *during* the event, the true pre-event baseline isn't
+    stored, so their early buckets track the in-window peak-so-far; a
+    tournament-start ``max_rating`` snapshot would pin it exactly.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -1027,11 +1037,39 @@ async def get_standings_history(
         buckets.append(datetime(day.year, day.month, day.day, tzinfo=UTC))
         day += timedelta(days=1)
 
-    # Sweep each entrant's oldest-first points alongside the ascending
-    # buckets: peak-so-far + current rating as of each day's end. None until
-    # the first match lands (pre-debut).
+    # All-time peak (max_rating) per entrant — the metric the standings table
+    # ranks on (comparePeakRank). #226: history must rank by max_rating *as of*
+    # each bucket so the latest bucket equals the live table.
+    cur_max_stmt = (
+        select(TournamentPlayer.id, PlayerRating.max_rating)
+        .join(
+            PlayerRating,
+            and_(
+                PlayerRating.profile_id == TournamentPlayer.profile_id,
+                PlayerRating.leaderboard_id == tournament.leaderboard_id,
+            ),
+        )
+        .where(
+            TournamentPlayer.tournament_id == tournament.id,
+            TournamentPlayer.profile_id.is_not(None),
+        )
+    )
+    cur_max_by_tp = dict((await session.execute(cur_max_stmt)).all())
+
+    # Sweep each entrant's oldest-first points alongside the ascending buckets.
+    # The emitted peak is max_rating as-of-bucket = max(pre-event baseline,
+    # in-window peak-so-far). The baseline is the current max_rating when it
+    # exceeds every in-window rating (so it was set pre-event — e.g. a high
+    # lifetime peak the player hasn't matched in-event, the #226 repro case);
+    # otherwise the player set their high in-event and the in-window peak-so-far
+    # already tracks it. (A tournament-start max_rating snapshot would pin the
+    # baseline exactly in that latter case — see #226; we don't have one for
+    # in-flight events.) None until the first match lands (pre-debut).
     peak_current_by_tp: dict[int, list[tuple[int, int] | None]] = {}
     for tp_id, points in points_by_tp.items():
+        in_window_peak_total = max(rating for _, rating in points)
+        cur_max = cur_max_by_tp.get(tp_id)
+        baseline = cur_max if cur_max is not None and cur_max > in_window_peak_total else 0
         series: list[tuple[int, int] | None] = []
         idx = 0
         peak: int | None = None
@@ -1042,7 +1080,7 @@ async def get_standings_history(
                 current = points[idx][1]
                 peak = current if peak is None else max(peak, current)
                 idx += 1
-            series.append(None if peak is None else (peak, current))
+            series.append(None if peak is None else (max(baseline, peak), current))
         peak_current_by_tp[tp_id] = series
 
     # Rank entrants at each bucket: peak desc, current desc, name asc, then
@@ -1079,7 +1117,8 @@ async def get_standings_history(
         key=lambda player: player.tournament_player_id,
     )
 
-    # Teams: combined peak elo = sum of members' peak-so-far at each bucket.
+    # Teams: combined peak elo = sum of members' as-of-bucket max_rating (#226),
+    # matching the Teams page's combined-peak ranking.
     team_member_rows = (
         await session.execute(
             select(Team.id, TeamMember.tournament_player_id)

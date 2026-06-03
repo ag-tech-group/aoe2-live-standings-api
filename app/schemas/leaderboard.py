@@ -309,9 +309,9 @@ class StandingHistoryPoint(BaseModel):
     # rating desc, then display name) among entrants who have debuted by
     # this bucket.
     position: int
-    # Highest post-match rating the player reached on or before this bucket
-    # (peak-so-far). Stable for past buckets — a later new high never
-    # rewrites it.
+    # The player's all-time peak (``max_rating``) as of this bucket —
+    # max(pre-event baseline, in-window peak-so-far) (#226). Equals the live
+    # ``max_rating`` at the latest bucket; stable for past buckets.
     peak_rating: int
 
 
@@ -334,8 +334,9 @@ class TeamStandingHistoryPoint(BaseModel):
     # 1-based position by combined peak elo (desc) among teams with at
     # least one debuted member by this bucket.
     position: int
-    # Sum of the team members' peak-so-far ratings as of this bucket; a
-    # member who hasn't debuted yet contributes nothing.
+    # Sum of the members' all-time peak (``max_rating``) as of this bucket
+    # (#226), matching the Teams page; a member who hasn't debuted yet
+    # contributes nothing.
     combined_peak_elo: int
 
 
@@ -353,14 +354,14 @@ class TeamStandingHistory(BaseModel):
 class StandingsHistory(BaseModel):
     """Tournament standings reconstructed at past daily buckets (#219).
 
-    ``buckets`` is the shared daily time axis (midnight-UTC date labels);
-    a bucket's values reflect every completed in-window match on or before
-    that calendar day, so a past bucket never shifts as new matches arrive
-    (peak-so-far over the immutable match log). ``players`` and ``teams``
-    carry per-entity series aligned index-for-index to ``buckets``, with
-    ``null`` points before the entity's first match. Position is by peak
-    (``max_rating``), matching the standings table's peak ordering — not by
-    the live rating, which would retroactively rewrite earlier positions.
+    ``buckets`` is the shared daily time axis (midnight-UTC date labels).
+    ``players`` and ``teams`` carry per-entity series aligned index-for-index
+    to ``buckets``, with ``null`` points before the entity's first match.
+    Position is by all-time peak (``max_rating``) **as of each bucket**,
+    matching the standings table's ``comparePeakRank`` ordering — so the
+    latest bucket equals the live ``/standings`` order (#226). Past buckets
+    stay stable: a value is ``max(pre-event baseline, in-window peak-so-far)``
+    over already-completed matches, never rewritten retroactively.
     """
 
     last_polled_at: datetime | None
