@@ -1,13 +1,23 @@
 """Team standings + team management under /v1/tournaments/{slug}/teams."""
 
+from datetime import UTC, datetime
+
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import LiveMatchPlayer, MatchState, Team, TeamMember, TournamentPlayer
+from app.models import (
+    LiveMatchPlayer,
+    MatchOutcome,
+    MatchState,
+    Team,
+    TeamMember,
+    TournamentPlayer,
+)
 from tests.conftest import (
     DEFAULT_TEST_USER_ID,
     make_match,
+    make_match_player,
     make_player,
     make_player_rating,
     make_team,
@@ -779,3 +789,135 @@ class TestCaptainOnTeamStandings:
             "members"
         ][0]
         assert member["is_captain"] is False
+
+
+class TestTeamStandingsAggregates:
+    """combined_wins/losses + win_pct + per-team civ aggregation on team standings (#220)."""
+
+    async def test_combined_and_member_win_loss(self, client: AsyncClient, session: AsyncSession):
+        for profile_id in (1, 2):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=2000, max_rating=2000
+                )
+            )
+            session.add(player)
+        # P1: 2 wins, 1 loss; P2: 1 win, 1 loss (all completed, leaderboard 3).
+        for match_id, profile_id, outcome in (
+            (1, 1, MatchOutcome.WIN),
+            (2, 1, MatchOutcome.WIN),
+            (3, 1, MatchOutcome.LOSS),
+            (4, 2, MatchOutcome.WIN),
+            (5, 2, MatchOutcome.LOSS),
+        ):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(
+                make_match_player(match_id, profile_id=profile_id, outcome=outcome)
+            )
+            session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        # Combined = sum of members': 3 wins, 2 losses → 60.0%.
+        assert row["combined_wins"] == 3
+        assert row["combined_losses"] == 2
+        assert row["win_pct"] == 60.0
+        members = {m["profile_id"]: m for m in row["members"]}
+        assert (members[1]["wins"], members[1]["losses"]) == (2, 1)
+        assert (members[2]["wins"], members[2]["losses"]) == (1, 1)
+
+    async def test_team_civ_aggregation(self, client: AsyncClient, session: AsyncSession):
+        for profile_id in (1, 2):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=2000, max_rating=2000
+                )
+            )
+            session.add(player)
+        # P1: civ27 (win, loss) + civ13 (win); P2: civ27 (win).
+        for match_id, profile_id, civ, outcome in (
+            (1, 1, 27, MatchOutcome.WIN),
+            (2, 1, 27, MatchOutcome.LOSS),
+            (3, 1, 13, MatchOutcome.WIN),
+            (4, 2, 27, MatchOutcome.WIN),
+        ):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=profile_id, civilization_id=civ, outcome=outcome
+                )
+            )
+            session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        # Members' civs merged: civ27 picks3 wins2, civ13 picks1 win1. Picks desc.
+        assert row["civs"] == [
+            {"civilization_id": 27, "picks": 3, "wins": 2},
+            {"civilization_id": 13, "picks": 1, "wins": 1},
+        ]
+
+    async def test_no_games_means_null_win_pct_and_empty_civs(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        for profile_id in (1, 2):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=2000, max_rating=2000
+                )
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        assert row["combined_wins"] == 0
+        assert row["combined_losses"] == 0
+        assert row["win_pct"] is None
+        assert row["civs"] == []
+        assert all((m["wins"], m["losses"]) == (0, 0) for m in row["members"])
+
+    async def test_aggregates_windowed_to_tournament_dates(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The team endpoint passes the tournament window through to both the
+        # W/L and civ helpers — a pre-window match must not count.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=2000, max_rating=2000)
+        )
+        session.add(player)
+        for match_id, day, outcome in ((1, 1, MatchOutcome.WIN), (2, 6, MatchOutcome.WIN)):
+            match = make_match(
+                match_id, leaderboard_id=3, started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC)
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=1, civilization_id=27, outcome=outcome)
+            )
+            session.add(match)
+        tournament = make_tournament(
+            "cup",
+            profile_ids=[1],
+            leaderboard_id=3,
+            start_date=datetime(2026, 6, 5, tzinfo=UTC),
+            grand_finals_date=datetime(2026, 6, 30, tzinfo=UTC),
+        )
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        # Only the 06-06 win is in-window; the 06-01 win is excluded.
+        assert row["combined_wins"] == 1
+        assert row["civs"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]

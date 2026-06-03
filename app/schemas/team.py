@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+
+from app.schemas.leaderboard import CivStat
 
 
 class TeamMemberRead(BaseModel):
@@ -49,6 +51,12 @@ class TeamMemberRead(BaseModel):
     # True when this member is the team's captain. At most one captain per
     # team; a team may also have no captain (all members ``false``).
     is_captain: bool
+    # In-tournament-window win/loss (completed matches on the tournament's
+    # leaderboard within its date window) — the same figures as the
+    # member's per-player ``tournament_record``. Both 0 for an unlinked or
+    # not-yet-polled member, or one with no in-window games.
+    wins: int
+    losses: int
 
 
 class TeamStandingRow(BaseModel):
@@ -62,6 +70,12 @@ class TeamStandingRow(BaseModel):
     member (no ``PlayerRating`` on the leaderboard yet) is included with
     null rating fields but excluded from the combined sum and the
     average's denominator (#166).
+
+    ``combined_wins`` / ``combined_losses`` sum the members' in-window
+    ``tournament_record`` win/loss; ``win_pct`` is over that combined total
+    (server-computed, null when no in-window games). ``civs`` aggregates the
+    members' civ picks/wins across the team (#220) — same per-civ shape and
+    ordering as ``/civ-stats``.
     """
 
     team_id: int
@@ -70,7 +84,19 @@ class TeamStandingRow(BaseModel):
     member_count: int
     combined_rating_sum: int
     combined_rating_average: float
+    combined_wins: int
+    combined_losses: int
+    civs: list[CivStat]
     members: list[TeamMemberRead]
+
+    @computed_field
+    @property
+    def win_pct(self) -> float | None:
+        """Win percentage (0–100, 1 dp) over the team's combined in-window games; null when none."""
+        total = self.combined_wins + self.combined_losses
+        if total == 0:
+            return None
+        return round(self.combined_wins / total * 100, 1)
 
 
 class TeamRead(BaseModel):
