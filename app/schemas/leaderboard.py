@@ -26,6 +26,21 @@ class LeaderboardRead(BaseModel):
     is_ranked: bool
 
 
+class CivilizationRead(BaseModel):
+    """Civilization metadata, sourced from the ``civilizations`` table.
+
+    The polling worker upserts rows from the ``races`` array of upstream
+    ``getAvailableLeaderboards``. ``civilization_id`` matches what the
+    civ-stats and recent-matchup endpoints return, so a consumer maps id →
+    ``name`` from this authoritative reference (#227).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    civilization_id: int
+    name: str
+
+
 class RecentMatchup(BaseModel):
     """One recent in-window game with its civ matchup, for a standings tooltip.
 
@@ -39,10 +54,17 @@ class RecentMatchup(BaseModel):
     outcome: MatchOutcome
     # The entrant's civilization in this game.
     civilization_id: int
+    # The entrant's civ display name (#227), folded from the civilizations
+    # reference; null when the id isn't in the reference yet (a brand-new civ
+    # before the next refresh, or the missing-civ sentinel).
+    civilization_name: str | None
     # The opposing player's civilization on a 1v1 leaderboard. Null when no
     # single opponent resolves — the leaderboard isn't 1v1, or the match
     # record carries no opposing-team row.
     opponent_civilization_id: int | None
+    # The opponent's civ display name; null when ``opponent_civilization_id``
+    # is null or its id isn't in the reference yet.
+    opponent_civilization_name: str | None
     map_name: str
     # When the match finished; null only if it settled without a completion
     # time (not expected for a counted, outcome-bearing game).
@@ -238,6 +260,10 @@ class CivStat(BaseModel):
     """Pick/win counts for one civilization."""
 
     civilization_id: int
+    # The civ's display name (#227), folded from the civilizations reference;
+    # null when the id isn't in the reference yet (a brand-new civ before the
+    # next refresh, or the missing-civ sentinel).
+    name: str | None
     # Completed games an entrant played this civ (in-window, on the
     # tournament's leaderboard). Ladder opponents' rows are excluded.
     picks: int

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    Civilization,
     LiveMatchPlayer,
     MatchOutcome,
     MatchState,
@@ -861,8 +862,8 @@ class TestTeamStandingsAggregates:
         row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
         # Members' civs merged: civ27 picks3 wins2, civ13 picks1 win1. Picks desc.
         assert row["civs"] == [
-            {"civilization_id": 27, "picks": 3, "wins": 2},
-            {"civilization_id": 13, "picks": 1, "wins": 1},
+            {"civilization_id": 27, "name": None, "picks": 3, "wins": 2},
+            {"civilization_id": 13, "name": None, "picks": 1, "wins": 1},
         ]
 
     async def test_no_games_means_null_win_pct_and_empty_civs(
@@ -920,4 +921,27 @@ class TestTeamStandingsAggregates:
         row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
         # Only the 06-06 win is in-window; the 06-01 win is excluded.
         assert row["combined_wins"] == 1
-        assert row["civs"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+        assert row["civs"] == [{"civilization_id": 27, "name": None, "picks": 1, "wins": 1}]
+
+    async def test_team_civs_fold_in_civilization_name(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Team civ entries carry the civ name from the reference (#227).
+        session.add(Civilization(civilization_id=27, name="Magyars"))
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=2000, max_rating=2000)
+        )
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(1, profile_id=1, civilization_id=27, outcome=MatchOutcome.WIN)
+        )
+        session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        assert row["civs"] == [{"civilization_id": 27, "name": "Magyars", "picks": 1, "wins": 1}]

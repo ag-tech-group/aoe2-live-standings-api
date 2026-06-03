@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    Civilization,
     Leaderboard,
     LiveMatchPlayer,
     Match,
@@ -281,7 +282,11 @@ class TestLoadLeaderboards:
             "leaderboards": [
                 {"id": 3, "name": "1v1 RM Ranked", "isranked": 1, "matchtypes": [6]},
                 {"id": 4, "name": "Team RM Ranked", "isranked": 1, "matchtypes": [7, 8]},
-            ]
+            ],
+            "races": [
+                {"id": 7, "name": "Burgundians"},
+                {"id": 0, "name": "Armenians"},
+            ],
         }
         with respx.mock(base_url=_TEST_BASE_URL) as mock:
             mock.get("/community/leaderboard/getAvailableLeaderboards").respond(json=payload)
@@ -290,6 +295,9 @@ class TestLoadLeaderboards:
         rows = (await session.execute(select(Leaderboard))).scalars().all()
         assert {lb.leaderboard_id for lb in rows} == {3, 4}
         assert mapping == {6: 3, 7: 4, 8: 4}
+        # Civilizations from the same payload's `races` are upserted too (#227).
+        civs = (await session.execute(select(Civilization))).scalars().all()
+        assert {(c.civilization_id, c.name) for c in civs} == {(7, "Burgundians"), (0, "Armenians")}
 
     async def test_upstream_error_raises(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession

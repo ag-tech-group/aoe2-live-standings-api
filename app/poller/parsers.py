@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from app.models.match import MatchOutcome, MatchState
+from app.models.match import UNKNOWN_CIVILIZATION_ID, MatchOutcome, MatchState
 
 # Upstream uses -1 to mean "no rank on this leaderboard" (player never
 # qualified). We normalize to None so the rank columns can carry a clean
@@ -171,7 +171,7 @@ def parse_recent_matches(
                 {
                     "match_id": match_id,
                     "profile_id": profile_id,
-                    "civilization_id": result.get("civilization_id", 0),
+                    "civilization_id": result.get("civilization_id", UNKNOWN_CIVILIZATION_ID),
                     "team_id": result.get("teamid", 0),
                     "outcome": _parse_outcome(result.get("resulttype")),
                     "old_rating": member.get("oldrating"),
@@ -276,6 +276,20 @@ def parse_available_leaderboards(payload: dict[str, Any]) -> list[dict[str, Any]
             }
         )
     return rows
+
+
+def parse_races(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract civilization rows from ``getAvailableLeaderboards`` ``races``.
+
+    Relic calls civilizations "races"; each entry carries ``{id, name}`` (plus
+    ``faction_id`` / ``locstringid`` we don't need). Returns
+    ``{civilization_id, name}`` dicts for ``upsert_civilization`` — the
+    authoritative civ id→name source the API exposes (#227).
+    """
+    return [
+        {"civilization_id": race["id"], "name": race.get("name", "")}
+        for race in payload.get("races", [])
+    ]
 
 
 # Defensive floor for the ``matchtype_id -> leaderboard_id`` map. Upstream

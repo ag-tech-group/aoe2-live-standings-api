@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    Civilization,
     HostLiveStream,
     LiveMatchPlayer,
     LiveStream,
@@ -1275,6 +1276,34 @@ class TestStandingsRecentMatchups:
         assert matchups[0]["civilization_id"] == 27
         assert matchups[0]["opponent_civilization_id"] is None
 
+    async def test_folds_in_civ_names(self, client: AsyncClient, session: AsyncSession):
+        # Both the entrant's and opponent's civ names are folded in (#227).
+        session.add_all(
+            [
+                Civilization(civilization_id=7, name="Burgundians"),
+                Civilization(civilization_id=23, name="Japanese"),
+            ]
+        )
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(
+                1, profile_id=1, team_id=0, civilization_id=7, outcome=MatchOutcome.WIN
+            )
+        )
+        match.players.append(make_match_player(1, profile_id=999, team_id=1, civilization_id=23))
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        matchup = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]["recent_matchups"][0]
+        assert matchup["civilization_name"] == "Burgundians"
+        assert matchup["opponent_civilization_name"] == "Japanese"
+
     async def test_parity_with_recent_results_cap_and_window(
         self, client: AsyncClient, session: AsyncSession
     ):
@@ -1956,8 +1985,8 @@ class TestCivStats:
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
         # Overall: civ 27 picked 3× (1 win), civ 13 once (1 win). Picks desc.
         assert body["overall"] == [
-            {"civilization_id": 27, "picks": 3, "wins": 1},
-            {"civilization_id": 13, "picks": 1, "wins": 1},
+            {"civilization_id": 27, "name": None, "picks": 3, "wins": 1},
+            {"civilization_id": 13, "name": None, "picks": 1, "wins": 1},
         ]
         tp1 = tournament.tracked_players[0].id
         tp2 = tournament.tracked_players[1].id
@@ -1966,14 +1995,14 @@ class TestCivStats:
                 "tournament_player_id": tp1,
                 "profile_id": 1,
                 "civs": [
-                    {"civilization_id": 27, "picks": 2, "wins": 1},
-                    {"civilization_id": 13, "picks": 1, "wins": 1},
+                    {"civilization_id": 27, "name": None, "picks": 2, "wins": 1},
+                    {"civilization_id": 13, "name": None, "picks": 1, "wins": 1},
                 ],
             },
             {
                 "tournament_player_id": tp2,
                 "profile_id": 2,
-                "civs": [{"civilization_id": 27, "picks": 1, "wins": 0}],
+                "civs": [{"civilization_id": 27, "name": None, "picks": 1, "wins": 0}],
             },
         ]
         assert body["last_polled_at"] is not None
@@ -1999,7 +2028,7 @@ class TestCivStats:
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
-        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+        assert body["overall"] == [{"civilization_id": 27, "name": None, "picks": 1, "wins": 1}]
         assert [c["civilization_id"] for c in body["by_player"][0]["civs"]] == [27]
 
     async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
@@ -2029,7 +2058,7 @@ class TestCivStats:
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
-        assert body["overall"] == [{"civilization_id": 13, "picks": 1, "wins": 1}]
+        assert body["overall"] == [{"civilization_id": 13, "name": None, "picks": 1, "wins": 1}]
 
     async def test_scoped_to_tournament_leaderboard(
         self, client: AsyncClient, session: AsyncSession
@@ -2050,7 +2079,7 @@ class TestCivStats:
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
-        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+        assert body["overall"] == [{"civilization_id": 27, "name": None, "picks": 1, "wins": 1}]
 
     async def test_excludes_in_progress_matches(self, client: AsyncClient, session: AsyncSession):
         player = make_player(1)
@@ -2069,30 +2098,53 @@ class TestCivStats:
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
-        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+        assert body["overall"] == [{"civilization_id": 27, "name": None, "picks": 1, "wins": 1}]
 
-    async def test_excludes_unknown_civ_zero(self, client: AsyncClient, session: AsyncSession):
-        # A completed game whose civ upstream didn't report (parser default 0)
-        # must not surface as a junk "civ 0" bucket in the aggregate.
+    async def test_includes_armenians_civ_zero_excludes_sentinel(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Civ id 0 is Armenians, a real civ — it must be counted. Only the
+        # missing-civ sentinel (-1) is skipped (#227 corrected the earlier
+        # mistake of excluding civ 0).
         player = make_player(1)
         player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(player)
-        known = make_match(1, leaderboard_id=3)
-        known.players.append(
-            make_match_player(1, profile_id=1, civilization_id=27, outcome=MatchOutcome.WIN)
+        armenians = make_match(1, leaderboard_id=3)
+        armenians.players.append(
+            make_match_player(1, profile_id=1, civilization_id=0, outcome=MatchOutcome.WIN)
         )
         unknown = make_match(2, leaderboard_id=3)
         unknown.players.append(
-            make_match_player(2, profile_id=1, civilization_id=0, outcome=MatchOutcome.WIN)
+            make_match_player(2, profile_id=1, civilization_id=-1, outcome=MatchOutcome.WIN)
         )
-        session.add_all([known, unknown])
+        session.add_all([armenians, unknown])
         session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
-        # Only the known civ (27); the civ-0 game is omitted entirely.
-        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
-        assert [c["civilization_id"] for c in body["by_player"][0]["civs"]] == [27]
+        # Civ 0 (Armenians) is counted; the -1 sentinel is omitted.
+        assert body["overall"] == [{"civilization_id": 0, "name": None, "picks": 1, "wins": 1}]
+        assert [c["civilization_id"] for c in body["by_player"][0]["civs"]] == [0]
+
+    async def test_folds_in_civilization_name(self, client: AsyncClient, session: AsyncSession):
+        # The civ name is folded from the civilizations reference (#227).
+        session.add(Civilization(civilization_id=7, name="Burgundians"))
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(1, profile_id=1, civilization_id=7, outcome=MatchOutcome.WIN)
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body["overall"] == [
+            {"civilization_id": 7, "name": "Burgundians", "picks": 1, "wins": 1}
+        ]
+        assert body["by_player"][0]["civs"][0]["name"] == "Burgundians"
 
     async def test_empty_when_roster_has_no_matches(
         self, client: AsyncClient, session: AsyncSession

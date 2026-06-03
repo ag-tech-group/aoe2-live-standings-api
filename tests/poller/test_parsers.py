@@ -2,12 +2,13 @@
 
 from datetime import UTC, datetime
 
-from app.models.match import MatchOutcome, MatchState
+from app.models.match import UNKNOWN_CIVILIZATION_ID, MatchOutcome, MatchState
 from app.poller.parsers import (
     matchtype_to_leaderboard_map,
     parse_available_leaderboards,
     parse_live_advertisements,
     parse_player_stats,
+    parse_races,
     parse_recent_matches,
 )
 
@@ -392,6 +393,47 @@ class TestParseAvailableLeaderboards:
         assert items[0]["matchtypes"] == [6]
         # Missing matchtypes in the upstream payload defaults to [].
         assert items[1]["matchtypes"] == []
+
+
+class TestParseRaces:
+    def test_maps_id_and_name(self):
+        payload = {
+            "races": [
+                {"id": 7, "name": "Burgundians", "faction_id": 0, "locstringid": -1},
+                {"id": 0, "name": "Armenians"},
+            ]
+        }
+        assert parse_races(payload) == [
+            {"civilization_id": 7, "name": "Burgundians"},
+            {"civilization_id": 0, "name": "Armenians"},
+        ]
+
+    def test_empty_when_races_absent(self):
+        assert parse_races({}) == []
+
+
+class TestParseMatchPlayerCiv:
+    def test_missing_civilization_id_uses_sentinel(self):
+        # Relic civ ids start at 0 (Armenians), so a missing civ can't default
+        # to 0 — it would masquerade as Armenians. It falls back to the
+        # non-civ sentinel instead (#227).
+        payload = {
+            "matchHistoryStats": [
+                {
+                    "id": 1,
+                    "mapname": "Arabia.rms",
+                    "matchtype_id": 6,
+                    "startgametime": 100,
+                    "completiontime": 200,
+                    "matchhistoryreportresults": [
+                        {"profile_id": 1, "resulttype": 1, "teamid": 0, "xpgained": 5},
+                    ],
+                    "matchhistorymember": [],
+                }
+            ]
+        }
+        _, players = parse_recent_matches(payload)
+        assert players[0]["civilization_id"] == UNKNOWN_CIVILIZATION_ID
 
 
 class TestMatchtypeToLeaderboardMap:

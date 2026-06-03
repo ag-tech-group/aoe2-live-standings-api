@@ -11,9 +11,18 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import LiveMatchPlayer, Match, MatchPlayer, MatchState, Player, PlayerRating
+from app.models import (
+    Civilization,
+    LiveMatchPlayer,
+    Match,
+    MatchPlayer,
+    MatchState,
+    Player,
+    PlayerRating,
+)
 from app.poller.upserts import (
     replace_live_match_players,
+    upsert_civilization,
     upsert_match_from_live,
     upsert_match_from_recent,
     upsert_match_player,
@@ -291,3 +300,15 @@ class TestReplaceLiveMatchPlayers:
 
         rows = (await session.execute(select(LiveMatchPlayer))).scalars().all()
         assert [(r.match_id, r.profile_id) for r in rows] == [(1, 7)]
+
+
+class TestUpsertCivilization:
+    async def test_inserts_then_overwrites_name_on_conflict(self, session: AsyncSession):
+        await upsert_civilization(session, {"civilization_id": 7, "name": "Burgundian"})
+        await session.commit()
+        await upsert_civilization(session, {"civilization_id": 7, "name": "Burgundians"})
+        await session.commit()
+
+        rows = (await session.execute(select(Civilization))).scalars().all()
+        assert [(r.civilization_id, r.name) for r in rows] == [(7, "Burgundians")]
+        assert rows[0].updated_at is not None
