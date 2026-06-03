@@ -2071,6 +2071,29 @@ class TestCivStats:
         body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
         assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
 
+    async def test_excludes_unknown_civ_zero(self, client: AsyncClient, session: AsyncSession):
+        # A completed game whose civ upstream didn't report (parser default 0)
+        # must not surface as a junk "civ 0" bucket in the aggregate.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        known = make_match(1, leaderboard_id=3)
+        known.players.append(
+            make_match_player(1, profile_id=1, civilization_id=27, outcome=MatchOutcome.WIN)
+        )
+        unknown = make_match(2, leaderboard_id=3)
+        unknown.players.append(
+            make_match_player(2, profile_id=1, civilization_id=0, outcome=MatchOutcome.WIN)
+        )
+        session.add_all([known, unknown])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        # Only the known civ (27); the civ-0 game is omitted entirely.
+        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+        assert [c["civilization_id"] for c in body["by_player"][0]["civs"]] == [27]
+
     async def test_empty_when_roster_has_no_matches(
         self, client: AsyncClient, session: AsyncSession
     ):
