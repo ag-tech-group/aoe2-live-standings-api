@@ -303,64 +303,68 @@ class CivStats(BaseModel):
 
 
 class StandingHistoryPoint(BaseModel):
-    """A player's leaderboard position + peak rating at one time bucket."""
+    """An entity's standings position + peak rating at one time bucket."""
 
     # 1-based position by peak (comparePeakRank: peak desc, then current
-    # rating desc, then display name) among entrants who have debuted by
-    # this bucket.
+    # rating desc, then display name), over the whole roster — everyone has a
+    # position at every bucket (#226).
     position: int
-    # Highest post-match rating the player reached on or before this bucket
-    # (peak-so-far). Stable for past buckets — a later new high never
-    # rewrites it.
-    peak_rating: int
+    # The entity's all-time peak (``max_rating``) as of this bucket —
+    # max(pre-event baseline, in-window peak-so-far). Equals the live
+    # ``max_rating`` at the latest bucket; stable for past buckets. Null for an
+    # unrated entity (no rating on this leaderboard) — it still holds a
+    # position, at the name-sorted tail.
+    peak_rating: int | None
 
 
 class PlayerStandingHistory(BaseModel):
     """One entrant's position-over-time series, aligned to the shared buckets.
 
     ``points[i]`` is the entrant's standing at ``buckets[i]`` (see
-    ``StandingsHistory``), or ``null`` for buckets before their first
-    in-window match (pre-debut).
+    ``StandingsHistory``). Every entrant holds a position at every bucket
+    (#226) — there are no null points; an unrated entrant simply sits at the
+    name-sorted tail with a null ``peak_rating``.
     """
 
     tournament_player_id: int
-    profile_id: int
-    points: list[StandingHistoryPoint | None]
+    # Null for an unlinked roster row (no polled identity yet); the row still
+    # holds a position, by name at the tail.
+    profile_id: int | None
+    points: list[StandingHistoryPoint]
 
 
 class TeamStandingHistoryPoint(BaseModel):
     """A team's position + combined peak elo at one time bucket."""
 
-    # 1-based position by combined peak elo (desc) among teams with at
-    # least one debuted member by this bucket.
+    # 1-based position by combined peak elo (desc), over all teams.
     position: int
-    # Sum of the team members' peak-so-far ratings as of this bucket; a
-    # member who hasn't debuted yet contributes nothing.
+    # Sum of the members' all-time peak (``max_rating``) as of this bucket
+    # (#226), matching the Teams page; an unrated member contributes 0.
     combined_peak_elo: int
 
 
 class TeamStandingHistory(BaseModel):
     """One team's combined-peak-elo-over-time series, aligned to the buckets.
 
-    ``points[i]`` is the team's standing at ``buckets[i]``, or ``null`` for
-    buckets before any member's first in-window match.
+    ``points[i]`` is the team's standing at ``buckets[i]``. Every team holds a
+    position at every bucket (#226) — no null points.
     """
 
     team_id: int
-    points: list[TeamStandingHistoryPoint | None]
+    points: list[TeamStandingHistoryPoint]
 
 
 class StandingsHistory(BaseModel):
-    """Tournament standings reconstructed at past daily buckets (#219).
+    """Tournament standings position over daily buckets (#219, #226).
 
-    ``buckets`` is the shared daily time axis (midnight-UTC date labels);
-    a bucket's values reflect every completed in-window match on or before
-    that calendar day, so a past bucket never shifts as new matches arrive
-    (peak-so-far over the immutable match log). ``players`` and ``teams``
-    carry per-entity series aligned index-for-index to ``buckets``, with
-    ``null`` points before the entity's first match. Position is by peak
-    (``max_rating``), matching the standings table's peak ordering — not by
-    the live rating, which would retroactively rewrite earlier positions.
+    ``buckets`` is the shared daily time axis (midnight-UTC date labels).
+    ``players`` and ``teams`` carry per-entity series aligned index-for-index
+    to ``buckets`` — a bump chart of ``position`` over time. Every roster
+    entity (rated or not) holds a position at every bucket, ranked the way the
+    live table is: by all-time peak (``max_rating``) **as of each bucket**,
+    then current rating, then name (``comparePeakRank``). So the latest bucket
+    equals the live ``/standings`` order, and past buckets stay stable
+    (peak-so-far over already-completed matches + a fixed baseline).
     """
 
     last_polled_at: datetime | None

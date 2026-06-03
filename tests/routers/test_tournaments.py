@@ -264,8 +264,33 @@ class TestTournamentStandings:
         await session.commit()
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        # Peaks all tie at the factory default, so current_rating breaks the tie.
         assert [row["alias"] for row in items] == ["high", "mid", "low"]
         assert [row["current_rating"] for row in items] == [2500, 2000, 1500]
+
+    async def test_sorted_by_peak_then_current(self, client: AsyncClient, session: AsyncSession):
+        # Position is by peak (max_rating); current_rating only breaks peak
+        # ties (#226). A leads on peak despite the lowest current; B beats C on
+        # current within their equal peak.
+        for profile_id, alias, current, peak in (
+            (1, "A", 1500, 2500),
+            (2, "B", 2400, 2000),
+            (3, "C", 1800, 2000),
+        ):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=current, max_rating=peak
+                )
+            )
+            session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1, 2, 3], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["A", "B", "C"]
+        assert [row["max_rating"] for row in items] == [2500, 2000, 2000]
+        assert [row["current_rating"] for row in items] == [1500, 2400, 1800]
 
     async def test_scoped_to_tournament_roster(self, client: AsyncClient, session: AsyncSession):
         # A player with a rating on the leaderboard but outside the roster
@@ -2219,9 +2244,11 @@ class TestStandingsHistory:
             {"position": 2, "peak_rating": 1520},
             {"position": 2, "peak_rating": 1520},
         ]
-        # P2: null pre-debut (bucket 0), then pos1 peak1530, pos1 peak1540.
+        # P2 has no rating row + no day-1 game, so bucket 0 is a null-peak
+        # position at the tail (everyone holds a position now, #226); then
+        # pos1 peak1530, pos1 peak1540 once they play.
         assert by_profile[2]["points"] == [
-            None,
+            {"position": 2, "peak_rating": None},
             {"position": 1, "peak_rating": 1530},
             {"position": 1, "peak_rating": 1540},
         ]
@@ -2325,7 +2352,9 @@ class TestStandingsHistory:
         # Only the 06-06 match counts: buckets 06-05..06-06, peak 1500 (not 2000/3000).
         assert [b[:10] for b in body["buckets"]] == ["2026-06-05", "2026-06-06"]
         points = body["players"][0]["points"]
-        assert points[0] is None  # 06-05: no in-window match yet
+        # 06-05: no in-window game yet → null-peak position (still holds one);
+        # 06-06: the in-window match (2000 pre- and 3000 post-window excluded).
+        assert points[0] == {"position": 1, "peak_rating": None}
         assert points[1] == {"position": 1, "peak_rating": 1500}
 
     async def test_team_combined_peak_series(self, client: AsyncClient, session: AsyncSession):
@@ -2359,6 +2388,86 @@ class TestStandingsHistory:
         # Single bucket (06-01). Alpha 1500+1600=3100 (pos1); Bravo 2000 (pos2).
         assert teams[alpha_id]["points"] == [{"position": 1, "combined_peak_elo": 3100}]
         assert teams[bravo_id]["points"] == [{"position": 2, "combined_peak_elo": 2000}]
+
+    async def test_ranks_by_all_time_peak_carried_in(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A player carrying a higher lifetime peak (max_rating) they haven't
+        # matched in-event still outranks one with a lower max_rating but a
+        # higher in-event rating — by peak, matching the table (#226, the
+        # kings-gauntlet KnOff case).
+        for profile_id, max_rating, iw_rating in ((1, 1268, 1186), (2, 1208, 1190)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=iw_rating, max_rating=max_rating
+                )
+            )
+            session.add(player)
+            match = make_match(
+                profile_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(profile_id, profile_id=profile_id, new_rating=iw_rating)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        by_profile = {
+            p["profile_id"]: p
+            for p in (await client.get("/v1/tournaments/cup/standings/history")).json()["players"]
+        }
+        # By peak P1 (1268) > P2 (1208); by in-event rating P2 (1190) would have
+        # outranked P1 (1186) — the disagreement this fixes.
+        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1268}
+        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1208}
+
+    async def test_unrated_member_holds_tail_position(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # An unrated roster member (no rating on this leaderboard, e.g. jabo)
+        # still appears with a position — at the name-sorted tail, null peak.
+        rated = make_player(1)
+        rated.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=2000, max_rating=2000)
+        )
+        session.add(rated)
+        match = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+        )
+        match.players.append(make_match_player(1, profile_id=1, new_rating=2000))
+        session.add(match)
+        # profile 2 is rostered but has no PlayerRating row → unrated.
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        by_profile = {
+            p["profile_id"]: p
+            for p in (await client.get("/v1/tournaments/cup/standings/history")).json()["players"]
+        }
+        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 2000}
+        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": None}
 
     async def test_empty_when_no_history(self, client: AsyncClient, session: AsyncSession):
         session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
