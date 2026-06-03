@@ -753,6 +753,12 @@ async def _civ_counts_by_profile(
             Match.leaderboard_id == tournament.leaderboard_id,
             MatchPlayer.profile_id.in_(profile_ids),
             MatchPlayer.outcome.is_not(None),
+            # Skip rows whose civ upstream didn't report — the recent-matches
+            # parser stores those as 0 (parse_recent_matches). They're real
+            # games (they still count toward W/L), but we don't know the civ,
+            # so attributing them to a junk "civ 0" bucket would misreport
+            # pick/win rates.
+            MatchPlayer.civilization_id != 0,
         )
         .group_by(MatchPlayer.profile_id, MatchPlayer.civilization_id)
     )
