@@ -712,6 +712,63 @@ async def get_standings(
     )
 
 
+def _sorted_civ_stats(counts: dict[int, list[int]]) -> list[CivStat]:
+    """Build a ``CivStat`` list from ``{civ_id: [picks, wins]}``.
+
+    Ordered most-played first, then civ id for a stable tie-break — the
+    shared ordering of every civ list (``/civ-stats`` and team civs, #220).
+    """
+    return [
+        CivStat(civilization_id=civ_id, picks=picks, wins=wins)
+        for civ_id, (picks, wins) in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    ]
+
+
+async def _civ_counts_by_profile(
+    session: AsyncSession,
+    tournament: Tournament,
+    profile_ids: list[int],
+) -> tuple[dict[int, dict[int, list[int]]], datetime | None]:
+    """Per-profile civ pick/win counts, in-window, on the tournament's leaderboard.
+
+    Returns ``(counts, last_completed_at)``: ``counts`` maps each profile to
+    ``{civilization_id: [picks, wins]}`` over its completed in-window matches
+    (picks = games on a civ, wins = the subset won); ``last_completed_at`` is
+    the most recent counted match's completion time (the freshness signal).
+    Shared by ``/civ-stats`` and the per-team civ aggregate (#220).
+    """
+    if not profile_ids:
+        return {}, None
+
+    stmt = (
+        select(
+            MatchPlayer.profile_id,
+            MatchPlayer.civilization_id,
+            func.count().label("picks"),
+            func.sum(case((MatchPlayer.outcome == MatchOutcome.WIN, 1), else_=0)).label("wins"),
+            func.max(Match.completed_at).label("last_completed_at"),
+        )
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Match.leaderboard_id == tournament.leaderboard_id,
+            MatchPlayer.profile_id.in_(profile_ids),
+            MatchPlayer.outcome.is_not(None),
+        )
+        .group_by(MatchPlayer.profile_id, MatchPlayer.civilization_id)
+    )
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+
+    counts: dict[int, dict[int, list[int]]] = {}
+    timestamps: list[datetime | None] = []
+    for profile_id, civ_id, picks, wins, last_completed_at in (await session.execute(stmt)).all():
+        counts.setdefault(profile_id, {})[civ_id] = [picks, wins]
+        timestamps.append(last_completed_at)
+    return counts, compute_last_polled_at(timestamps)
+
+
 @router.get("/{tournament_slug}/civ-stats")
 async def get_civ_stats(
     request: Request,
@@ -745,61 +802,31 @@ async def get_civ_stats(
     if not profile_ids:
         return CivStats(last_polled_at=None, overall=[], by_player=[])
 
-    stmt = (
-        select(
-            MatchPlayer.profile_id,
-            MatchPlayer.civilization_id,
-            func.count().label("picks"),
-            func.sum(case((MatchPlayer.outcome == MatchOutcome.WIN, 1), else_=0)).label("wins"),
-            func.max(Match.completed_at).label("last_completed_at"),
-        )
-        .join(Match, Match.match_id == MatchPlayer.match_id)
-        .where(
-            Match.leaderboard_id == tournament.leaderboard_id,
-            MatchPlayer.profile_id.in_(profile_ids),
-            MatchPlayer.outcome.is_not(None),
-        )
-        .group_by(MatchPlayer.profile_id, MatchPlayer.civilization_id)
-    )
-    if tournament.start_date is not None:
-        stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    counts, last_polled_at = await _civ_counts_by_profile(session, tournament, profile_ids)
 
-    # Fold the per-(profile, civ) rows into the overall sum and the per-player
-    # breakdown in one pass.
+    # Fold the per-profile counts into the cross-entrant overall sum.
     overall: dict[int, list[int]] = {}  # civ_id -> [picks, wins]
-    by_profile: dict[int, dict[int, list[int]]] = {}  # profile_id -> civ_id -> [picks, wins]
-    timestamps: list[datetime | None] = []
-    for profile_id, civ_id, picks, wins, last_completed_at in (await session.execute(stmt)).all():
-        tally = overall.setdefault(civ_id, [0, 0])
-        tally[0] += picks
-        tally[1] += wins
-        by_profile.setdefault(profile_id, {})[civ_id] = [picks, wins]
-        timestamps.append(last_completed_at)
-
-    def _civ_stats(counts: dict[int, list[int]]) -> list[CivStat]:
-        # Most-played first, then civ id for a stable tie-break.
-        return [
-            CivStat(civilization_id=civ_id, picks=picks, wins=wins)
-            for civ_id, (picks, wins) in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[0]))
-        ]
+    for civs in counts.values():
+        for civ_id, (picks, wins) in civs.items():
+            tally = overall.setdefault(civ_id, [0, 0])
+            tally[0] += picks
+            tally[1] += wins
 
     by_player = sorted(
         (
             PlayerCivStats(
                 tournament_player_id=tournament_player_id_by_profile[profile_id],
                 profile_id=profile_id,
-                civs=_civ_stats(counts),
+                civs=_sorted_civ_stats(civs),
             )
-            for profile_id, counts in by_profile.items()
+            for profile_id, civs in counts.items()
         ),
         key=lambda player: player.tournament_player_id,
     )
 
     return CivStats(
-        last_polled_at=compute_last_polled_at(timestamps),
-        overall=_civ_stats(overall),
+        last_polled_at=last_polled_at,
+        overall=_sorted_civ_stats(overall),
         by_player=by_player,
     )
 
@@ -1094,6 +1121,11 @@ async def get_team_standings(
     with null rating fields and excluded from the aggregate (and the
     average's denominator). Teams are optional — a tournament with none
     returns an empty list. Sorted by combined sum desc.
+
+    Each row also carries the team's combined in-window win/loss (sum of the
+    members' ``tournament_record`` W/L, plus a server-computed ``win_pct``)
+    and a per-team civ pick/win aggregate, with the same per-member figures on
+    each ``TeamMemberRead`` (#220).
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -1143,9 +1175,13 @@ async def get_team_standings(
     # matches their standings row within the same poll cycle — both
     # read from the same snapshot. Unlinked rows (no profile_id) can't
     # be in a live match yet.
-    live_match_ids = await _live_match_by_profile(
-        session, [row.profile_id for row in member_rows if row.profile_id is not None]
-    )
+    member_profile_ids = [row.profile_id for row in member_rows if row.profile_id is not None]
+    live_match_ids = await _live_match_by_profile(session, member_profile_ids)
+    # In-window win/loss per member — reuse the per-player record helper so a
+    # team's W/L is exactly the sum of its members' ``tournament_record`` W/L —
+    # plus per-member civ counts for the team civ aggregate (#220).
+    records = await _tournament_record_by_profile(session, tournament, member_profile_ids)
+    civ_counts, _ = await _civ_counts_by_profile(session, tournament, member_profile_ids)
 
     members_by_team: dict[int, list[TeamMemberRead]] = {}
     timestamps: list[datetime | None] = []
@@ -1174,6 +1210,9 @@ async def get_team_standings(
                 in_match=profile_id is not None and profile_id in live_match_ids,
                 live_match_id=live_match_ids.get(profile_id) if profile_id else None,
                 is_captain=is_captain,
+                # In-window W/L from the member's record; 0 for an unlinked row.
+                wins=records[profile_id].wins if profile_id is not None else 0,
+                losses=records[profile_id].losses if profile_id is not None else 0,
             )
         )
         timestamps.append(updated_at)
@@ -1188,6 +1227,15 @@ async def get_team_standings(
         )
         peaks = [m.max_rating for m in members if m.max_rating is not None]
         total = sum(peaks)
+        # Per-team civ aggregate: merge the members' civ counts (#220).
+        team_civ: dict[int, list[int]] = {}  # civ_id -> [picks, wins]
+        for member in members:
+            if member.profile_id is None:
+                continue
+            for civ_id, (picks, wins) in civ_counts.get(member.profile_id, {}).items():
+                tally = team_civ.setdefault(civ_id, [0, 0])
+                tally[0] += picks
+                tally[1] += wins
         items.append(
             TeamStandingRow(
                 team_id=team.id,
@@ -1196,6 +1244,10 @@ async def get_team_standings(
                 member_count=len(members),
                 combined_rating_sum=total,
                 combined_rating_average=(total / len(peaks)) if peaks else 0.0,
+                # Combined in-window W/L = sum of the members' records.
+                combined_wins=sum(m.wins for m in members),
+                combined_losses=sum(m.losses for m in members),
+                civs=_sorted_civ_stats(team_civ),
                 members=members,
             )
         )
