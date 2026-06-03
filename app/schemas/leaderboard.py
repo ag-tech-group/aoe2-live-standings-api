@@ -26,6 +26,29 @@ class LeaderboardRead(BaseModel):
     is_ranked: bool
 
 
+class RecentMatchup(BaseModel):
+    """One recent in-window game with its civ matchup, for a standings tooltip.
+
+    The expand half of the recent-results enrichment (#218): the same
+    outcome carried in ``TournamentRecord.recent_results`` plus the
+    entrant's civ and — on a 1v1 leaderboard — the opposing player's civ,
+    so the consumer can render a "<your civ> vs <their civ>" tooltip on
+    each recent-result icon. The consumer maps civ ids to names/emblems.
+    """
+
+    outcome: MatchOutcome
+    # The entrant's civilization in this game.
+    civilization_id: int
+    # The opposing player's civilization on a 1v1 leaderboard. Null when no
+    # single opponent resolves — the leaderboard isn't 1v1, or the match
+    # record carries no opposing-team row.
+    opponent_civilization_id: int | None
+    map_name: str
+    # When the match finished; null only if it settled without a completion
+    # time (not expected for a counted, outcome-bearing game).
+    completed_at: datetime | None
+
+
 class TournamentRecord(BaseModel):
     """A player's stats within a tournament's date window.
 
@@ -54,6 +77,12 @@ class TournamentRecord(BaseModel):
     # matches, newest-first, capped server-side. Empty when no in-window
     # games. The tournament-scoped sibling of ``StandingRow.recent_results``.
     recent_results: list[MatchOutcome]
+    # Expand half of the recent-results enrichment (#218): the same recent
+    # in-window games, enriched with the civ matchup for a per-icon tooltip.
+    # Newest-first, same cap as ``recent_results``. ``recent_results`` stays
+    # through the FE transition and is removed in the contract phase once the
+    # FE reads matchups instead.
+    recent_matchups: list[RecentMatchup]
 
     @computed_field
     @property
@@ -203,3 +232,45 @@ class PlayerProgression(BaseModel):
     profile_id: int
     alias: str
     points: list[RatingPoint]
+
+
+class CivStat(BaseModel):
+    """Pick/win counts for one civilization."""
+
+    civilization_id: int
+    # Completed games an entrant played this civ (in-window, on the
+    # tournament's leaderboard). Ladder opponents' rows are excluded.
+    picks: int
+    # The subset of ``picks`` the entrant won.
+    wins: int
+
+
+class PlayerCivStats(BaseModel):
+    """One entrant's per-civ pick/win breakdown.
+
+    ``tournament_player_id`` is the stable roster key (#187); ``profile_id``
+    is its linked polled identity — always set, since an entry only appears
+    here for a rostered player with counted matches, which requires a link.
+    ``civs`` is ordered by picks desc, then civ id.
+    """
+
+    tournament_player_id: int
+    profile_id: int
+    civs: list[CivStat]
+
+
+class CivStats(BaseModel):
+    """Civilization pick/win aggregation for a tournament's entrants.
+
+    ``overall`` sums each civ's picks/wins across all entrants; ``by_player``
+    breaks the same counts down per roster row. Counts cover only the
+    tournament players' completed matches on the tournament's leaderboard,
+    windowed to ``[start_date, grand_finals_date]`` (a null bound is open) —
+    their ladder opponents' rows are excluded. Civs with no entrant picks
+    are absent from both lists. ``overall`` is ordered by picks desc then
+    civ id; ``by_player`` by ``tournament_player_id``.
+    """
+
+    last_polled_at: datetime | None
+    overall: list[CivStat]
+    by_player: list[PlayerCivStats]
