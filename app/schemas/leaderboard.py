@@ -274,3 +274,70 @@ class CivStats(BaseModel):
     last_polled_at: datetime | None
     overall: list[CivStat]
     by_player: list[PlayerCivStats]
+
+
+class StandingHistoryPoint(BaseModel):
+    """A player's leaderboard position + peak rating at one time bucket."""
+
+    # 1-based position by peak (comparePeakRank: peak desc, then current
+    # rating desc, then display name) among entrants who have debuted by
+    # this bucket.
+    position: int
+    # Highest post-match rating the player reached on or before this bucket
+    # (peak-so-far). Stable for past buckets — a later new high never
+    # rewrites it.
+    peak_rating: int
+
+
+class PlayerStandingHistory(BaseModel):
+    """One entrant's position-over-time series, aligned to the shared buckets.
+
+    ``points[i]`` is the entrant's standing at ``buckets[i]`` (see
+    ``StandingsHistory``), or ``null`` for buckets before their first
+    in-window match (pre-debut).
+    """
+
+    tournament_player_id: int
+    profile_id: int
+    points: list[StandingHistoryPoint | None]
+
+
+class TeamStandingHistoryPoint(BaseModel):
+    """A team's position + combined peak elo at one time bucket."""
+
+    # 1-based position by combined peak elo (desc) among teams with at
+    # least one debuted member by this bucket.
+    position: int
+    # Sum of the team members' peak-so-far ratings as of this bucket; a
+    # member who hasn't debuted yet contributes nothing.
+    combined_peak_elo: int
+
+
+class TeamStandingHistory(BaseModel):
+    """One team's combined-peak-elo-over-time series, aligned to the buckets.
+
+    ``points[i]`` is the team's standing at ``buckets[i]``, or ``null`` for
+    buckets before any member's first in-window match.
+    """
+
+    team_id: int
+    points: list[TeamStandingHistoryPoint | None]
+
+
+class StandingsHistory(BaseModel):
+    """Tournament standings reconstructed at past daily buckets (#219).
+
+    ``buckets`` is the shared daily time axis (midnight-UTC date labels);
+    a bucket's values reflect every completed in-window match on or before
+    that calendar day, so a past bucket never shifts as new matches arrive
+    (peak-so-far over the immutable match log). ``players`` and ``teams``
+    carry per-entity series aligned index-for-index to ``buckets``, with
+    ``null`` points before the entity's first match. Position is by peak
+    (``max_rating``), matching the standings table's peak ordering — not by
+    the live rating, which would retroactively rewrite earlier positions.
+    """
+
+    last_polled_at: datetime | None
+    buckets: list[datetime]
+    players: list[PlayerStandingHistory]
+    teams: list[TeamStandingHistory]

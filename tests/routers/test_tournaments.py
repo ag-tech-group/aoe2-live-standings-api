@@ -2102,6 +2102,207 @@ class TestCivStats:
         )
 
 
+class TestStandingsHistory:
+    """GET /{slug}/standings/history: position + combined-elo over daily buckets (#219)."""
+
+    async def test_player_position_series_by_peak(self, client: AsyncClient, session: AsyncSession):
+        # P1 plays days 1-3; P2 days 2-3. Daily buckets; position by peak-so-far.
+        for match_id, profile_id, day, rating in (
+            (1, 1, 1, 1500),
+            (2, 1, 2, 1520),
+            (3, 1, 3, 1510),  # P1 peak stays 1520
+            (4, 2, 2, 1530),
+            (5, 2, 3, 1540),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=profile_id, new_rating=rating)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 6, 30, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        assert [b[:10] for b in body["buckets"]] == ["2026-06-01", "2026-06-02", "2026-06-03"]
+        by_profile = {p["profile_id"]: p for p in body["players"]}
+        # P1: day1 alone (pos1, peak1500); day2 P2 peak 1530 > P1 1520 (pos2); day3 pos2 peak1520.
+        assert by_profile[1]["points"] == [
+            {"position": 1, "peak_rating": 1500},
+            {"position": 2, "peak_rating": 1520},
+            {"position": 2, "peak_rating": 1520},
+        ]
+        # P2: null pre-debut (bucket 0), then pos1 peak1530, pos1 peak1540.
+        assert by_profile[2]["points"] == [
+            None,
+            {"position": 1, "peak_rating": 1530},
+            {"position": 1, "peak_rating": 1540},
+        ]
+        assert body["last_polled_at"] is not None
+        assert body["teams"] == []
+
+    async def test_position_by_peak_not_current_rating(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # P1 peaks at 1600 then drops to 1400; P2 steady 1500. On day 2 P1's
+        # current (1400) < P2's (1500), but P1's peak (1600) > P2's (1500), so
+        # P1 still outranks P2 — position is by peak, not current.
+        for match_id, profile_id, day, rating in (
+            (1, 1, 1, 1600),
+            (2, 1, 2, 1400),
+            (3, 2, 2, 1500),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=profile_id, new_rating=rating)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        by_profile = {p["profile_id"]: p for p in body["players"]}
+        # Day-2 bucket (index 1): P1 ahead on peak despite the lower current rating.
+        assert by_profile[1]["points"][1] == {"position": 1, "peak_rating": 1600}
+        assert by_profile[2]["points"][1] == {"position": 2, "peak_rating": 1500}
+
+    async def test_past_bucket_unchanged_by_later_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The append-only invariant: a later new high must not rewrite an
+        # earlier bucket's peak.
+        for match_id, day, rating in ((1, 1, 1500), (2, 3, 1800)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        points = (await client.get("/v1/tournaments/cup/standings/history")).json()["players"][0][
+            "points"
+        ]
+        # Buckets 06-01/06-02/06-03. Day-1 frozen at 1500 even though the player
+        # later peaks at 1800; day-2 has no new match so it's still 1500.
+        assert [p and p["peak_rating"] for p in points] == [1500, 1500, 1800]
+
+    async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
+        for match_id, day, rating in (
+            (1, 1, 2000),  # pre-window (start 06-05) — excluded
+            (2, 6, 1500),  # in-window
+            (3, 20, 3000),  # post-window (gf 06-10) — excluded
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 6, 10, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        # Only the 06-06 match counts: buckets 06-05..06-06, peak 1500 (not 2000/3000).
+        assert [b[:10] for b in body["buckets"]] == ["2026-06-05", "2026-06-06"]
+        points = body["players"][0]["points"]
+        assert points[0] is None  # 06-05: no in-window match yet
+        assert points[1] == {"position": 1, "peak_rating": 1500}
+
+    async def test_team_combined_peak_series(self, client: AsyncClient, session: AsyncSession):
+        # Team Alpha = P1+P2, Bravo = P3. Combined peak = sum of member peaks.
+        for match_id, profile_id, rating in ((1, 1, 1500), (2, 2, 1600), (3, 3, 2000)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=profile_id, new_rating=rating)
+            )
+            session.add(match)
+        tournament = make_tournament(
+            "cup",
+            profile_ids=[1, 2, 3],
+            leaderboard_id=3,
+            start_date=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        tournament.teams.append(make_team(tournament, "Alpha", profile_ids=[1, 2]))
+        tournament.teams.append(make_team(tournament, "Bravo", profile_ids=[3]))
+        session.add(tournament)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        teams = {t["team_id"]: t for t in body["teams"]}
+        alpha_id = tournament.teams[0].id
+        bravo_id = tournament.teams[1].id
+        # Single bucket (06-01). Alpha 1500+1600=3100 (pos1); Bravo 2000 (pos2).
+        assert teams[alpha_id]["points"] == [{"position": 1, "combined_peak_elo": 3100}]
+        assert teams[bravo_id]["points"] == [{"position": 2, "combined_peak_elo": 2000}]
+
+    async def test_empty_when_no_history(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        assert body == {"last_polled_at": None, "buckets": [], "players": [], "teams": []}
+
+    async def test_cache_control_header_unauthenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/standings/history")
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
+        )
+
+
 class TestStandingsStreamLive:
     """stream_live: folded onto the standings row from the live_streams snapshot."""
 

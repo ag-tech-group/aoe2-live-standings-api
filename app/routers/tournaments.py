@@ -9,7 +9,7 @@ request sees. ``POST /`` is open to any authenticated criticalbit user
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import Row, and_, case, func, or_, select
@@ -43,11 +43,16 @@ from app.schemas import (
     ListEnvelope,
     PlayerCivStats,
     PlayerProgression,
+    PlayerStandingHistory,
     RatingPoint,
     RecentMatchup,
+    StandingHistoryPoint,
     StandingRow,
+    StandingsHistory,
     StandingTeam,
     TeamMemberRead,
+    TeamStandingHistory,
+    TeamStandingHistoryPoint,
     TeamStandingRow,
     TournamentCreate,
     TournamentRead,
@@ -875,6 +880,198 @@ async def get_progression(
     return ListEnvelope[PlayerProgression](
         last_polled_at=compute_last_polled_at(timestamps),
         items=list(series.values()),
+    )
+
+
+def _to_utc(value: datetime) -> datetime:
+    """Normalize a possibly-naive DB datetime to aware UTC.
+
+    Postgres (asyncpg) returns tz-aware datetimes, but SQLite (tests) hands
+    back naive ones for ``DateTime(timezone=True)`` columns. The history
+    endpoint does calendar-date arithmetic on these, so they must be aware
+    and on a common zone first.
+    """
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+@router.get("/{tournament_slug}/standings/history")
+async def get_standings_history(
+    request: Request,
+    response: Response,
+    tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
+) -> StandingsHistory:
+    """Per-entrant position + per-team combined-elo over daily buckets (#219).
+
+    Reconstructs the standings at each past day from the immutable match
+    log — for every completed in-window match on the tournament's
+    leaderboard, the post-match rating at its completion time (the same
+    source as ``/progression``). For each daily bucket (a midnight-UTC date
+    label), an entrant's ``peak_rating`` is the highest post-match rating
+    they reached on or before that day; ``position`` ranks debuted entrants
+    by ``comparePeakRank`` (peak desc, current rating desc, display name). A
+    team's ``combined_peak_elo`` sums its members' peak-so-far. Points are
+    ``null`` before the entity's first match. Because peaks are taken over
+    matches that have already completed, a past bucket's values never shift
+    as new matches arrive — the append-only invariant the live charts rely
+    on. Bounded by the tournament's date window, mirroring ``/progression``.
+    """
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
+
+    stmt = (
+        select(
+            TournamentPlayer.id,
+            TournamentPlayer.profile_id,
+            TournamentPlayer.name,
+            Match.completed_at,
+            MatchPlayer.new_rating,
+        )
+        .join(MatchPlayer, MatchPlayer.profile_id == TournamentPlayer.profile_id)
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            TournamentPlayer.tournament_id == tournament.id,
+            TournamentPlayer.profile_id.is_not(None),
+            Match.leaderboard_id == tournament.leaderboard_id,
+            Match.completed_at.is_not(None),
+            MatchPlayer.new_rating.is_not(None),
+        )
+        .order_by(TournamentPlayer.id, Match.completed_at, Match.match_id)
+    )
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    rows = (await session.execute(stmt)).all()
+
+    if not rows:
+        return StandingsHistory(last_polled_at=None, buckets=[], players=[], teams=[])
+
+    # Per-entrant (completed_at, rating) points, oldest-first (query order),
+    # plus the display name for the ranking tie-break.
+    points_by_tp: dict[int, list[tuple[datetime, int]]] = {}
+    profile_by_tp: dict[int, int] = {}
+    name_by_tp: dict[int, str] = {}
+    for tp_id, profile_id, name, completed_at, new_rating in rows:
+        points_by_tp.setdefault(tp_id, []).append((_to_utc(completed_at), new_rating))
+        profile_by_tp[tp_id] = profile_id
+        name_by_tp[tp_id] = name
+
+    # Daily midnight-UTC buckets, from the tournament start (or the first
+    # match when the window is open-ended) through the last match's day.
+    all_completed = [point[0] for points in points_by_tp.values() for point in points]
+    start_anchor = _to_utc(tournament.start_date) if tournament.start_date else min(all_completed)
+    start_day = start_anchor.date()
+    end_day = max(all_completed).date()
+    buckets: list[datetime] = []
+    day = min(start_day, end_day)
+    while day <= end_day:
+        buckets.append(datetime(day.year, day.month, day.day, tzinfo=UTC))
+        day += timedelta(days=1)
+
+    # Sweep each entrant's oldest-first points alongside the ascending
+    # buckets: peak-so-far + current rating as of each day's end. None until
+    # the first match lands (pre-debut).
+    peak_current_by_tp: dict[int, list[tuple[int, int] | None]] = {}
+    for tp_id, points in points_by_tp.items():
+        series: list[tuple[int, int] | None] = []
+        idx = 0
+        peak: int | None = None
+        current: int | None = None
+        for bucket in buckets:
+            end_of_day = bucket + timedelta(days=1)
+            while idx < len(points) and points[idx][0] < end_of_day:
+                current = points[idx][1]
+                peak = current if peak is None else max(peak, current)
+                idx += 1
+            series.append(None if peak is None else (peak, current))
+        peak_current_by_tp[tp_id] = series
+
+    # Rank entrants at each bucket: peak desc, current desc, name asc, then
+    # tournament_player_id for a total, stable order.
+    player_points: dict[int, list[StandingHistoryPoint | None]] = {tp: [] for tp in points_by_tp}
+    for index in range(len(buckets)):
+        debuted = [tp for tp in points_by_tp if peak_current_by_tp[tp][index] is not None]
+        debuted.sort(
+            key=lambda tp: (
+                -peak_current_by_tp[tp][index][0],
+                -peak_current_by_tp[tp][index][1],
+                name_by_tp[tp],
+                tp,
+            )
+        )
+        position_at = {tp: rank + 1 for rank, tp in enumerate(debuted)}
+        for tp in points_by_tp:
+            snapshot = peak_current_by_tp[tp][index]
+            player_points[tp].append(
+                StandingHistoryPoint(position=position_at[tp], peak_rating=snapshot[0])
+                if snapshot is not None
+                else None
+            )
+
+    players = sorted(
+        (
+            PlayerStandingHistory(
+                tournament_player_id=tp,
+                profile_id=profile_by_tp[tp],
+                points=player_points[tp],
+            )
+            for tp in points_by_tp
+        ),
+        key=lambda player: player.tournament_player_id,
+    )
+
+    # Teams: combined peak elo = sum of members' peak-so-far at each bucket.
+    team_member_rows = (
+        await session.execute(
+            select(Team.id, TeamMember.tournament_player_id)
+            .join(TeamMember, TeamMember.team_id == Team.id)
+            .where(Team.tournament_id == tournament.id)
+        )
+    ).all()
+    members_by_team: dict[int, list[int]] = {}
+    for team_id, tp_id in team_member_rows:
+        members_by_team.setdefault(team_id, []).append(tp_id)
+
+    team_combined: dict[int, list[int | None]] = {}
+    for team_id, member_tps in members_by_team.items():
+        combined: list[int | None] = []
+        for index in range(len(buckets)):
+            peaks = [
+                peak_current_by_tp[tp][index][0]
+                for tp in member_tps
+                if tp in peak_current_by_tp and peak_current_by_tp[tp][index] is not None
+            ]
+            combined.append(sum(peaks) if peaks else None)
+        team_combined[team_id] = combined
+
+    team_points: dict[int, list[TeamStandingHistoryPoint | None]] = {
+        team_id: [] for team_id in members_by_team
+    }
+    for index in range(len(buckets)):
+        ranked = [tid for tid in members_by_team if team_combined[tid][index] is not None]
+        ranked.sort(key=lambda tid: (-team_combined[tid][index], tid))
+        position_at = {tid: rank + 1 for rank, tid in enumerate(ranked)}
+        for team_id in members_by_team:
+            value = team_combined[team_id][index]
+            team_points[team_id].append(
+                TeamStandingHistoryPoint(position=position_at[team_id], combined_peak_elo=value)
+                if value is not None
+                else None
+            )
+
+    teams = sorted(
+        (
+            TeamStandingHistory(team_id=team_id, points=team_points[team_id])
+            for team_id in members_by_team
+        ),
+        key=lambda team: team.team_id,
+    )
+
+    return StandingsHistory(
+        last_polled_at=max(all_completed),
+        buckets=buckets,
+        players=players,
+        teams=teams,
     )
 
 
