@@ -12,8 +12,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import Row, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
@@ -37,9 +38,13 @@ from app.models import (
     TournamentPlayer,
 )
 from app.schemas import (
+    CivStat,
+    CivStats,
     ListEnvelope,
+    PlayerCivStats,
     PlayerProgression,
     RatingPoint,
+    RecentMatchup,
     StandingRow,
     StandingTeam,
     TeamMemberRead,
@@ -414,9 +419,11 @@ async def _tournament_record_by_profile(
     Pulls every completed match on the tournament's leaderboard whose
     ``started_at`` falls inside ``[start_date, grand_finals_date]`` — a
     null bound is treated as open — and folds it into one ``TournamentRecord``
-    per profile: counts, streak, peak rating, latest-match timestamp, and
-    a capped recent-results list. Every profile gets an entry; those with
-    no in-window matches get a zero record (counts/streak 0, others null/empty).
+    per profile: counts, streak, peak rating, latest-match timestamp, a
+    capped recent-results list, and the matching capped recent-matchups list
+    (#218, same rows projected with the civ matchup). Every profile gets an
+    entry; those with no in-window matches get a zero record (counts/streak
+    0, others null/empty).
     """
     records = {
         profile_id: TournamentRecord(
@@ -427,18 +434,40 @@ async def _tournament_record_by_profile(
             peak_rating=None,
             last_match_at=None,
             recent_results=[],
+            recent_matchups=[],
         )
         for profile_id in profile_ids
     }
     if not profile_ids:
         return records
 
+    # Opponent civ for the recent-matchup tooltip (#218): a correlated scalar
+    # subquery, NOT a join — a join would fan the entrant's match rows out
+    # one-per-opponent and corrupt the counts/streak folded from the same
+    # rows. One opponent per match on a 1v1 leaderboard (this event); the
+    # `order_by` keeps a team-game leaderboard's pick deterministic.
+    opponent = aliased(MatchPlayer)
+    opponent_civilization_id = (
+        select(opponent.civilization_id)
+        .where(
+            opponent.match_id == MatchPlayer.match_id,
+            opponent.team_id != MatchPlayer.team_id,
+        )
+        .order_by(opponent.profile_id)
+        .limit(1)
+        .scalar_subquery()
+    )
+
     stmt = (
         select(
             MatchPlayer.profile_id,
             MatchPlayer.outcome,
             MatchPlayer.new_rating,
+            MatchPlayer.civilization_id,
             Match.started_at,
+            Match.completed_at,
+            Match.map_name,
+            opponent_civilization_id.label("opponent_civilization_id"),
         )
         .join(Match, Match.match_id == MatchPlayer.match_id)
         .where(
@@ -453,12 +482,12 @@ async def _tournament_record_by_profile(
     if tournament.grand_finals_date is not None:
         stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
 
-    rows_by_profile: dict[int, list[tuple[MatchOutcome, int | None, datetime]]] = {}
-    for profile_id, outcome, new_rating, started_at in (await session.execute(stmt)).all():
-        rows_by_profile.setdefault(profile_id, []).append((outcome, new_rating, started_at))
+    rows_by_profile: dict[int, list[Row]] = {}
+    for row in (await session.execute(stmt)).all():
+        rows_by_profile.setdefault(row.profile_id, []).append(row)
 
     for profile_id, rows in rows_by_profile.items():
-        outs = [o for o, _, _ in rows]
+        outs = [r.outcome for r in rows]
         wins = sum(1 for o in outs if o == MatchOutcome.WIN)
         # `outs` is newest-first; the streak is the leading run of one outcome.
         lead = outs[0]
@@ -467,7 +496,7 @@ async def _tournament_record_by_profile(
             if outcome != lead:
                 break
             run += 1
-        ratings = [r for _, r, _ in rows if r is not None]
+        ratings = [r.new_rating for r in rows if r.new_rating is not None]
         records[profile_id] = TournamentRecord(
             games_played=len(outs),
             wins=wins,
@@ -475,8 +504,18 @@ async def _tournament_record_by_profile(
             streak=run if lead == MatchOutcome.WIN else -run,
             peak_rating=max(ratings) if ratings else None,
             # `rows` is newest-first; row 0's started_at is the latest.
-            last_match_at=rows[0][2],
+            last_match_at=rows[0].started_at,
             recent_results=outs[:_RECENT_RESULTS_LIMIT],
+            recent_matchups=[
+                RecentMatchup(
+                    outcome=r.outcome,
+                    civilization_id=r.civilization_id,
+                    opponent_civilization_id=r.opponent_civilization_id,
+                    map_name=r.map_name,
+                    completed_at=r.completed_at,
+                )
+                for r in rows[:_RECENT_RESULTS_LIMIT]
+            ],
         )
     return records
 
@@ -650,6 +689,7 @@ async def get_standings(
                         peak_rating=None,
                         last_match_at=None,
                         recent_results=[],
+                        recent_matchups=[],
                     ),
                     rank=None,
                     rank_total=None,
@@ -664,6 +704,98 @@ async def get_standings(
     return ListEnvelope[StandingRow](
         last_polled_at=compute_last_polled_at(timestamps),
         items=items,
+    )
+
+
+@router.get("/{tournament_slug}/civ-stats")
+async def get_civ_stats(
+    request: Request,
+    response: Response,
+    tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
+) -> CivStats:
+    """Civilization pick/win aggregation for the tournament's entrants.
+
+    Counts only the tournament players' completed matches on the tournament's
+    leaderboard, windowed to ``[start_date, grand_finals_date]`` (a null bound
+    is open) — their ladder opponents' civ rows are excluded. ``overall``
+    aggregates across all entrants; ``by_player`` breaks the same counts down
+    per roster row. ``picks`` is the completed games on a civ, ``wins`` the
+    subset won; civs with no entrant picks are absent.
+    """
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
+
+    # Entrants are linked roster rows (profile_id set). Unlinked rows have no
+    # polled identity and thus no match data — the IN filter excludes them.
+    roster = (
+        await session.execute(
+            select(TournamentPlayer.id, TournamentPlayer.profile_id).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.profile_id.is_not(None),
+            )
+        )
+    ).all()
+    tournament_player_id_by_profile = {profile_id: tp_id for tp_id, profile_id in roster}
+    profile_ids = list(tournament_player_id_by_profile)
+    if not profile_ids:
+        return CivStats(last_polled_at=None, overall=[], by_player=[])
+
+    stmt = (
+        select(
+            MatchPlayer.profile_id,
+            MatchPlayer.civilization_id,
+            func.count().label("picks"),
+            func.sum(case((MatchPlayer.outcome == MatchOutcome.WIN, 1), else_=0)).label("wins"),
+            func.max(Match.completed_at).label("last_completed_at"),
+        )
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Match.leaderboard_id == tournament.leaderboard_id,
+            MatchPlayer.profile_id.in_(profile_ids),
+            MatchPlayer.outcome.is_not(None),
+        )
+        .group_by(MatchPlayer.profile_id, MatchPlayer.civilization_id)
+    )
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+
+    # Fold the per-(profile, civ) rows into the overall sum and the per-player
+    # breakdown in one pass.
+    overall: dict[int, list[int]] = {}  # civ_id -> [picks, wins]
+    by_profile: dict[int, dict[int, list[int]]] = {}  # profile_id -> civ_id -> [picks, wins]
+    timestamps: list[datetime | None] = []
+    for profile_id, civ_id, picks, wins, last_completed_at in (await session.execute(stmt)).all():
+        tally = overall.setdefault(civ_id, [0, 0])
+        tally[0] += picks
+        tally[1] += wins
+        by_profile.setdefault(profile_id, {})[civ_id] = [picks, wins]
+        timestamps.append(last_completed_at)
+
+    def _civ_stats(counts: dict[int, list[int]]) -> list[CivStat]:
+        # Most-played first, then civ id for a stable tie-break.
+        return [
+            CivStat(civilization_id=civ_id, picks=picks, wins=wins)
+            for civ_id, (picks, wins) in sorted(counts.items(), key=lambda kv: (-kv[1][0], kv[0]))
+        ]
+
+    by_player = sorted(
+        (
+            PlayerCivStats(
+                tournament_player_id=tournament_player_id_by_profile[profile_id],
+                profile_id=profile_id,
+                civs=_civ_stats(counts),
+            )
+            for profile_id, counts in by_profile.items()
+        ),
+        key=lambda player: player.tournament_player_id,
+    )
+
+    return CivStats(
+        last_polled_at=compute_last_polled_at(timestamps),
+        overall=_civ_stats(overall),
+        by_player=by_player,
     )
 
 

@@ -1,8 +1,12 @@
 from app.schemas.common import ListEnvelope, compute_last_polled_at
 from app.schemas.leaderboard import (
+    CivStat,
+    CivStats,
     LeaderboardRead,
+    PlayerCivStats,
     PlayerProgression,
     RatingPoint,
+    RecentMatchup,
     StandingRow,
     StandingTeam,
     TournamentRecord,
@@ -33,16 +37,20 @@ from app.schemas.tournament import (
 )
 
 __all__ = [
+    "CivStat",
+    "CivStats",
     "LeaderboardRead",
     "ListEnvelope",
     "MatchDetail",
     "MatchPlayerRead",
     "MatchRead",
+    "PlayerCivStats",
     "PlayerDetail",
     "PlayerProgression",
     "PlayerRatingRead",
     "PlayerRead",
     "RatingPoint",
+    "RecentMatchup",
     "RosterPlayerCreate",
     "RosterPlayerUpdate",
     "StandingRow",

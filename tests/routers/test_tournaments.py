@@ -453,6 +453,7 @@ class TestStandingsUnratedRoster:
             "peak_rating": None,
             "last_match_at": None,
             "recent_results": [],
+            "recent_matchups": [],
             "win_pct": None,
         }
         assert newbie["rank"] is None
@@ -545,6 +546,7 @@ class TestStandingsUnlinkedRows:
             "peak_rating": None,
             "last_match_at": None,
             "recent_results": [],
+            "recent_matchups": [],
             "win_pct": None,
         }
         assert ghost["rank"] is None
@@ -997,6 +999,7 @@ class TestStandingsTournamentRecord:
             "peak_rating": None,
             "last_match_at": None,
             "recent_results": [],
+            "recent_matchups": [],
             "win_pct": None,
         }
 
@@ -1198,6 +1201,128 @@ class TestStandingsTournamentRecord:
 
         row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
         assert row["tournament_record"]["win_pct"] == 66.7
+
+
+class TestStandingsRecentMatchups:
+    """recent_matchups: tournament_record recent games enriched with the civ matchup (#218)."""
+
+    async def test_carries_civ_matchup_newest_first(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        # Two completed games; the entrant (profile 1, team 0) faces a ladder
+        # opponent (profile 999, team 1). Day 3 is newer than day 2.
+        for match_id, day, entrant_civ, opp_civ, outcome, map_name in (
+            (1, 2, 27, 7, MatchOutcome.WIN, "Arabia.rms"),
+            (2, 3, 13, 99, MatchOutcome.LOSS, "Arena.rms"),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                map_name=map_name,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 5, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, team_id=0, civilization_id=entrant_civ, outcome=outcome
+                )
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=999, team_id=1, civilization_id=opp_civ)
+            )
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        record = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]
+        matchups = record["recent_matchups"]
+        # Newest-first: day-3 (Arena, loss, 13 vs 99) then day-2 (Arabia, win, 27 vs 7).
+        assert [m["outcome"] for m in matchups] == ["loss", "win"]
+        assert [m["civilization_id"] for m in matchups] == [13, 27]
+        assert [m["opponent_civilization_id"] for m in matchups] == [99, 7]
+        assert [m["map_name"] for m in matchups] == ["Arena.rms", "Arabia.rms"]
+        # Suffix (Z vs +00:00) varies by environment; assert on the ISO prefix.
+        assert matchups[0]["completed_at"].startswith("2026-05-03T12:30:00")
+        assert matchups[1]["completed_at"].startswith("2026-05-02T12:30:00")
+
+    async def test_opponent_civ_null_when_no_opposing_row(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A match record with only the entrant's row (no opposing-team player)
+        # keeps the matchup but leaves the opponent civ null.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(
+                1, profile_id=1, team_id=0, civilization_id=27, outcome=MatchOutcome.WIN
+            )
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        matchups = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]["recent_matchups"]
+        assert len(matchups) == 1
+        assert matchups[0]["civilization_id"] == 27
+        assert matchups[0]["opponent_civilization_id"] is None
+
+    async def test_parity_with_recent_results_cap_and_window(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # recent_matchups is the same row set as recent_results: same cap (10),
+        # same newest-first order, same window scoping.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        # 12 in-window games (civ id == match id == day) + 1 pre-window.
+        for match_id in range(1, 13):
+            outcome = MatchOutcome.WIN if match_id % 2 == 0 else MatchOutcome.LOSS
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, match_id, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, team_id=0, civilization_id=match_id, outcome=outcome
+                )
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=999, team_id=1, civilization_id=0)
+            )
+            session.add(match)
+        pre = make_match(99, leaderboard_id=3, started_at=datetime(2020, 1, 1, 12, 0, tzinfo=UTC))
+        pre.players.append(make_match_player(99, profile_id=1, team_id=0, civilization_id=5))
+        session.add(pre)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 1, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 31, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        record = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]
+        results = record["recent_results"]
+        matchups = record["recent_matchups"]
+        assert len(matchups) == len(results) == _RECENT_RESULTS_LIMIT  # capped, pre-window dropped
+        assert [m["outcome"] for m in matchups] == results
+        # civ id == match id here; newest-first = matches 12..3.
+        assert [m["civilization_id"] for m in matchups] == list(range(12, 2, -1))
 
 
 class TestUpdateTournament:
@@ -1796,6 +1921,185 @@ class TestProgression:
 
         body = (await client.get("/v1/tournaments/cup/progression")).json()
         assert body == {"last_polled_at": None, "items": []}
+
+
+class TestCivStats:
+    """GET /{slug}/civ-stats: civ pick/win aggregation, entrants-only (#218)."""
+
+    async def test_overall_and_by_player_aggregation(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        for profile_id in (1, 2):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=2000)
+            )
+            session.add(player)
+        # profile 1: civ 27 (win, loss) + civ 13 (win); profile 2: civ 27 (loss).
+        for match_id, profile_id, civ, outcome in (
+            (1, 1, 27, MatchOutcome.WIN),
+            (2, 1, 27, MatchOutcome.LOSS),
+            (3, 1, 13, MatchOutcome.WIN),
+            (4, 2, 27, MatchOutcome.LOSS),
+        ):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=profile_id, civilization_id=civ, outcome=outcome
+                )
+            )
+            session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        # Overall: civ 27 picked 3× (1 win), civ 13 once (1 win). Picks desc.
+        assert body["overall"] == [
+            {"civilization_id": 27, "picks": 3, "wins": 1},
+            {"civilization_id": 13, "picks": 1, "wins": 1},
+        ]
+        tp1 = tournament.tracked_players[0].id
+        tp2 = tournament.tracked_players[1].id
+        assert body["by_player"] == [
+            {
+                "tournament_player_id": tp1,
+                "profile_id": 1,
+                "civs": [
+                    {"civilization_id": 27, "picks": 2, "wins": 1},
+                    {"civilization_id": 13, "picks": 1, "wins": 1},
+                ],
+            },
+            {
+                "tournament_player_id": tp2,
+                "profile_id": 2,
+                "civs": [{"civilization_id": 27, "picks": 1, "wins": 0}],
+            },
+        ]
+        assert body["last_polled_at"] is not None
+
+    async def test_excludes_ladder_opponents(self, client: AsyncClient, session: AsyncSession):
+        # The entrant's (unrostered) opponent's civ row must not be counted.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(
+                1, profile_id=1, team_id=0, civilization_id=27, outcome=MatchOutcome.WIN
+            )
+        )
+        match.players.append(
+            make_match_player(
+                1, profile_id=999, team_id=1, civilization_id=7, outcome=MatchOutcome.LOSS
+            )
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+        assert [c["civilization_id"] for c in body["by_player"][0]["civs"]] == [27]
+
+    async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        # day 1 pre-window, day 10 in-window, day 20 post-window.
+        for match_id, day, civ in ((1, 1, 27), (2, 10, 13), (3, 20, 99)):
+            match = make_match(
+                match_id, leaderboard_id=3, started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC)
+            )
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, civilization_id=civ, outcome=MatchOutcome.WIN
+                )
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 15, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body["overall"] == [{"civilization_id": 13, "picks": 1, "wins": 1}]
+
+    async def test_scoped_to_tournament_leaderboard(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        on = make_match(1, leaderboard_id=3)
+        on.players.append(
+            make_match_player(1, profile_id=1, civilization_id=27, outcome=MatchOutcome.WIN)
+        )
+        off = make_match(2, leaderboard_id=4)
+        off.players.append(
+            make_match_player(2, profile_id=1, civilization_id=13, outcome=MatchOutcome.WIN)
+        )
+        session.add_all([on, off])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+
+    async def test_excludes_in_progress_matches(self, client: AsyncClient, session: AsyncSession):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        done = make_match(1, leaderboard_id=3)
+        done.players.append(
+            make_match_player(1, profile_id=1, civilization_id=27, outcome=MatchOutcome.WIN)
+        )
+        live = make_match(2, leaderboard_id=3, state=MatchState.IN_PROGRESS, completed_at=None)
+        live.players.append(
+            make_match_player(2, profile_id=1, civilization_id=13, outcome=None, new_rating=None)
+        )
+        session.add_all([done, live])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body["overall"] == [{"civilization_id": 27, "picks": 1, "wins": 1}]
+
+    async def test_empty_when_roster_has_no_matches(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body == {"last_polled_at": None, "overall": [], "by_player": []}
+
+    async def test_empty_when_no_roster(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup", leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/civ-stats")).json()
+        assert body == {"last_polled_at": None, "overall": [], "by_player": []}
+
+    async def test_cache_control_header_unauthenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Viewer path opts into the shared CDN cache, like the other polled reads.
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/civ-stats")
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
+        )
 
 
 class TestStandingsStreamLive:
