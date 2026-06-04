@@ -41,6 +41,7 @@ from app.models import (
     Player,
     PlayerRating,
 )
+from app.poller.broadcast import LiveStreamMeta
 
 
 def dialect_insert(session: AsyncSession):
@@ -205,23 +206,31 @@ async def replace_live_match_players(session: AsyncSession, rows: list[dict[str,
 
 
 async def replace_live_streams(
-    session: AsyncSession, platform: str, tournament_player_ids: list[int]
+    session: AsyncSession, platform: str, live_rows: dict[int, LiveStreamMeta]
 ) -> None:
     """Clear one platform's rows in ``live_streams`` and rewrite the snapshot.
 
     Mirrors ``replace_live_match_players`` but scoped to a single
     ``platform`` (``DELETE WHERE platform = …``), so the Twitch and YouTube
-    pollers replace only their own rows and never clobber each other. Empty
-    ``tournament_player_ids`` just clears the platform's rows (nobody live
-    there now). Keyed on ``TournamentPlayer.id`` so placeholder rows
-    participate too (#147).
+    pollers replace only their own rows and never clobber each other. ``live_rows``
+    maps each live ``TournamentPlayer.id`` to its ``(title, category)`` (#233);
+    an empty map just clears the platform's rows (nobody live there now). Keyed
+    on ``TournamentPlayer.id`` so placeholder rows participate too (#147).
     """
     await session.execute(delete(LiveStream).where(LiveStream.platform == platform))
-    if not tournament_player_ids:
+    if not live_rows:
         return
     insert = dialect_insert(session)
     stmt = insert(LiveStream).values(
-        [{"tournament_player_id": row_id, "platform": platform} for row_id in tournament_player_ids]
+        [
+            {
+                "tournament_player_id": row_id,
+                "platform": platform,
+                "title": meta.title,
+                "category": meta.category,
+            }
+            for row_id, meta in sorted(live_rows.items())
+        ]
     )
     stmt = stmt.on_conflict_do_nothing(index_elements=["tournament_player_id", "platform"])
     await session.execute(stmt)

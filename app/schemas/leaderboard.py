@@ -204,6 +204,14 @@ class StandingRow(BaseModel):
     # match, or vice-versa. False when detection is off or the channel is
     # offline/unknown.
     stream_live: bool
+    # Title + category of that live broadcast, as of the same poll (#233).
+    # Both null when `stream_live` is false; either may be null when the
+    # platform omits it. `stream_category` is Twitch-only (its `game_name`,
+    # e.g. "Age of Empires II") — always null for a YouTube-sourced live row,
+    # which has no category equivalent. When live on both platforms, Twitch's
+    # values win.
+    stream_title: str | None
+    stream_category: str | None
     last_match_at: datetime | None
     # Null on unlinked rows (no polled refresh applies); the row's
     # ``last_polled_at`` envelope simply doesn't consider these.

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import HostLiveStream, LiveStream, Tournament, TournamentPlayer
+from app.poller.broadcast import LiveStreamMeta
 from app.poller.live_streams import (
     _apply_live_sets,
     tick_twitch_live,
@@ -18,32 +19,56 @@ from app.poller.live_streams import (
 )
 from tests.conftest import async_session_maker as session_maker_for_tasks
 
+# Bare presence (no title/category) — the common shape for liveness-only tests.
+_BARE = LiveStreamMeta(title=None, category=None)
+
+
+def _rows(*ids: int) -> dict[int, LiveStreamMeta]:
+    """A live-roster map with no metadata, for tests that only assert presence."""
+    return dict.fromkeys(ids, _BARE)
+
 
 class _StubTwitch:
-    """Returns the requested logins that are in a preset live set."""
+    """Returns the requested logins that are in a preset live set, with optional meta."""
 
-    def __init__(self, live: set[str]) -> None:
+    def __init__(self, live: set[str], meta: dict[str, LiveStreamMeta] | None = None) -> None:
         self._live = live
+        self._meta = meta or {}
         self.calls: list[list[str]] = []
 
-    async def get_live_logins(self, logins: list[str]) -> set[str]:
+    async def get_live_streams(self, logins: list[str]) -> dict[str, LiveStreamMeta]:
         self.calls.append(list(logins))
-        return {login for login in logins if login in self._live}
+        return {login: self._meta.get(login, _BARE) for login in logins if login in self._live}
 
 
 class _StubYouTube:
-    def __init__(self, live: set[tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        live: set[tuple[str, str]],
+        meta: dict[tuple[str, str], LiveStreamMeta] | None = None,
+    ) -> None:
         self._live = live
+        self._meta = meta or {}
         self.calls: list[list[tuple[str, str]]] = []
 
-    async def get_live_refs(self, refs: list[tuple[str, str]]) -> set[tuple[str, str]]:
+    async def get_live_refs(
+        self, refs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], LiveStreamMeta]:
         self.calls.append(list(refs))
-        return {ref for ref in refs if ref in self._live}
+        return {ref: self._meta.get(ref, _BARE) for ref in refs if ref in self._live}
 
 
 async def _live_stream_rows(session: AsyncSession) -> set[tuple[int, str]]:
     result = await session.execute(select(LiveStream))
     return {(r.tournament_player_id, r.platform) for r in result.scalars().all()}
+
+
+async def _live_stream_meta(session: AsyncSession) -> dict[tuple[int, str], LiveStreamMeta]:
+    result = await session.execute(select(LiveStream))
+    return {
+        (r.tournament_player_id, r.platform): LiveStreamMeta(title=r.title, category=r.category)
+        for r in result.scalars().all()
+    }
 
 
 async def _host_live_rows(session: AsyncSession) -> set[tuple[int, str]]:
@@ -90,6 +115,20 @@ class TestTickTwitchLive:
         assert await _live_stream_rows(session) == {(roster_row_ids[1], "twitch")}
         # No host channels supplied → host_live_streams stays empty.
         assert await _host_live_rows(session) == set()
+
+    async def test_writes_title_and_category(
+        self, session: AsyncSession, roster_row_ids: dict[int, int]
+    ):
+        """The Helix title + game_name fold onto the roster row's snapshot (#233)."""
+        twitch = _StubTwitch(
+            live={"grubby"},
+            meta={"grubby": LiveStreamMeta(title="ladder grind", category="Age of Empires II")},
+        )
+        stream_urls = {roster_row_ids[1]: ["https://twitch.tv/Grubby"]}
+        await tick_twitch_live(twitch, stream_urls, {}, session_maker_for_tasks)
+        assert (await _live_stream_meta(session))[(roster_row_ids[1], "twitch")] == LiveStreamMeta(
+            title="ladder grind", category="Age of Empires II"
+        )
 
     async def test_clears_when_nobody_live(
         self, session: AsyncSession, roster_row_ids: dict[int, int]
@@ -164,7 +203,7 @@ class TestApplyLiveSets:
     async def test_reports_change_when_roster_changes(
         self, session: AsyncSession, roster_row_ids: dict[int, int]
     ):
-        live = {roster_row_ids[1], roster_row_ids[2]}
+        live = _rows(roster_row_ids[1], roster_row_ids[2])
         assert await _apply_live_sets(session_maker_for_tasks, "twitch", live, set()) is True
         assert await _live_stream_rows(session) == {
             (roster_row_ids[1], "twitch"),
@@ -176,29 +215,44 @@ class TestApplyLiveSets:
     ):
         """Either snapshot flipping is enough to trip the nudge — they share a SSE event."""
         assert (
-            await _apply_live_sets(session_maker_for_tasks, "twitch", set(), {tournament_id})
-            is True
+            await _apply_live_sets(session_maker_for_tasks, "twitch", {}, {tournament_id}) is True
         )
         assert await _host_live_rows(session) == {(tournament_id, "twitch")}
 
     async def test_no_change_when_both_sets_stable(
         self, session: AsyncSession, roster_row_ids: dict[int, int], tournament_id: int
     ):
-        live = {roster_row_ids[1]}
+        live = _rows(roster_row_ids[1])
         hosts = {tournament_id}
         await _apply_live_sets(session_maker_for_tasks, "twitch", live, hosts)
         # Same sets again -> no rewrite, no nudge.
         assert await _apply_live_sets(session_maker_for_tasks, "twitch", live, hosts) is False
 
+    async def test_reports_change_when_only_title_changes(
+        self, session: AsyncSession, roster_row_ids: dict[int, int]
+    ):
+        """A title/category edit (same live set) still re-snapshots + nudges (#233)."""
+        rid = roster_row_ids[1]
+        first = {rid: LiveStreamMeta(title="ladder grind", category="Age of Empires II")}
+        renamed = {rid: LiveStreamMeta(title="GRAND FINALS", category="Age of Empires II")}
+        assert await _apply_live_sets(session_maker_for_tasks, "twitch", first, set()) is True
+        # Same live row, new title → counts as a change.
+        assert await _apply_live_sets(session_maker_for_tasks, "twitch", renamed, set()) is True
+        assert (await _live_stream_meta(session))[(rid, "twitch")] == LiveStreamMeta(
+            title="GRAND FINALS", category="Age of Empires II"
+        )
+        # Identical again → no rewrite, no nudge.
+        assert await _apply_live_sets(session_maker_for_tasks, "twitch", renamed, set()) is False
+
     async def test_platforms_do_not_clobber_each_other(
         self, session: AsyncSession, roster_row_ids: dict[int, int], tournament_id: int
     ):
         await _apply_live_sets(
-            session_maker_for_tasks, "twitch", {roster_row_ids[1]}, {tournament_id}
+            session_maker_for_tasks, "twitch", _rows(roster_row_ids[1]), {tournament_id}
         )
-        await _apply_live_sets(session_maker_for_tasks, "youtube", {roster_row_ids[2]}, set())
+        await _apply_live_sets(session_maker_for_tasks, "youtube", _rows(roster_row_ids[2]), set())
         # Rewriting twitch leaves the youtube rows intact for both snapshots.
-        await _apply_live_sets(session_maker_for_tasks, "twitch", {roster_row_ids[9]}, set())
+        await _apply_live_sets(session_maker_for_tasks, "twitch", _rows(roster_row_ids[9]), set())
         assert await _live_stream_rows(session) == {
             (roster_row_ids[9], "twitch"),
             (roster_row_ids[2], "youtube"),

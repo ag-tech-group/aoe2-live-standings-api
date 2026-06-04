@@ -10,6 +10,7 @@ request sees. ``POST /`` is open to any authenticated criticalbit user
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import Row, and_, case, func, or_, select
@@ -39,6 +40,7 @@ from app.models import (
     TournamentOwner,
     TournamentPlayer,
 )
+from app.poller.broadcast import PLATFORM_TWITCH
 from app.schemas import (
     CivStat,
     CivStats,
@@ -395,25 +397,40 @@ async def _host_stream_live_tournaments(
     return set((await session.execute(stmt)).scalars().all())
 
 
+class _StreamLive(NamedTuple):
+    """A roster row's live-broadcast title + category, as of the last poll (#233)."""
+
+    title: str | None
+    category: str | None
+
+
 async def _stream_live_roster_rows(
     session: AsyncSession,
     tournament_player_ids: list[int],
-) -> set[int]:
-    """Return the roster rows broadcasting live now (any platform).
+) -> dict[int, _StreamLive]:
+    """Map each live roster row to its broadcast title + category (any platform).
 
     Reads the ``live_streams`` snapshot the broadcast-live pollers rewrite
-    each cycle; a roster row with an entry on any platform is live. Backs
-    the ``stream_live`` flag on the standings row for both polled and
-    placeholder rows (#147). Empty when detection is off.
+    each cycle; a roster row present on any platform is live, and the row's
+    presence in the returned map backs the ``stream_live`` flag on the
+    standings row for both polled and placeholder rows (#147). When a row is
+    live on both platforms, Twitch's metadata wins — it carries the
+    ``category`` YouTube lacks (#233). Empty when detection is off.
     """
     if not tournament_player_ids:
-        return set()
-    stmt = (
-        select(LiveStream.tournament_player_id)
-        .where(LiveStream.tournament_player_id.in_(tournament_player_ids))
-        .distinct()
-    )
-    return set((await session.execute(stmt)).scalars().all())
+        return {}
+    stmt = select(
+        LiveStream.tournament_player_id,
+        LiveStream.platform,
+        LiveStream.title,
+        LiveStream.category,
+    ).where(LiveStream.tournament_player_id.in_(tournament_player_ids))
+    live: dict[int, _StreamLive] = {}
+    for tp_id, platform, title, category in (await session.execute(stmt)).all():
+        # First writer wins, except Twitch always overrides a prior YouTube row.
+        if tp_id not in live or platform == PLATFORM_TWITCH:
+            live[tp_id] = _StreamLive(title=title, category=category)
+    return live
 
 
 async def _tournament_record_by_profile(
@@ -662,6 +679,7 @@ async def get_standings(
     items: list[StandingRow] = []
     timestamps: list[datetime | None] = []
     for entry, player, rating in rows:
+        stream = stream_live_rows.get(entry.id)
         if player is not None:
             items.append(
                 StandingRow(
@@ -683,7 +701,9 @@ async def get_standings(
                     rank_total=rating.rank_total if rating else None,
                     in_match=player.profile_id in live_match_ids,
                     live_match_id=live_match_ids.get(player.profile_id),
-                    stream_live=entry.id in stream_live_rows,
+                    stream_live=stream is not None,
+                    stream_title=stream.title if stream else None,
+                    stream_category=stream.category if stream else None,
                     last_match_at=rating.last_match_at if rating else None,
                     updated_at=rating.updated_at if rating else player.updated_at,
                 )
@@ -720,7 +740,9 @@ async def get_standings(
                     rank_total=None,
                     in_match=False,
                     live_match_id=None,
-                    stream_live=entry.id in stream_live_rows,
+                    stream_live=stream is not None,
+                    stream_title=stream.title if stream else None,
+                    stream_category=stream.category if stream else None,
                     last_match_at=None,
                     updated_at=None,
                 )

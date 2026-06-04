@@ -54,3 +54,11 @@ class LiveStream(Base):
     )
     # "twitch" | "youtube" (see app.poller.broadcast platform constants).
     platform: Mapped[str] = mapped_column(primary_key=True)
+    # Live broadcast title + category as of the last poll (#233), folded onto
+    # the standings row. Both nullable: a channel can be live with neither set,
+    # and ``category`` (Twitch's ``game_name``) has no YouTube equivalent — it's
+    # always null for a YouTube-sourced row. Snapshot-replaced with the rest of
+    # the row each cycle; deliberately excludes volatile fields like viewer
+    # count, which would churn the change-detection nudge every tick.
+    title: Mapped[str | None] = mapped_column(default=None)
+    category: Mapped[str | None] = mapped_column(default=None)

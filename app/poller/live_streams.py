@@ -31,6 +31,7 @@ from app.models import HostLiveStream, LiveStream
 from app.poller.broadcast import (
     PLATFORM_TWITCH,
     PLATFORM_YOUTUBE,
+    LiveStreamMeta,
     TwitchLiveClient,
     YouTubeLiveClient,
     parse_twitch_login,
@@ -52,11 +53,18 @@ _TWITCH_INTERVAL_SECONDS = 60
 _YOUTUBE_INTERVAL_SECONDS = 1800
 
 
-async def _current_live_roster_rows(session: AsyncSession, platform: str) -> set[int]:
+async def _current_live_roster_rows(
+    session: AsyncSession, platform: str
+) -> dict[int, LiveStreamMeta]:
     rows = await session.execute(
-        select(LiveStream.tournament_player_id).where(LiveStream.platform == platform)
+        select(LiveStream.tournament_player_id, LiveStream.title, LiveStream.category).where(
+            LiveStream.platform == platform
+        )
     )
-    return set(rows.scalars().all())
+    return {
+        tp_id: LiveStreamMeta(title=title, category=category)
+        for tp_id, title, category in rows.all()
+    }
 
 
 async def _current_live_host_tournaments(session: AsyncSession, platform: str) -> set[int]:
@@ -69,22 +77,26 @@ async def _current_live_host_tournaments(session: AsyncSession, platform: str) -
 async def _apply_live_sets(
     session_maker: async_sessionmaker,
     platform: str,
-    live_rows: set[int],
+    live_rows: dict[int, LiveStreamMeta],
     live_host_tournaments: set[int],
 ) -> bool:
     """Rewrite ``platform``'s rows in both snapshots + nudge, if either changed.
 
     Reads current state first so a steady stream costs one cheap query per
-    snapshot and no nudge. Apply is atomic — both snapshots and the nudge
-    commit together — so an SSE subscriber never sees one half updated.
-    Returns whether anything changed.
+    snapshot and no nudge. The roster comparison is over the full
+    ``{id: (title, category)}`` map, so a streamer renaming their stream or
+    switching game category re-snapshots and nudges — but volatile fields like
+    viewer count are deliberately not stored, so a steady stream still costs no
+    nudge (#233). Apply is atomic — both snapshots and the nudge commit
+    together — so an SSE subscriber never sees one half updated. Returns whether
+    anything changed.
     """
     async with session_maker() as session:
         current_rows = await _current_live_roster_rows(session, platform)
         current_hosts = await _current_live_host_tournaments(session, platform)
         if current_rows == live_rows and current_hosts == live_host_tournaments:
             return False
-        await replace_live_streams(session, platform, sorted(live_rows))
+        await replace_live_streams(session, platform, live_rows)
         await replace_host_live_streams(session, platform, sorted(live_host_tournaments))
         # stream_live / host_stream_live ride live-data resources — nudge so
         # SSE subscribers refetch standings and the tournament record.
@@ -144,9 +156,13 @@ async def tick_twitch_live(
     rows_by_login = _twitch_logins_by_key(stream_urls)
     hosts_by_login = _twitch_logins_by_key(host_urls)
     all_logins = set(rows_by_login) | set(hosts_by_login)
-    live_logins = await twitch.get_live_logins(list(all_logins)) if all_logins else set()
-    live_rows = {row_id for login in live_logins for row_id in rows_by_login.get(login, set())}
-    live_hosts = {tid for login in live_logins for tid in hosts_by_login.get(login, set())}
+    live_meta = await twitch.get_live_streams(list(all_logins)) if all_logins else {}
+    live_rows = {
+        row_id: meta
+        for login, meta in live_meta.items()
+        for row_id in rows_by_login.get(login, set())
+    }
+    live_hosts = {tid for login in live_meta for tid in hosts_by_login.get(login, set())}
     await _apply_live_sets(session_maker, PLATFORM_TWITCH, live_rows, live_hosts)
     logger.info("poll_twitch_live_ok", live=len(live_rows), live_hosts=len(live_hosts))
 
@@ -166,9 +182,11 @@ async def tick_youtube_live(
     rows_by_ref = _youtube_refs_by_key(stream_urls)
     hosts_by_ref = _youtube_refs_by_key(host_urls)
     all_refs = set(rows_by_ref) | set(hosts_by_ref)
-    live_refs = await youtube.get_live_refs(list(all_refs)) if all_refs else set()
-    live_rows = {row_id for ref in live_refs for row_id in rows_by_ref.get(ref, set())}
-    live_hosts = {tid for ref in live_refs for tid in hosts_by_ref.get(ref, set())}
+    live_meta = await youtube.get_live_refs(list(all_refs)) if all_refs else {}
+    live_rows = {
+        row_id: meta for ref, meta in live_meta.items() for row_id in rows_by_ref.get(ref, set())
+    }
+    live_hosts = {tid for ref in live_meta for tid in hosts_by_ref.get(ref, set())}
     await _apply_live_sets(session_maker, PLATFORM_YOUTUBE, live_rows, live_hosts)
     logger.info("poll_youtube_live_ok", live=len(live_rows), live_hosts=len(live_hosts))
 
