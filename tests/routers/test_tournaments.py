@@ -2207,6 +2207,10 @@ class TestStandingsHistory:
 
     async def test_player_position_series_by_peak(self, client: AsyncClient, session: AsyncSession):
         # P1 plays days 1-3; P2 days 2-3. Daily buckets; position by peak-so-far.
+        # Polled identities — a linked row needs a Player row to pass the same
+        # /standings visibility gate (#232).
+        session.add(make_player(1))
+        session.add(make_player(2))
         for match_id, profile_id, day, rating in (
             (1, 1, 1, 1500),
             (2, 1, 2, 1520),
@@ -2256,6 +2260,8 @@ class TestStandingsHistory:
         # P1 peaks at 1600 then drops to 1400; P2 steady 1500. On day 2 P1's
         # current (1400) < P2's (1500), but P1's peak (1600) > P2's (1500), so
         # P1 still outranks P2 — position is by peak, not current.
+        session.add(make_player(1))
+        session.add(make_player(2))
         for match_id, profile_id, day, rating in (
             (1, 1, 1, 1600),
             (2, 1, 2, 1400),
@@ -2293,6 +2299,7 @@ class TestStandingsHistory:
     ):
         # The append-only invariant: a later new high must not rewrite an
         # earlier bucket's peak.
+        session.add(make_player(1))
         for match_id, day, rating in ((1, 1, 1500), (2, 3, 1800)):
             match = make_match(
                 match_id,
@@ -2323,6 +2330,7 @@ class TestStandingsHistory:
         assert peaks[-1] == 1800
 
     async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_player(1))
         for match_id, day, rating in (
             (1, 1, 2000),  # pre-window (start 06-05) — excluded
             (2, 6, 1500),  # in-window
@@ -2361,6 +2369,8 @@ class TestStandingsHistory:
 
     async def test_team_combined_peak_series(self, client: AsyncClient, session: AsyncSession):
         # Team Alpha = P1+P2, Bravo = P3. Combined peak = sum of member peaks.
+        for profile_id in (1, 2, 3):
+            session.add(make_player(profile_id))
         for match_id, profile_id, rating in ((1, 1, 1500), (2, 2, 1600), (3, 3, 2000)):
             match = make_match(
                 match_id,
@@ -2394,6 +2404,8 @@ class TestStandingsHistory:
     async def test_emits_marker_at_intraday_shift(self, client: AsyncClient, session: AsyncSession):
         # A reorder mid-day produces a bucket stamped at the match-completion
         # time, not just at daily midnights (#226 per-shift granularity).
+        session.add(make_player(1))
+        session.add(make_player(2))
         for profile_id, hour, rating in ((1, 14, 1500), (2, 15, 1600)):
             match = make_match(
                 profile_id,
@@ -2485,7 +2497,11 @@ class TestStandingsHistory:
         )
         match.players.append(make_match_player(1, profile_id=1, new_rating=2000))
         session.add(match)
-        # profile 2 is rostered but has no PlayerRating row → unrated.
+        # profile 2 is polled but has no PlayerRating row → unrated-but-polled:
+        # its Player row passes the /standings visibility gate, yet it ranks at
+        # the tail with a null peak. (A linked row with *no* Player row is the
+        # distinct gated-out case — see test_entity_set_matches_standings_*.)
+        session.add(make_player(2))
         session.add(
             make_tournament(
                 "cup",
@@ -2502,6 +2518,54 @@ class TestStandingsHistory:
         }
         assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 2000}
         assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": None}
+
+    async def test_entity_set_matches_standings_excludes_linked_unpolled(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Regression for #232: history must chart exactly the entities the
+        # standings table shows. A row linked to a profile_id whose Player
+        # hasn't been polled yet is gated out of /standings; before the fix it
+        # still surfaced in /standings/history as an unlabelled phantom the FE
+        # couldn't join to a name/team. The three roster shapes below must
+        # resolve to the same entity set on both surfaces.
+        polled = make_player(1)  # linked + polled → in both
+        polled.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1500, max_rating=1500)
+        )
+        session.add(polled)
+        match = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+        )
+        match.players.append(make_match_player(1, profile_id=1, new_rating=1500))
+        session.add(match)
+        tournament = make_tournament(
+            "cup", profile_ids=[1], leaderboard_id=3, start_date=datetime(2026, 6, 1, tzinfo=UTC)
+        )
+        # profile 2: linked but NOT yet polled (no Player row) → the phantom.
+        tournament.tracked_players.append(TournamentPlayer(profile_id=2, name="p2"))
+        # an unlinked placeholder (no profile_id) → first-class, must appear.
+        tournament.tracked_players.append(TournamentPlayer(name="Newcomer"))
+        session.add(tournament)
+        await session.commit()
+
+        standings = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        history = (await client.get("/v1/tournaments/cup/standings/history")).json()["players"]
+        standings_ids = {row["tournament_player_id"] for row in standings}
+        history_ids = {p["tournament_player_id"] for p in history}
+        # The two surfaces agree on the entity set — no phantom in history.
+        assert history_ids == standings_ids
+        # The linked-but-unpolled profile 2 is in neither surface.
+        assert 2 not in {row["profile_id"] for row in standings}
+        assert 2 not in {p["profile_id"] for p in history}
+        # The polled player and the unlinked placeholder are in both.
+        polled_tp = next(r["tournament_player_id"] for r in standings if r["profile_id"] == 1)
+        placeholder_tp = next(
+            r["tournament_player_id"] for r in standings if r["name"] == "Newcomer"
+        )
+        assert {polled_tp, placeholder_tp} == history_ids
 
     async def test_empty_when_no_history(self, client: AsyncClient, session: AsyncSession):
         session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))

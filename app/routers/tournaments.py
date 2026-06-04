@@ -977,7 +977,10 @@ async def get_standings_history(
     ``position`` at every bucket, ranked the same way the live table is — by
     peak (``max_rating``) desc, then current rating, then name
     (``comparePeakRank``). Unrated members are included and rank at the tail by
-    name, so the chart is complete (everyone has a line).
+    name, so the chart is complete (everyone has a line). The roster is gated
+    identically to ``/standings`` (#232) — a row linked to a not-yet-polled
+    ``profile_id`` is held back — so the two surfaces always agree on the
+    entity set and the chart never carries a phantom the FE can't label.
 
     Peak elo is carried in and only rises on a new all-time high, so an
     entity's ``peak_rating`` as of a bucket is ``max(pre-event baseline,
@@ -995,6 +998,11 @@ async def get_standings_history(
     # Full roster with carried-in peak/current — the metric the table ranks
     # on. LEFT JOIN PlayerRating so unrated members are included (they rank at
     # the tail by name); everyone holds a position at every bucket (#226).
+    # The Player join + visibility gate mirror ``/standings`` exactly (#232):
+    # a row linked to a ``profile_id`` whose ``Player`` hasn't been polled yet
+    # is held back, so history charts the same entity set the table shows and
+    # never emits a phantom the FE can't label. Unlinked rows
+    # (``profile_id IS NULL``) pass through via the right disjunct.
     roster = (
         await session.execute(
             select(
@@ -1004,6 +1012,7 @@ async def get_standings_history(
                 PlayerRating.max_rating,
                 PlayerRating.current_rating,
             )
+            .outerjoin(Player, TournamentPlayer.profile_id == Player.profile_id)
             .outerjoin(
                 PlayerRating,
                 and_(
@@ -1011,7 +1020,10 @@ async def get_standings_history(
                     PlayerRating.leaderboard_id == tournament.leaderboard_id,
                 ),
             )
-            .where(TournamentPlayer.tournament_id == tournament.id)
+            .where(
+                TournamentPlayer.tournament_id == tournament.id,
+                or_(Player.profile_id.is_not(None), TournamentPlayer.profile_id.is_(None)),
+            )
         )
     ).all()
     if not roster:
