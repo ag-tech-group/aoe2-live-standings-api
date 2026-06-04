@@ -315,6 +315,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert record["wins"] == 2
     assert record["losses"] == 0
     assert record["streak"] == 2
+    assert record["longest_win_streak"] == 2
     assert record["peak_rating"] == 2788
     assert record["recent_results"] == ["win", "win"]
     assert record["win_pct"] == 100.0

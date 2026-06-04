@@ -480,6 +480,7 @@ class TestStandingsUnratedRoster:
             "wins": 0,
             "losses": 0,
             "streak": 0,
+            "longest_win_streak": 0,
             "peak_rating": None,
             "last_match_at": None,
             "recent_results": [],
@@ -573,6 +574,7 @@ class TestStandingsUnlinkedRows:
             "wins": 0,
             "losses": 0,
             "streak": 0,
+            "longest_win_streak": 0,
             "peak_rating": None,
             "last_match_at": None,
             "recent_results": [],
@@ -967,6 +969,57 @@ class TestStandingsTournamentRecord:
         row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
         assert row["tournament_record"]["streak"] == -2
 
+    async def test_longest_win_streak_is_the_peak_not_the_current_run(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        # Oldest -> newest: WIN, WIN, WIN, LOSS, WIN. Current streak is just
+        # the trailing +1; the longest win run earlier in the window is 3.
+        for match_id, day, outcome in (
+            (1, 1, MatchOutcome.WIN),
+            (2, 2, MatchOutcome.WIN),
+            (3, 3, MatchOutcome.WIN),
+            (4, 4, MatchOutcome.LOSS),
+            (5, 5, MatchOutcome.WIN),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        record = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]
+        assert record["streak"] == 1
+        assert record["longest_win_streak"] == 3
+
+    async def test_longest_win_streak_is_zero_without_wins(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        for match_id in (1, 2):
+            match = make_match(match_id, leaderboard_id=3)
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.LOSS)
+            )
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        record = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]
+        assert record["longest_win_streak"] == 0
+
     async def test_excludes_matches_outside_the_window(
         self, client: AsyncClient, session: AsyncSession
     ):
@@ -1026,6 +1079,7 @@ class TestStandingsTournamentRecord:
             "wins": 0,
             "losses": 0,
             "streak": 0,
+            "longest_win_streak": 0,
             "peak_rating": None,
             "last_match_at": None,
             "recent_results": [],
