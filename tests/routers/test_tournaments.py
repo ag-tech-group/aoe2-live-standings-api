@@ -2631,3 +2631,67 @@ class TestStandingsStreamLive:
         assert items[0]["profile_id"] is None
         assert items[0]["alias"] == "iyouxin"
         assert items[0]["stream_live"] is True
+
+    async def test_surfaces_title_and_category(self, client: AsyncClient, session: AsyncSession):
+        """stream_title + stream_category fold onto the row from the snapshot (#233)."""
+        player = make_player(1, alias="p1")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        session.add(tournament)
+        await session.flush()
+        session.add(
+            LiveStream(
+                tournament_player_id=tournament.tracked_players[0].id,
+                platform="twitch",
+                title="ladder grind",
+                category="Age of Empires II",
+            )
+        )
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["stream_live"] is True
+        assert row["stream_title"] == "ladder grind"
+        assert row["stream_category"] == "Age of Empires II"
+
+    async def test_title_and_category_null_when_offline(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        player = make_player(1, alias="p1")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["stream_live"] is False
+        assert row["stream_title"] is None
+        assert row["stream_category"] is None
+
+    async def test_twitch_metadata_wins_over_youtube(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        """Live on both platforms → Twitch's title/category win (it has the category, #233)."""
+        player = make_player(1, alias="p1")
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        session.add(tournament)
+        await session.flush()
+        row_id = tournament.tracked_players[0].id
+        session.add(LiveStream(tournament_player_id=row_id, platform="youtube", title="yt mirror"))
+        session.add(
+            LiveStream(
+                tournament_player_id=row_id,
+                platform="twitch",
+                title="twitch primary",
+                category="Age of Empires II",
+            )
+        )
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
+        assert row["stream_live"] is True
+        assert row["stream_title"] == "twitch primary"
+        assert row["stream_category"] == "Age of Empires II"

@@ -19,6 +19,7 @@ frontend's ``streamUrls`` list).
 from __future__ import annotations
 
 import time
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 import httpx
@@ -28,6 +29,23 @@ logger = structlog.get_logger(__name__)
 
 PLATFORM_TWITCH = "twitch"
 PLATFORM_YOUTUBE = "youtube"
+
+
+class LiveStreamMeta(NamedTuple):
+    """Title + category of a channel that is live right now (#233).
+
+    Both are best-effort and nullable: a channel can be live with neither set.
+    ``category`` is Twitch's ``game_name`` (e.g. "Age of Empires II"); YouTube
+    has no equivalent, so a YouTube-sourced value is always ``None``. Compared
+    by value, so the broadcast poller's change-detection treats a title- or
+    category-only edit as a real change worth re-snapshotting and nudging on —
+    while deliberately omitting volatile fields (viewer count) that would churn
+    a nudge every cycle.
+    """
+
+    title: str | None
+    category: str | None
+
 
 _TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 _TWITCH_STREAMS_URL = "https://api.twitch.tv/helix/streams"
@@ -145,24 +163,32 @@ class TwitchLiveClient:
         )
         return self._token
 
-    async def get_live_logins(self, logins: list[str]) -> set[str]:
-        """Return the subset of ``logins`` whose Twitch channel is live now.
+    async def get_live_streams(self, logins: list[str]) -> dict[str, LiveStreamMeta]:
+        """Return ``login -> LiveStreamMeta`` for the live subset of ``logins``.
 
-        Batched up to 100 per Helix call; logins compared lowercase. On a
-        401 the token is re-minted once and the batch retried.
+        ``/streams`` returns only live channels, so the response *is* the live
+        set — and it already carries each stream's ``title`` and ``game_name``
+        (the category), so surfacing them costs no extra call (#233). Batched
+        up to 100 per Helix call; logins compared lowercase. On a 401 the token
+        is re-minted once and the batch retried.
         """
-        live: set[str] = set()
+        live: dict[str, LiveStreamMeta] = {}
         for start in range(0, len(logins), _TWITCH_STREAMS_BATCH):
             live |= await self._live_batch(logins[start : start + _TWITCH_STREAMS_BATCH])
         return live
 
-    async def _live_batch(self, batch: list[str]) -> set[str]:
+    async def _live_batch(self, batch: list[str]) -> dict[str, LiveStreamMeta]:
         response = await self._streams_request(batch, await self._app_token())
         if response.status_code == 401:
             response = await self._streams_request(batch, await self._app_token(force=True))
         response.raise_for_status()
         return {
-            row["user_login"].lower()
+            row["user_login"].lower(): LiveStreamMeta(
+                # Helix sends "" (not null) for an unset title/category; fold to
+                # None so the column is uniformly nullable across platforms.
+                title=row.get("title") or None,
+                category=row.get("game_name") or None,
+            )
             for row in response.json().get("data", [])
             if row.get("type") == "live"
         }
@@ -192,13 +218,23 @@ class YouTubeLiveClient:
         self._http = http
         self._channel_id_cache: dict[tuple[str, str], str | None] = {}
 
-    async def get_live_refs(self, refs: list[tuple[str, str]]) -> set[tuple[str, str]]:
-        """Return the subset of channel ``refs`` that are live now."""
-        live: set[tuple[str, str]] = set()
+    async def get_live_refs(
+        self, refs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], LiveStreamMeta]:
+        """Return ``ref -> LiveStreamMeta`` for the channel ``refs`` live now.
+
+        Mirrors the Twitch client's shape (#233). YouTube exposes no category,
+        so ``category`` is always None; the live video's ``snippet.title`` fills
+        ``title``. A resolution/quota failure degrades a ref to absent (offline).
+        """
+        live: dict[tuple[str, str], LiveStreamMeta] = {}
         for ref in refs:
             channel_id = await self._resolve_channel_id(ref)
-            if channel_id is not None and await self._is_channel_live(channel_id):
-                live.add(ref)
+            if channel_id is None:
+                continue
+            meta = await self._live_meta(channel_id)
+            if meta is not None:
+                live[ref] = meta
         return live
 
     async def _resolve_channel_id(self, ref: tuple[str, str]) -> str | None:
@@ -226,12 +262,19 @@ class YouTubeLiveClient:
         items = response.json().get("items", [])
         return items[0]["id"] if items else None
 
-    async def _is_channel_live(self, channel_id: str) -> bool:
+    async def _live_meta(self, channel_id: str) -> LiveStreamMeta | None:
+        """Return the live video's metadata for ``channel_id``, or None if offline.
+
+        ``search.list`` with ``part=snippet`` costs the same 100 quota units as
+        ``part=id`` did but also returns the live video's title (#233). No live
+        item means offline; an HTTP/quota error degrades to offline rather than
+        raising, so one bad channel can't stall the rest.
+        """
         try:
             response = await self._http.get(
                 _YOUTUBE_SEARCH_URL,
                 params={
-                    "part": "id",
+                    "part": "snippet",
                     "channelId": channel_id,
                     "eventType": "live",
                     "type": "video",
@@ -242,8 +285,12 @@ class YouTubeLiveClient:
             response.raise_for_status()
         except httpx.HTTPError as e:
             logger.warning("youtube_live_check_failed", channel_id=channel_id, error=str(e))
-            return False
-        return bool(response.json().get("items"))
+            return None
+        items = response.json().get("items", [])
+        if not items:
+            return None
+        title = items[0].get("snippet", {}).get("title") or None
+        return LiveStreamMeta(title=title, category=None)
 
 
 def build_broadcast_http_client() -> httpx.AsyncClient:

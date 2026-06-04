@@ -8,6 +8,7 @@ from app.poller.broadcast import (
     _TWITCH_TOKEN_URL,
     _YOUTUBE_CHANNELS_URL,
     _YOUTUBE_SEARCH_URL,
+    LiveStreamMeta,
     TwitchLiveClient,
     YouTubeLiveClient,
     extract_stream_urls,
@@ -73,19 +74,47 @@ def _twitch_client() -> tuple[TwitchLiveClient, httpx.AsyncClient]:
 
 
 class TestTwitchLiveClient:
-    async def test_returns_only_live_logins(self):
+    async def test_returns_live_logins_with_title_and_category(self):
         with respx.mock(assert_all_called=False) as mock:
             mock.post(_TWITCH_TOKEN_URL).respond(json={"access_token": "tok", "expires_in": 3600})
             mock.get(_TWITCH_STREAMS_URL).respond(
-                json={"data": [{"user_login": "Grubby", "type": "live"}]}
+                json={
+                    "data": [
+                        {
+                            "user_login": "Grubby",
+                            "type": "live",
+                            "title": "ladder grind",
+                            "game_name": "Age of Empires II",
+                        }
+                    ]
+                }
             )
             twitch, http = _twitch_client()
             try:
-                live = await twitch.get_live_logins(["grubby", "day9tv"])
+                live = await twitch.get_live_streams(["grubby", "day9tv"])
             finally:
                 await http.aclose()
-        # user_login normalized lowercase; the offline channel is absent.
-        assert live == {"grubby"}
+        # user_login normalized lowercase; offline channel absent; title +
+        # game_name (category) folded onto the live row (#233).
+        assert live == {
+            "grubby": LiveStreamMeta(title="ladder grind", category="Age of Empires II")
+        }
+
+    async def test_empty_title_and_category_fold_to_none(self):
+        with respx.mock(assert_all_called=False) as mock:
+            mock.post(_TWITCH_TOKEN_URL).respond(json={"access_token": "tok", "expires_in": 3600})
+            # Helix sends "" (not null) for an unset title/category.
+            mock.get(_TWITCH_STREAMS_URL).respond(
+                json={
+                    "data": [{"user_login": "grubby", "type": "live", "title": "", "game_name": ""}]
+                }
+            )
+            twitch, http = _twitch_client()
+            try:
+                live = await twitch.get_live_streams(["grubby"])
+            finally:
+                await http.aclose()
+        assert live == {"grubby": LiveStreamMeta(title=None, category=None)}
 
     async def test_reauths_once_on_401(self):
         with respx.mock(assert_all_called=False) as mock:
@@ -100,26 +129,29 @@ class TestTwitchLiveClient:
             )
             twitch, http = _twitch_client()
             try:
-                live = await twitch.get_live_logins(["grubby"])
+                live = await twitch.get_live_streams(["grubby"])
             finally:
                 await http.aclose()
-        assert live == {"grubby"}
+        assert set(live) == {"grubby"}
         # Token minted once normally, then force-re-minted after the 401.
         assert token.call_count == 2
 
 
 class TestYouTubeLiveClient:
-    async def test_resolves_handle_then_detects_live(self):
+    async def test_resolves_handle_then_detects_live_with_title(self):
         with respx.mock(assert_all_called=False) as mock:
             mock.get(_YOUTUBE_CHANNELS_URL).respond(json={"items": [{"id": "UC1"}]})
-            mock.get(_YOUTUBE_SEARCH_URL).respond(json={"items": [{"id": {"videoId": "v"}}]})
+            mock.get(_YOUTUBE_SEARCH_URL).respond(
+                json={"items": [{"id": {"videoId": "v"}, "snippet": {"title": "AoE2 live!"}}]}
+            )
             http = httpx.AsyncClient()
             youtube = YouTubeLiveClient("key", http)
             try:
                 live = await youtube.get_live_refs([("handle", "@spiff")])
             finally:
                 await http.aclose()
-        assert live == {("handle", "@spiff")}
+        # Title from snippet; category always None on YouTube (#233).
+        assert live == {("handle", "@spiff"): LiveStreamMeta(title="AoE2 live!", category=None)}
 
     async def test_channel_id_skips_resolution(self):
         with respx.mock(assert_all_called=False) as mock:
@@ -131,7 +163,8 @@ class TestYouTubeLiveClient:
                 live = await youtube.get_live_refs([("channel_id", "UCdirect")])
             finally:
                 await http.aclose()
-        assert live == {("channel_id", "UCdirect")}
+        # Live, but the snippet/title was absent → title None.
+        assert live == {("channel_id", "UCdirect"): LiveStreamMeta(title=None, category=None)}
         assert channels.call_count == 0  # id used directly, no lookup
 
     async def test_offline_when_no_live_video(self):
@@ -144,7 +177,7 @@ class TestYouTubeLiveClient:
                 live = await youtube.get_live_refs([("handle", "@spiff")])
             finally:
                 await http.aclose()
-        assert live == set()
+        assert live == {}
 
     async def test_channel_id_cached_across_calls(self):
         with respx.mock(assert_all_called=False) as mock:
@@ -168,4 +201,4 @@ class TestYouTubeLiveClient:
                 live = await youtube.get_live_refs([("handle", "@spiff")])
             finally:
                 await http.aclose()
-        assert live == set()  # error swallowed, treated as offline
+        assert live == {}  # error swallowed, treated as offline
