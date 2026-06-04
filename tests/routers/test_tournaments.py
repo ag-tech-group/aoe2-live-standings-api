@@ -2311,6 +2311,10 @@ class TestStandingsHistory:
         assert by_profile[2]["points"][-1] == {"position": 1, "peak_rating": 1540}
         assert body["last_polled_at"] is not None
         assert body["teams"] == []
+        # Each series is self-describing — it carries its display name, so the
+        # FE legend needs no join back to /standings.
+        assert by_profile[1]["name"] == "p1"
+        assert by_profile[2]["name"] == "p2"
 
     async def test_position_by_peak_not_current_rating(
         self, client: AsyncClient, session: AsyncSession
@@ -2458,6 +2462,10 @@ class TestStandingsHistory:
         # Final bucket: Alpha 1500+1600=3100 (pos1); Bravo 2000 (pos2).
         assert teams[alpha_id]["points"][-1] == {"position": 1, "combined_peak_elo": 3100}
         assert teams[bravo_id]["points"][-1] == {"position": 2, "combined_peak_elo": 2000}
+        # Each team series carries its display strings (same shape as
+        # StandingTeam), so the FE legend needs no /teams/standings join.
+        assert (teams[alpha_id]["name"], teams[alpha_id]["initials"]) == ("Alpha", "ALPHA")
+        assert (teams[bravo_id]["name"], teams[bravo_id]["initials"]) == ("Bravo", "BRAVO")
 
     async def test_emits_marker_at_intraday_shift(self, client: AsyncClient, session: AsyncSession):
         # A reorder mid-day produces a bucket stamped at the match-completion
@@ -2624,6 +2632,10 @@ class TestStandingsHistory:
             r["tournament_player_id"] for r in standings if r["name"] == "Newcomer"
         )
         assert {polled_tp, placeholder_tp} == history_ids
+        # The series is self-describing even for an unlinked placeholder: it
+        # carries its display name with no polled identity to join against.
+        history_by_tp = {p["tournament_player_id"]: p for p in history}
+        assert history_by_tp[placeholder_tp]["name"] == "Newcomer"
 
     async def test_empty_when_no_history(self, client: AsyncClient, session: AsyncSession):
         session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))

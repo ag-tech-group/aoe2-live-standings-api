@@ -337,13 +337,19 @@ class PlayerStandingHistory(BaseModel):
     ``points[i]`` is the entrant's standing at ``buckets[i]`` (see
     ``StandingsHistory``). Every entrant holds a position at every bucket
     (#226) — there are no null points; an unrated entrant simply sits at the
-    name-sorted tail with a null ``peak_rating``.
+    name-sorted tail with a null ``peak_rating``. ``name`` is the display
+    label, so the chart legend is self-describing without a join back to
+    ``/standings`` — the same ``TournamentPlayer.name`` source and meaning as
+    ``StandingRow.name``.
     """
 
     tournament_player_id: int
     # Null for an unlinked roster row (no polled identity yet); the row still
     # holds a position, by name at the tail.
     profile_id: int | None
+    # The display label for this tournament — always present (NOT NULL since
+    # #187); the same label the live ``/standings`` table sorts and renders by.
+    name: str
     points: list[StandingHistoryPoint]
 
 
@@ -361,10 +367,15 @@ class TeamStandingHistory(BaseModel):
     """One team's combined-peak-elo-over-time series, aligned to the buckets.
 
     ``points[i]`` is the team's standing at ``buckets[i]``. Every team holds a
-    position at every bucket (#226) — no null points.
+    position at every bucket (#226) — no null points. ``name`` and ``initials``
+    are the team's current display strings — the same compact reference shape
+    as ``StandingTeam`` — so the chart legend is self-describing without a join
+    back to ``/teams/standings``.
     """
 
     team_id: int
+    name: str
+    initials: str
     points: list[TeamStandingHistoryPoint]
 
 
