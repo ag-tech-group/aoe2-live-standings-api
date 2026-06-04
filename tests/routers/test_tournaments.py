@@ -19,7 +19,11 @@ from app.models import (
     TournamentOwner,
     TournamentPlayer,
 )
-from app.routers.tournaments import _RECENT_RESULTS_LIMIT
+from app.routers.tournaments import (
+    _RECENT_RESULTS_LIMIT,
+    _civilization_names,
+    _reset_civilization_names_cache,
+)
 from tests.conftest import (
     DEFAULT_TEST_USER_ID,
     make_match,
@@ -2695,3 +2699,29 @@ class TestStandingsStreamLive:
         assert row["stream_live"] is True
         assert row["stream_title"] == "twitch primary"
         assert row["stream_category"] == "Age of Empires II"
+
+
+class TestCivilizationNamesCache:
+    """``_civilization_names`` caches the static civ table in-process.
+
+    The reference table is worker-written and changes only on a game patch, so
+    the read endpoints share one cached id→name map instead of re-reading it per
+    request (Sentry AOE2-LIVE-STANDINGS-API-1G).
+    """
+
+    async def test_caches_until_reset(self, session: AsyncSession):
+        session.add(Civilization(civilization_id=7, name="Burgundians"))
+        await session.commit()
+
+        # First read populates the cache from the table.
+        assert await _civilization_names(session) == {7: "Burgundians"}
+
+        # A civ inserted after the cache is warm stays invisible within the TTL
+        # — the table is not re-read on every call.
+        session.add(Civilization(civilization_id=23, name="Japanese"))
+        await session.commit()
+        assert await _civilization_names(session) == {7: "Burgundians"}
+
+        # Resetting (what the TTL lapse does in prod) re-reads the table.
+        _reset_civilization_names_cache()
+        assert await _civilization_names(session) == {7: "Burgundians", 23: "Japanese"}

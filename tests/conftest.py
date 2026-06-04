@@ -26,6 +26,7 @@ from app.models import (
     TournamentOwner,
     TournamentPlayer,
 )
+from app.routers.tournaments import _reset_civilization_names_cache
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -56,6 +57,19 @@ def reset_rate_limiter():
     limiter._storage.reset()
     yield
     limiter._storage.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_civilization_names_cache():
+    """Clear the in-process civ id→name cache between tests.
+
+    The map is cached process-wide (see ``app.routers.tournaments``); each test
+    seeds its own ``civilizations`` rows, so a cached map must not leak across
+    tests. Mirrors ``reset_rate_limiter``.
+    """
+    _reset_civilization_names_cache()
+    yield
+    _reset_civilization_names_cache()
 
 
 @pytest.fixture
