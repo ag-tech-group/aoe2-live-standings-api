@@ -1152,14 +1152,19 @@ async def get_standings_history(
     candidate_times = sorted(daily_anchors | set(in_event_times))
 
     members_by_team: dict[int, list[int]] = {}
-    for team_id, tp_id in (
+    # Team display strings ride along the same query (one row per member, so
+    # name/initials repeat — set idempotently), making the series self-describing
+    # without a join back to /teams/standings. Same shape as ``StandingTeam``.
+    team_meta: dict[int, tuple[str, str]] = {}
+    for team_id, team_name, team_initials, tp_id in (
         await session.execute(
-            select(Team.id, TeamMember.tournament_player_id)
+            select(Team.id, Team.name, Team.initials, TeamMember.tournament_player_id)
             .join(TeamMember, TeamMember.team_id == Team.id)
             .where(Team.tournament_id == tournament.id)
         )
     ).all():
         members_by_team.setdefault(team_id, []).append(tp_id)
+        team_meta[team_id] = (team_name, team_initials)
 
     # Carried-in peak baseline per entrant: the current max_rating when it tops
     # every in-event rating (set pre-event → flat line), else 0 (a new high was
@@ -1247,6 +1252,7 @@ async def get_standings_history(
             PlayerStandingHistory(
                 tournament_player_id=tp_id,
                 profile_id=profile_by_tp[tp_id],
+                name=name_by_tp[tp_id],
                 points=player_points[tp_id],
             )
             for tp_id in name_by_tp
@@ -1255,7 +1261,12 @@ async def get_standings_history(
     )
     teams = sorted(
         (
-            TeamStandingHistory(team_id=team_id, points=team_points[team_id])
+            TeamStandingHistory(
+                team_id=team_id,
+                name=team_meta[team_id][0],
+                initials=team_meta[team_id][1],
+                points=team_points[team_id],
+            )
             for team_id in members_by_team
         ),
         key=lambda team: team.team_id,
