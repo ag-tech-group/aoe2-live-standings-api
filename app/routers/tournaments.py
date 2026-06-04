@@ -444,11 +444,11 @@ async def _tournament_record_by_profile(
     Pulls every completed match on the tournament's leaderboard whose
     ``started_at`` falls inside ``[start_date, grand_finals_date]`` — a
     null bound is treated as open — and folds it into one ``TournamentRecord``
-    per profile: counts, streak, peak rating, latest-match timestamp, a
-    capped recent-results list, and the matching capped recent-matchups list
-    (#218, same rows projected with the civ matchup). Every profile gets an
-    entry; those with no in-window matches get a zero record (counts/streak
-    0, others null/empty).
+    per profile: counts, current streak, longest win streak, peak rating,
+    latest-match timestamp, a capped recent-results list, and the matching
+    capped recent-matchups list (#218, same rows projected with the civ
+    matchup). Every profile gets an entry; those with no in-window matches
+    get a zero record (counts/streaks 0, others null/empty).
     """
     records = {
         profile_id: TournamentRecord(
@@ -456,6 +456,7 @@ async def _tournament_record_by_profile(
             wins=0,
             losses=0,
             streak=0,
+            longest_win_streak=0,
             peak_rating=None,
             last_match_at=None,
             recent_results=[],
@@ -521,12 +522,20 @@ async def _tournament_record_by_profile(
             if outcome != lead:
                 break
             run += 1
+        # Longest win run anywhere in the window (#237): a peak, not the
+        # current `streak`. Order-independent, so newest-first `outs` is fine.
+        longest_win_streak = 0
+        win_run = 0
+        for outcome in outs:
+            win_run = win_run + 1 if outcome == MatchOutcome.WIN else 0
+            longest_win_streak = max(longest_win_streak, win_run)
         ratings = [r.new_rating for r in rows if r.new_rating is not None]
         records[profile_id] = TournamentRecord(
             games_played=len(outs),
             wins=wins,
             losses=len(outs) - wins,
             streak=run if lead == MatchOutcome.WIN else -run,
+            longest_win_streak=longest_win_streak,
             peak_rating=max(ratings) if ratings else None,
             # `rows` is newest-first; row 0's started_at is the latest.
             last_match_at=rows[0].started_at,
@@ -731,6 +740,7 @@ async def get_standings(
                         wins=0,
                         losses=0,
                         streak=0,
+                        longest_win_streak=0,
                         peak_rating=None,
                         last_match_at=None,
                         recent_results=[],

@@ -86,6 +86,12 @@ class TournamentRecord(BaseModel):
     losses: int
     # Positive = current win streak, negative = loss streak, 0 = no games.
     streak: int
+    # Longest run of consecutive wins anywhere in the window — a peak,
+    # distinct from the *current* ``streak`` above (which only reads the
+    # latest run). Non-negative; 0 when no in-window wins. Backs the
+    # "longest win streak" stat card (#237); the FE takes the max across
+    # standings rows to surface the tournament leader.
+    longest_win_streak: int
     # Highest post-match rating (``MatchPlayer.new_rating``) the player
     # reached on completed in-window matches. Null when no in-window match
     # carried a non-null rating — either zero in-window games, or all
