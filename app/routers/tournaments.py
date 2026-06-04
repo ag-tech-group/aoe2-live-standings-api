@@ -9,6 +9,8 @@ request sees. ``POST /`` is open to any authenticated criticalbit user
 
 from __future__ import annotations
 
+import time
+from asyncio import Lock
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
@@ -754,6 +756,27 @@ async def get_standings(
     )
 
 
+# ``civilizations`` is worker-written static reference data — the poller upserts
+# it from Relic's ``races`` array, so it only changes when a new civ ships (a
+# game patch, never mid-event). Reading the whole table on every request that
+# folds civ names (``/standings``, ``/civ-stats``, ``/standings/history``) put a
+# DB round-trip + connection checkout on three hot read paths for an immutable
+# map; Sentry flagged it as a consecutive-query hot spot
+# (AOE2-LIVE-STANDINGS-API-1G). Cache it in-process behind a short TTL so each
+# instance reads the table at most once per window.
+_CIVILIZATION_NAMES_TTL_SECONDS = 300.0
+_civilization_names_cache: dict[int, str] | None = None
+_civilization_names_cached_at = 0.0
+_civilization_names_lock = Lock()
+
+
+def _reset_civilization_names_cache() -> None:
+    """Drop the cached civ id→name map (tests seed their own civ table)."""
+    global _civilization_names_cache, _civilization_names_cached_at
+    _civilization_names_cache = None
+    _civilization_names_cached_at = 0.0
+
+
 async def _civilization_names(session: AsyncSession) -> dict[int, str]:
     """Map ``civilization_id -> name`` from the civilizations reference table.
 
@@ -761,9 +784,26 @@ async def _civilization_names(session: AsyncSession) -> dict[int, str]:
     doesn't maintain its own id→name list. ``.get(id)`` yields ``None`` for an
     id not in the reference (a brand-new civ before the next refresh, or the
     missing-civ sentinel) — callers surface that as a null name.
+
+    The map is cached in-process behind ``_CIVILIZATION_NAMES_TTL_SECONDS``
+    (the table is static reference data) rather than re-read on every request —
+    Sentry AOE2-LIVE-STANDINGS-API-1G. The returned dict is shared; callers
+    treat it as read-only.
     """
-    rows = await session.execute(select(Civilization.civilization_id, Civilization.name))
-    return dict(rows.all())
+    global _civilization_names_cache, _civilization_names_cached_at
+    cached = _civilization_names_cache
+    age = time.monotonic() - _civilization_names_cached_at
+    if cached is not None and age < _CIVILIZATION_NAMES_TTL_SECONDS:
+        return cached
+    async with _civilization_names_lock:
+        # Re-check under the lock so a TTL-expiry stampede collapses to one
+        # refresh: a concurrent caller may have repopulated while we waited.
+        age = time.monotonic() - _civilization_names_cached_at
+        if _civilization_names_cache is None or age >= _CIVILIZATION_NAMES_TTL_SECONDS:
+            rows = await session.execute(select(Civilization.civilization_id, Civilization.name))
+            _civilization_names_cache = dict(rows.all())
+            _civilization_names_cached_at = time.monotonic()
+        return _civilization_names_cache
 
 
 def _sorted_civ_stats(counts: dict[int, list[int]], names: dict[int, str]) -> list[CivStat]:
