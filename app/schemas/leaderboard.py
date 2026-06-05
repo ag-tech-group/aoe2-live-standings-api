@@ -44,11 +44,11 @@ class CivilizationRead(BaseModel):
 class RecentMatchup(BaseModel):
     """One recent in-window game with its civ matchup, for a standings tooltip.
 
-    The expand half of the recent-results enrichment (#218): the same
-    outcome carried in ``TournamentRecord.recent_results`` plus the
-    entrant's civ and — on a 1v1 leaderboard — the opposing player's civ,
-    so the consumer can render a "<your civ> vs <their civ>" tooltip on
-    each recent-result icon. The consumer maps civ ids to names/emblems.
+    Carried newest-first in ``TournamentRecord.recent_matchups`` (#218): the
+    game's ``outcome`` plus the entrant's civ and — on a 1v1 leaderboard —
+    the opposing player's civ, so the consumer can render a "<your civ> vs
+    <their civ>" tooltip on each recent-result icon. The consumer maps civ
+    ids to names/emblems.
     """
 
     outcome: MatchOutcome
@@ -101,15 +101,11 @@ class TournamentRecord(BaseModel):
     # completed matches. Backs the "Active 1h / Idle 3d" badge. Null when
     # the player has no completed in-window matches.
     last_match_at: datetime | None
-    # Win/loss outcomes of the player's most-recent completed in-window
-    # matches, newest-first, capped server-side. Empty when no in-window
-    # games. The tournament-scoped sibling of ``StandingRow.recent_results``.
-    recent_results: list[MatchOutcome]
-    # Expand half of the recent-results enrichment (#218): the same recent
-    # in-window games, enriched with the civ matchup for a per-icon tooltip.
-    # Newest-first, same cap as ``recent_results``. ``recent_results`` stays
-    # through the FE transition and is removed in the contract phase once the
-    # FE reads matchups instead.
+    # The player's most-recent completed in-window matches, newest-first and
+    # capped server-side; empty when no in-window games. Each carries the
+    # game's outcome plus its civ matchup for a per-icon standings tooltip
+    # (#218). The in-window, tournament-scoped sibling of the lifetime
+    # ``StandingRow.recent_results`` (which carries outcomes only).
     recent_matchups: list[RecentMatchup]
 
     @computed_field

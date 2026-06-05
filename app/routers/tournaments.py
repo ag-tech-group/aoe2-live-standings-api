@@ -461,7 +461,6 @@ async def _tournament_record_by_profile(
             longest_win_streak=0,
             peak_rating=None,
             last_match_at=None,
-            recent_results=[],
             recent_matchups=[],
         )
         for profile_id in profile_ids
@@ -541,7 +540,6 @@ async def _tournament_record_by_profile(
             peak_rating=max(ratings) if ratings else None,
             # `rows` is newest-first; row 0's started_at is the latest.
             last_match_at=rows[0].started_at,
-            recent_results=outs[:_RECENT_RESULTS_LIMIT],
             recent_matchups=[
                 RecentMatchup(
                     outcome=r.outcome,
@@ -745,7 +743,6 @@ async def get_standings(
                         longest_win_streak=0,
                         peak_rating=None,
                         last_match_at=None,
-                        recent_results=[],
                         recent_matchups=[],
                     ),
                     rank=None,

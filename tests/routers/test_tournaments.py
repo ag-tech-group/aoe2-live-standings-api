@@ -483,7 +483,6 @@ class TestStandingsUnratedRoster:
             "longest_win_streak": 0,
             "peak_rating": None,
             "last_match_at": None,
-            "recent_results": [],
             "recent_matchups": [],
             "win_pct": None,
         }
@@ -577,7 +576,6 @@ class TestStandingsUnlinkedRows:
             "longest_win_streak": 0,
             "peak_rating": None,
             "last_match_at": None,
-            "recent_results": [],
             "recent_matchups": [],
             "win_pct": None,
         }
@@ -1082,7 +1080,6 @@ class TestStandingsTournamentRecord:
             "longest_win_streak": 0,
             "peak_rating": None,
             "last_match_at": None,
-            "recent_results": [],
             "recent_matchups": [],
             "win_pct": None,
         }
@@ -1206,67 +1203,6 @@ class TestStandingsTournamentRecord:
         # on the ISO prefix so the assertion is portable across both.
         assert row["tournament_record"]["last_match_at"].startswith("2026-05-09T12:00:00")
 
-    async def test_recent_results_newest_first_capped_at_limit(
-        self, client: AsyncClient, session: AsyncSession
-    ):
-        # Twelve completed matches — recent_results returns the 10 newest
-        # outcomes, newest-first.
-        player = make_player(1)
-        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
-        session.add(player)
-        for match_id in range(1, 13):
-            # Match N is on day N (later N = newer). Outcomes alternate.
-            outcome = MatchOutcome.WIN if match_id % 2 == 0 else MatchOutcome.LOSS
-            match = make_match(
-                match_id,
-                leaderboard_id=3,
-                started_at=datetime(2026, 5, match_id, 12, 0, tzinfo=UTC),
-            )
-            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
-            session.add(match)
-        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
-        await session.commit()
-
-        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
-        recent = row["tournament_record"]["recent_results"]
-        assert len(recent) == 10
-        # Matches 12..3 (newest first): even=win, odd=loss.
-        expected = ["win" if mid % 2 == 0 else "loss" for mid in range(12, 2, -1)]
-        assert recent == expected
-
-    async def test_recent_results_window_scoped(self, client: AsyncClient, session: AsyncSession):
-        # Same-leaderboard matches outside the window are excluded — even
-        # when they would otherwise be newer than every in-window match.
-        player = make_player(1)
-        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
-        session.add(player)
-        for match_id, day, outcome in (
-            (1, 3, MatchOutcome.WIN),  # before window — excluded
-            (2, 6, MatchOutcome.WIN),  # in window
-            (3, 8, MatchOutcome.LOSS),  # in window
-            (4, 15, MatchOutcome.LOSS),  # after window — excluded
-        ):
-            match = make_match(
-                match_id,
-                leaderboard_id=3,
-                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
-            )
-            match.players.append(make_match_player(match_id, profile_id=1, outcome=outcome))
-            session.add(match)
-        session.add(
-            make_tournament(
-                "cup",
-                profile_ids=[1],
-                leaderboard_id=3,
-                start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
-            )
-        )
-        await session.commit()
-
-        row = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0]
-        assert row["tournament_record"]["recent_results"] == ["loss", "win"]
-
     async def test_win_pct_rounds_to_one_decimal(self, client: AsyncClient, session: AsyncSession):
         # 2 wins of 3 → 66.66...% → rounds to 66.7.
         player = make_player(1)
@@ -1387,15 +1323,17 @@ class TestStandingsRecentMatchups:
         assert matchup["civilization_name"] == "Burgundians"
         assert matchup["opponent_civilization_name"] == "Japanese"
 
-    async def test_parity_with_recent_results_cap_and_window(
+    async def test_capped_window_scoped_and_newest_first(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # recent_matchups is the same row set as recent_results: same cap (10),
-        # same newest-first order, same window scoping.
+        # Newest-first, capped at the server limit, and windowed to the
+        # tournament dates: out-of-window games are dropped on both bounds —
+        # even a post-window game newer than every counted one.
         player = make_player(1)
         player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
         session.add(player)
-        # 12 in-window games (civ id == match id == day) + 1 pre-window.
+        # 12 in-window games (civ id == match id == day) bracketed by one
+        # pre-window and one post-window game on the same leaderboard.
         for match_id in range(1, 13):
             outcome = MatchOutcome.WIN if match_id % 2 == 0 else MatchOutcome.LOSS
             match = make_match(
@@ -1413,8 +1351,20 @@ class TestStandingsRecentMatchups:
             )
             session.add(match)
         pre = make_match(99, leaderboard_id=3, started_at=datetime(2020, 1, 1, 12, 0, tzinfo=UTC))
-        pre.players.append(make_match_player(99, profile_id=1, team_id=0, civilization_id=5))
+        pre.players.append(
+            make_match_player(
+                99, profile_id=1, team_id=0, civilization_id=5, outcome=MatchOutcome.WIN
+            )
+        )
         session.add(pre)
+        # Newer than every in-window game, but past grand_finals → still dropped.
+        post = make_match(98, leaderboard_id=3, started_at=datetime(2027, 1, 1, 12, 0, tzinfo=UTC))
+        post.players.append(
+            make_match_player(
+                98, profile_id=1, team_id=0, civilization_id=98, outcome=MatchOutcome.WIN
+            )
+        )
+        session.add(post)
         session.add(
             make_tournament(
                 "cup",
@@ -1429,12 +1379,14 @@ class TestStandingsRecentMatchups:
         record = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
             "tournament_record"
         ]
-        results = record["recent_results"]
         matchups = record["recent_matchups"]
-        assert len(matchups) == len(results) == _RECENT_RESULTS_LIMIT  # capped, pre-window dropped
-        assert [m["outcome"] for m in matchups] == results
+        # Capped at the limit; both the pre- (99) and post-window (98) games dropped.
+        assert len(matchups) == _RECENT_RESULTS_LIMIT
         # civ id == match id here; newest-first = matches 12..3.
         assert [m["civilization_id"] for m in matchups] == list(range(12, 2, -1))
+        assert [m["outcome"] for m in matchups] == [
+            "win" if mid % 2 == 0 else "loss" for mid in range(12, 2, -1)
+        ]
 
 
 class TestUpdateTournament:
