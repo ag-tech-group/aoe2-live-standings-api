@@ -35,6 +35,11 @@ from tests.conftest import (
 )
 
 
+def _day(day: int) -> datetime:
+    """Noon UTC on the given day of May 2026 — a distinct, ordered match start."""
+    return datetime(2026, 5, day, 12, 0, tzinfo=UTC)
+
+
 class TestListTournaments:
     async def test_empty_returns_empty_list(self, client: AsyncClient):
         response = await client.get("/v1/tournaments")
@@ -2207,6 +2212,390 @@ class TestCivStats:
         session.add(make_tournament("cup"))
         await session.commit()
         response = await client.get("/v1/tournaments/cup/civ-stats")
+        assert (
+            response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
+        )
+
+
+class TestTournamentSummary:
+    """GET /{slug}/summary: headline "leader" stat cards (#238)."""
+
+    _ALL_NULL = {
+        "last_polled_at": None,
+        "longest_win_streak": None,
+        "highest_peak_rating": None,
+        "most_games_played": None,
+        "most_wins": None,
+        "best_win_rate": None,
+    }
+
+    async def test_empty_roster_returns_all_null_cards(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add(make_tournament("cup", leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body == self._ALL_NULL
+
+    async def test_roster_without_matches_returns_all_null_cards(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A rostered, rated entrant with no in-window matches earns nothing —
+        # every metric is a zero count / null rating, so each card is null
+        # rather than a value-0 card naming an arbitrary player.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body == self._ALL_NULL
+
+    async def test_picks_the_leader_for_each_card(self, client: AsyncClient, session: AsyncSession):
+        # Three entrants, each dominant on a different metric:
+        #   p1 — four straight wins (streak leader), only 4 games
+        #   p2 — one peak at 2100 (rating leader), only 2 games
+        #   p3 — eight games, six wins (games + wins + win-rate leader)
+        for profile_id in (1, 2, 3):
+            session.add(make_player(profile_id))
+        # p1: WIN x4, peak new_rating 1540.
+        for match_id, day, rating in ((1, 1, 1510), (2, 2, 1520), (3, 3, 1530), (4, 4, 1540)):
+            match = make_match(match_id, leaderboard_id=3, started_at=_day(day))
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, outcome=MatchOutcome.WIN, new_rating=rating
+                )
+            )
+            session.add(match)
+        # p2: WIN (rating 2100) then LOSS (rating 2050) — peak 2100, 1 win.
+        for match_id, day, outcome, rating in (
+            (5, 1, MatchOutcome.WIN, 2100),
+            (6, 2, MatchOutcome.LOSS, 2050),
+        ):
+            match = make_match(match_id, leaderboard_id=3, started_at=_day(day))
+            match.players.append(
+                make_match_player(match_id, profile_id=2, outcome=outcome, new_rating=rating)
+            )
+            session.add(match)
+        # p3: W W W L W W L W over days 1-8 — 6 wins / 8 games, longest run 3.
+        p3 = (
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.LOSS,
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.LOSS,
+            MatchOutcome.WIN,
+        )
+        for offset, outcome in enumerate(p3):
+            match_id = 7 + offset
+            match = make_match(match_id, leaderboard_id=3, started_at=_day(1 + offset))
+            match.players.append(
+                make_match_player(match_id, profile_id=3, outcome=outcome, new_rating=1600)
+            )
+            session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1, 2, 3], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        streak = body["longest_win_streak"]
+        assert {k: streak[k] for k in ("tournament_player_id", "profile_id", "name", "value")} == {
+            "tournament_player_id": tp[1],
+            "profile_id": 1,
+            "name": "p1",
+            "value": 4,
+        }
+        # The streak card always carries the date keys; exact values (which
+        # need per-match completion times) are covered in the dedicated test.
+        assert "streak_start" in streak and "streak_end" in streak
+        assert body["highest_peak_rating"] == {
+            "tournament_player_id": tp[2],
+            "profile_id": 2,
+            "name": "p2",
+            "value": 2100,
+        }
+        assert body["most_games_played"] == {
+            "tournament_player_id": tp[3],
+            "profile_id": 3,
+            "name": "p3",
+            "value": 8,
+        }
+        assert body["most_wins"] == {
+            "tournament_player_id": tp[3],
+            "profile_id": 3,
+            "name": "p3",
+            "value": 6,
+        }
+        # p3 (75% over 8) leads on win rate; p1's 100% over 4 games is below
+        # the min-games guard, so it does not headline.
+        assert body["best_win_rate"] == {
+            "tournament_player_id": tp[3],
+            "profile_id": 3,
+            "name": "p3",
+            "value": 75.0,
+        }
+        assert body["last_polled_at"] is not None
+
+    async def test_longest_win_streak_card_carries_peak_run_dates(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The peak run is the first five games (days 1-5); the next ten games
+        # alternate so their longest run is 1. recent_matchups caps at the
+        # last 10 (days 6-15), so the streak's dates can only come from the
+        # full-history walk — exactly the gap this card fills.
+        session.add(make_player(1))
+        outcomes = [MatchOutcome.WIN] * 5 + [MatchOutcome.LOSS, MatchOutcome.WIN] * 5
+        for offset, outcome in enumerate(outcomes):
+            day = 1 + offset
+            match = make_match(
+                offset + 1,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 5, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(offset + 1, profile_id=1, outcome=outcome))
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["longest_win_streak"]
+        assert card["value"] == 5
+        # start = first (oldest) win's completion; end = last (newest) win's.
+        assert card["streak_start"].startswith("2026-05-01T12:30:00")
+        assert card["streak_end"].startswith("2026-05-05T12:30:00")
+
+    async def test_best_win_rate_guard_excludes_small_samples(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # p1 is 1-0 (100%, 1 game); p2 is 4-1 (80%, 5 games). The guard keeps
+        # p1's perfect-but-tiny sample from headlining over p2's real one.
+        for profile_id in (1, 2):
+            session.add(make_player(profile_id))
+        match = make_match(1, leaderboard_id=3, started_at=_day(1))
+        match.players.append(make_match_player(1, profile_id=1, outcome=MatchOutcome.WIN))
+        session.add(match)
+        p2 = (
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.LOSS,
+        )
+        for offset, outcome in enumerate(p2):
+            match_id = 2 + offset
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(1 + offset))
+            m.players.append(make_match_player(match_id, profile_id=2, outcome=outcome))
+            session.add(m)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["best_win_rate"]["profile_id"] == 2
+        assert body["best_win_rate"]["value"] == 80.0
+        assert body["best_win_rate"]["tournament_player_id"] == tp[2]
+
+    async def test_best_win_rate_null_when_no_one_meets_min_games(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A lone 1-0 player: a real most-wins/most-games leader, but no
+        # win-rate leader because nobody clears the min-games guard.
+        session.add(make_player(1))
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(make_match_player(1, profile_id=1, outcome=MatchOutcome.WIN))
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["best_win_rate"] is None
+        assert body["most_wins"]["value"] == 1
+        assert body["most_games_played"]["value"] == 1
+
+    async def test_win_rate_min_games_query_param_overrides_default(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # p1 is 3-0: a perfect record below the default guard of 5 games.
+        session.add(make_player(1))
+        for offset in range(3):
+            match_id = 1 + offset
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(1 + offset))
+            m.players.append(make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN))
+            session.add(m)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        # Default guard (5): the 3-game sample is too small to headline.
+        assert (await client.get("/v1/tournaments/cup/summary")).json()["best_win_rate"] is None
+        # Lowering the guard to 3 lets it qualify; the other cards are unchanged.
+        body = (await client.get("/v1/tournaments/cup/summary?win_rate_min_games=3")).json()
+        assert body["best_win_rate"]["profile_id"] == 1
+        assert body["best_win_rate"]["value"] == 100.0
+        assert body["most_games_played"]["value"] == 3
+
+    async def test_win_rate_min_games_rejects_below_one(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The guard needs at least one game to be a meaningful win rate.
+        session.add(make_tournament("cup", leaderboard_id=3))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/summary?win_rate_min_games=0")
+        assert response.status_code == 422
+
+    async def test_cards_null_when_metric_unearned(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # An all-losses entrant: real games and a peak rating, but zero wins —
+        # so most_wins and longest_win_streak are null while most_games_played
+        # and highest_peak_rating still name them.
+        session.add(make_player(1))
+        for match_id in (1, 2):
+            match = make_match(match_id, leaderboard_id=3, started_at=_day(match_id))
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, outcome=MatchOutcome.LOSS, new_rating=1480
+                )
+            )
+            session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["most_wins"] is None
+        assert body["longest_win_streak"] is None
+        assert body["most_games_played"]["value"] == 2
+        assert body["highest_peak_rating"]["value"] == 1480
+
+    async def test_tie_break_prefers_more_games(self, client: AsyncClient, session: AsyncSession):
+        # Both entrants peak at a 3-win streak; p2 played more games, so it
+        # wins the tie (the streak is otherwise equal).
+        for profile_id in (1, 2):
+            session.add(make_player(profile_id))
+        for offset in range(3):  # p1: W W W (3 games)
+            match_id = 1 + offset
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(1 + offset))
+            m.players.append(make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN))
+            session.add(m)
+        p2 = (
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.WIN,
+            MatchOutcome.LOSS,
+            MatchOutcome.LOSS,
+        )  # longest run still 3, but 5 games
+        for offset, outcome in enumerate(p2):
+            match_id = 4 + offset
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(1 + offset))
+            m.players.append(make_match_player(match_id, profile_id=2, outcome=outcome))
+            session.add(m)
+        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3))
+        await session.commit()
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["longest_win_streak"]
+        assert card["value"] == 3
+        assert card["profile_id"] == 2
+
+    async def test_tie_break_prefers_lower_tournament_player_id(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Fully tied (3-win streak, 3 games each) — the lower roster id wins.
+        for profile_id in (1, 2):
+            session.add(make_player(profile_id))
+        for profile_id, base in ((1, 1), (2, 4)):
+            for offset in range(3):
+                match_id = base + offset
+                m = make_match(match_id, leaderboard_id=3, started_at=_day(1 + offset))
+                m.players.append(
+                    make_match_player(match_id, profile_id=profile_id, outcome=MatchOutcome.WIN)
+                )
+                session.add(m)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["longest_win_streak"]
+        assert card["tournament_player_id"] == min(tp[1], tp[2])
+        assert card["profile_id"] == 1
+
+    async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
+        # Wins on day 1 (pre), day 10 (in), day 20 (post); only day 10 counts.
+        session.add(make_player(1))
+        for match_id, day in ((1, 1), (2, 10), (3, 20)):
+            match = make_match(
+                match_id, leaderboard_id=3, started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC)
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN)
+            )
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 15, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["most_games_played"]["value"] == 1
+        assert body["most_wins"]["value"] == 1
+        assert body["longest_win_streak"]["value"] == 1
+
+    async def test_only_linked_entrants_considered(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # An unlinked roster row (no profile_id) has no match data and can win
+        # no card; the linked entrant leads and the response is well-formed.
+        session.add(make_player(1))
+        for match_id in (1, 2):
+            match = make_match(match_id, leaderboard_id=3, started_at=_day(match_id))
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN)
+            )
+            session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.tracked_players.append(TournamentPlayer(name="ghost"))
+        session.add(tournament)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["most_wins"]["profile_id"] == 1
+        assert body["most_wins"]["value"] == 2
+
+    async def test_scoped_to_tournament_leaderboard(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A win on another leaderboard must not count toward the cards.
+        session.add(make_player(1))
+        on = make_match(1, leaderboard_id=3, started_at=_day(1))
+        on.players.append(make_match_player(1, profile_id=1, outcome=MatchOutcome.WIN))
+        off = make_match(2, leaderboard_id=4, started_at=_day(2))
+        off.players.append(make_match_player(2, profile_id=1, outcome=MatchOutcome.WIN))
+        session.add_all([on, off])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["most_games_played"]["value"] == 1
+        assert body["most_wins"]["value"] == 1
+
+    async def test_cache_control_header_unauthenticated(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Viewer path opts into the shared CDN cache, like the other polled reads.
+        session.add(make_tournament("cup"))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/summary")
         assert (
             response.headers["Cache-Control"] == "public, s-maxage=15, max-age=0, must-revalidate"
         )

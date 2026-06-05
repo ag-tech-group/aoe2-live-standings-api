@@ -312,6 +312,64 @@ class CivStats(BaseModel):
     by_player: list[PlayerCivStats]
 
 
+class SummaryCard(BaseModel):
+    """One headline "leader" card: the leading roster player + their value.
+
+    Names the entrant who tops one in-window metric (longest win streak,
+    peak rating, games played, wins, win rate) on the tournament's
+    leaderboard. ``tournament_player_id`` is the stable roster key (#187);
+    ``profile_id`` is its linked polled identity (always set — only linked
+    entrants have match data to rank). ``name`` is the display label, the
+    same source/meaning as ``StandingRow.name``.
+    """
+
+    tournament_player_id: int
+    profile_id: int
+    name: str
+    # The leading value for this card's metric. An integer for the count /
+    # rating cards (longest win streak, peak rating, games played, wins); a
+    # 0–100 one-dp percentage for the win-rate card.
+    value: int | float
+
+
+class StreakSummaryCard(SummaryCard):
+    """The longest-win-streak card, plus the peak run's date range (#238).
+
+    ``streak_start`` / ``streak_end`` are the ``completed_at`` of the first
+    (chronologically oldest) and last (newest) win in the peak run — backing
+    a "when did this happen" tooltip the capped ``recent_matchups`` can't
+    answer (a long run often predates the last 10 games). Either is null only
+    if that match settled without a completion time; the ``value`` (count) is
+    always present.
+    """
+
+    streak_start: datetime | None = None
+    streak_end: datetime | None = None
+
+
+class TournamentSummary(BaseModel):
+    """Headline "leader" stat cards for a tournament (#238).
+
+    Each card names the leading roster entrant for one metric, all computed
+    in-window (the same ``[start_date, grand_finals_date]`` bounds as
+    ``tournament_record``) over linked entrants only — their ladder
+    opponents' rows are excluded. A card is ``null`` when no entrant
+    qualifies: an empty roster, a metric no one has earned (zero wins → no
+    ``most_wins`` leader), or — for ``best_win_rate`` — nobody past the
+    minimum-games guard. Leaders are tie-broken deterministically (higher
+    ``games_played``, then lower ``tournament_player_id``) so each card is
+    stable across polls. ``last_polled_at`` is the latest in-window match
+    across the roster, mirroring the other aggregate endpoints.
+    """
+
+    last_polled_at: datetime | None
+    longest_win_streak: StreakSummaryCard | None
+    highest_peak_rating: SummaryCard | None
+    most_games_played: SummaryCard | None
+    most_wins: SummaryCard | None
+    best_win_rate: SummaryCard | None
+
+
 class StandingHistoryPoint(BaseModel):
     """An entity's standings position + peak rating at one time bucket."""
 
