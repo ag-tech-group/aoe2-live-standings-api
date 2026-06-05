@@ -308,7 +308,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert (rows[0]["in_match"], rows[0]["live_match_id"]) == (True, 9001)
     assert (rows[1]["in_match"], rows[1]["live_match_id"]) == (False, None)
     # Hera won both completed matches inside the (open) tournament window —
-    # counts/streak, peak (best of 2788 / 2780), and recent_results all reflect
+    # counts/streak, peak (best of 2788 / 2780), and recent_matchups all reflect
     # in-window play; last_match_at is the newer of the two starts.
     record = rows[0]["tournament_record"]
     assert record["games_played"] == 2
@@ -317,7 +317,7 @@ async def test_golden_path(pg_client: AsyncClient, patched_session_maker: async_
     assert record["streak"] == 2
     assert record["longest_win_streak"] == 2
     assert record["peak_rating"] == 2788
-    assert record["recent_results"] == ["win", "win"]
+    assert [m["outcome"] for m in record["recent_matchups"]] == ["win", "win"]
     assert record["win_pct"] == 100.0
     assert record["last_match_at"] is not None
 
