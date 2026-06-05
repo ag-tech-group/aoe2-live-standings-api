@@ -454,6 +454,37 @@ class TestTournamentStandings:
         assert rows[1]["presentation"] == {"streamUrls": ["https://twitch.tv/p1"]}
         assert rows[2]["presentation"] == {}
 
+    async def test_name_resolves_display_name_override(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # `name` returns the host's presentation.displayName override; the raw
+        # polled ladder handle stays in `alias` (#243). A row with no override
+        # falls back to the base roster name.
+        for profile_id, rating in ((1, 2500), (2, 2400)):
+            player = make_player(profile_id, alias=f"handle{profile_id}")
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, current_rating=rating)
+            )
+            session.add(player)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        for tracked in tournament.tracked_players:
+            if tracked.profile_id == 1:
+                tracked.name = "pigrandom"
+                tracked.presentation = {"displayName": "PiG"}
+            else:
+                tracked.name = "plain"
+        session.add(tournament)
+        await session.commit()
+
+        rows = {
+            row["profile_id"]: row
+            for row in (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        }
+        assert rows[1]["name"] == "PiG"
+        assert rows[1]["alias"] == "handle1"
+        assert rows[2]["name"] == "plain"  # no override → base roster name
+        assert rows[2]["alias"] == "handle2"
+
 
 class TestStandingsUnratedRoster:
     """Roster members without a rating on the tournament's leaderboard still surface."""
@@ -2222,11 +2253,11 @@ class TestTournamentSummary:
 
     _ALL_NULL = {
         "last_polled_at": None,
-        "longest_win_streak": None,
         "highest_peak_rating": None,
-        "most_games_played": None,
-        "most_wins": None,
         "best_win_rate": None,
+        "longest_win_streak": None,
+        "biggest_climber": None,
+        "most_games_played": None,
     }
 
     async def test_empty_roster_returns_all_null_cards(
@@ -2255,9 +2286,10 @@ class TestTournamentSummary:
 
     async def test_picks_the_leader_for_each_card(self, client: AsyncClient, session: AsyncSession):
         # Three entrants, each dominant on a different metric:
-        #   p1 — four straight wins (streak leader), only 4 games
-        #   p2 — one peak at 2100 (rating leader), only 2 games
-        #   p3 — eight games, six wins (games + wins + win-rate leader)
+        #   p1 — four straight wins (streak leader), rating 1510→1540 (+30
+        #        climber leader), only 4 games
+        #   p2 — one peak at 2100 (rating leader), rating 2100→2050 (−50), 2 games
+        #   p3 — eight games, six wins (games + win-rate leader), flat at 1600 (0)
         for profile_id in (1, 2, 3):
             session.add(make_player(profile_id))
         # p1: WIN x4, peak new_rating 1540.
@@ -2325,11 +2357,12 @@ class TestTournamentSummary:
             "name": "p3",
             "value": 8,
         }
-        assert body["most_wins"] == {
-            "tournament_player_id": tp[3],
-            "profile_id": 3,
-            "name": "p3",
-            "value": 6,
+        # p1 climbed +30 in-window (1510→1540); p2 fell −50, p3 was flat.
+        assert body["biggest_climber"] == {
+            "tournament_player_id": tp[1],
+            "profile_id": 1,
+            "name": "p1",
+            "value": 30,
         }
         # p3 (75% over 8) leads on win rate; p1's 100% over 4 games is below
         # the min-games guard, so it does not headline.
@@ -2404,8 +2437,9 @@ class TestTournamentSummary:
     async def test_best_win_rate_null_when_no_one_meets_min_games(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # A lone 1-0 player: a real most-wins/most-games leader, but no
-        # win-rate leader because nobody clears the min-games guard.
+        # A lone 1-0 player: a real most-games leader, but no win-rate leader
+        # (nobody clears the min-games guard) and no climber (one rated point
+        # isn't enough to measure a change across).
         session.add(make_player(1))
         match = make_match(1, leaderboard_id=3)
         match.players.append(make_match_player(1, profile_id=1, outcome=MatchOutcome.WIN))
@@ -2415,7 +2449,7 @@ class TestTournamentSummary:
 
         body = (await client.get("/v1/tournaments/cup/summary")).json()
         assert body["best_win_rate"] is None
-        assert body["most_wins"]["value"] == 1
+        assert body["biggest_climber"] is None
         assert body["most_games_played"]["value"] == 1
 
     async def test_win_rate_min_games_query_param_overrides_default(
@@ -2452,8 +2486,9 @@ class TestTournamentSummary:
         self, client: AsyncClient, session: AsyncSession
     ):
         # An all-losses entrant: real games and a peak rating, but zero wins —
-        # so most_wins and longest_win_streak are null while most_games_played
-        # and highest_peak_rating still name them.
+        # so longest_win_streak is null while most_games_played and
+        # highest_peak_rating still name them. (Both losses settle at 1480, so
+        # the climber is a flat 0 — a value, not null; see the climber tests.)
         session.add(make_player(1))
         for match_id in (1, 2):
             match = make_match(match_id, leaderboard_id=3, started_at=_day(match_id))
@@ -2467,10 +2502,147 @@ class TestTournamentSummary:
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/summary")).json()
-        assert body["most_wins"] is None
         assert body["longest_win_streak"] is None
         assert body["most_games_played"]["value"] == 2
         assert body["highest_peak_rating"]["value"] == 1480
+
+    async def test_biggest_climber_is_signed_and_can_be_negative(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Everyone's rating fell in-window; the climber card still names a
+        # leader — the one who dropped the least — with a negative value.
+        for profile_id in (1, 2):
+            session.add(make_player(profile_id))
+        # p1: 1480 → 1400 (−80).
+        for match_id, day, rating in ((1, 1, 1480), (2, 2, 1400)):
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(day))
+            m.players.append(
+                make_match_player(
+                    match_id, profile_id=1, outcome=MatchOutcome.LOSS, new_rating=rating
+                )
+            )
+            session.add(m)
+        # p2: 1490 → 1470 (−20) — the least-dropped, so it leads.
+        for match_id, day, rating in ((3, 1, 1490), (4, 2, 1470)):
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(day))
+            m.players.append(
+                make_match_player(
+                    match_id, profile_id=2, outcome=MatchOutcome.LOSS, new_rating=rating
+                )
+            )
+            session.add(m)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["biggest_climber"]
+        assert card == {
+            "tournament_player_id": tp[2],
+            "profile_id": 2,
+            "name": "p2",
+            "value": -20,
+        }
+
+    async def test_biggest_climber_window_scoped(self, client: AsyncClient, session: AsyncSession):
+        # Pre/post-window points are excluded: the delta is the last minus the
+        # first *in-window* rated point (1600−1500=100), not the lifetime
+        # 3000−1000 the FE's full /progression series would have measured.
+        session.add(make_player(1))
+        for match_id, day, rating in (
+            (1, 1, 1000),  # pre-window
+            (2, 10, 1500),  # first in-window rated point
+            (3, 11, 1600),  # last in-window rated point
+            (4, 20, 3000),  # post-window
+        ):
+            m = make_match(
+                match_id, leaderboard_id=3, started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC)
+            )
+            m.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(m)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 15, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["biggest_climber"]
+        assert card["profile_id"] == 1
+        assert card["value"] == 100
+
+    async def test_biggest_climber_null_when_under_two_rated_points(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # One rated in-window match plus an unranked one (null new_rating, which
+        # doesn't count) — fewer than two rated points, nothing to measure a
+        # change across, so the card is null. A metric that needs no rating
+        # delta (games played) still names the entrant.
+        session.add(make_player(1))
+        rated = make_match(1, leaderboard_id=3, started_at=_day(1))
+        rated.players.append(make_match_player(1, profile_id=1, new_rating=1500))
+        unranked = make_match(2, leaderboard_id=3, started_at=_day(2))
+        unranked.players.append(make_match_player(2, profile_id=1, new_rating=None))
+        session.add_all([rated, unranked])
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["biggest_climber"] is None
+        assert body["most_games_played"]["value"] == 2
+
+    async def test_biggest_climber_tie_break_prefers_more_games(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Both climb +50 in-window; p2 played more games, so it takes the tie —
+        # the same total order (games desc, then id asc) as the other cards.
+        for profile_id in (1, 2):
+            session.add(make_player(profile_id))
+        # p1: 1500 → 1550 over 2 games (+50).
+        for match_id, day, rating in ((1, 1, 1500), (2, 2, 1550)):
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(day))
+            m.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(m)
+        # p2: 1500 → 1550 over 3 games (+50) — more games breaks the tie.
+        for match_id, day, rating in ((3, 1, 1500), (4, 2, 1520), (5, 3, 1550)):
+            m = make_match(match_id, leaderboard_id=3, started_at=_day(day))
+            m.players.append(make_match_player(match_id, profile_id=2, new_rating=rating))
+            session.add(m)
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["biggest_climber"]
+        assert card["value"] == 50
+        assert card["profile_id"] == 2
+        assert card["tournament_player_id"] == tp[2]
+
+    async def test_card_name_resolves_display_name_override(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A card's `name` is the resolved display label — the host's
+        # presentation.displayName override, not the base roster handle (#243).
+        session.add(make_player(1))
+        for match_id in (1, 2):
+            match = make_match(match_id, leaderboard_id=3, started_at=_day(match_id))
+            match.players.append(
+                make_match_player(match_id, profile_id=1, outcome=MatchOutcome.WIN)
+            )
+            session.add(match)
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        tournament.tracked_players[0].name = "pigrandom"
+        tournament.tracked_players[0].presentation = {"displayName": "PiG"}
+        session.add(tournament)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["most_games_played"]["name"] == "PiG"
+        assert body["longest_win_streak"]["name"] == "PiG"
 
     async def test_tie_break_prefers_more_games(self, client: AsyncClient, session: AsyncSession):
         # Both entrants peak at a 3-win streak; p2 played more games, so it
@@ -2548,7 +2720,6 @@ class TestTournamentSummary:
 
         body = (await client.get("/v1/tournaments/cup/summary")).json()
         assert body["most_games_played"]["value"] == 1
-        assert body["most_wins"]["value"] == 1
         assert body["longest_win_streak"]["value"] == 1
 
     async def test_only_linked_entrants_considered(
@@ -2569,8 +2740,8 @@ class TestTournamentSummary:
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup/summary")).json()
-        assert body["most_wins"]["profile_id"] == 1
-        assert body["most_wins"]["value"] == 2
+        assert body["most_games_played"]["profile_id"] == 1
+        assert body["most_games_played"]["value"] == 2
 
     async def test_scoped_to_tournament_leaderboard(
         self, client: AsyncClient, session: AsyncSession
@@ -2587,7 +2758,6 @@ class TestTournamentSummary:
 
         body = (await client.get("/v1/tournaments/cup/summary")).json()
         assert body["most_games_played"]["value"] == 1
-        assert body["most_wins"]["value"] == 1
 
     async def test_cache_control_header_unauthenticated(
         self, client: AsyncClient, session: AsyncSession
@@ -2655,6 +2825,43 @@ class TestStandingsHistory:
         # Each series is self-describing — it carries its display name, so the
         # FE legend needs no join back to /standings.
         assert by_profile[1]["name"] == "p1"
+        assert by_profile[2]["name"] == "p2"
+
+    async def test_series_name_resolves_display_name_override(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # players[].name is the resolved display label (presentation.displayName
+        # override, #243), so the chart legend matches the live table with no
+        # join; a row with no override keeps its base roster name.
+        session.add(make_player(1))
+        session.add(make_player(2))
+        for match_id, profile_id, rating in ((1, 1, 1500), (2, 2, 1400)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, 1, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=profile_id, new_rating=rating)
+            )
+            session.add(match)
+        tournament = make_tournament(
+            "cup",
+            profile_ids=[1, 2],
+            leaderboard_id=3,
+            start_date=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        for tracked in tournament.tracked_players:
+            if tracked.profile_id == 1:
+                tracked.name = "pigrandom"
+                tracked.presentation = {"displayName": "PiG"}
+        session.add(tournament)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        by_profile = {p["profile_id"]: p for p in body["players"]}
+        assert by_profile[1]["name"] == "PiG"
         assert by_profile[2]["name"] == "p2"
 
     async def test_position_by_peak_not_current_rating(

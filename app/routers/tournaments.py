@@ -635,6 +635,54 @@ async def _longest_win_streak_run(
     return _longest_win_run([(r.outcome, r.completed_at) for r in rows])
 
 
+async def _net_rating_change_by_profile(
+    session: AsyncSession,
+    tournament: Tournament,
+    profile_ids: list[int],
+) -> dict[int, int | None]:
+    """Map each profile to its signed in-window net rating change (#243).
+
+    The delta from a profile's first in-window rated point to its last
+    (``last.new_rating - first.new_rating``), over completed matches on the
+    tournament's leaderboard, windowed on ``Match.started_at`` exactly like
+    ``_tournament_record_by_profile``. **Signed** — a decline is negative — so
+    the ``biggest_climber`` card it backs reads "least dropped" when everyone
+    declined. ``None`` when the profile has fewer than two in-window rated
+    points (nothing to measure a change across). A focused per-roster second
+    pass like ``_longest_win_streak_run``, keeping the shared standings/teams
+    path that calls ``_tournament_record_by_profile`` untouched.
+    """
+    changes: dict[int, int | None] = dict.fromkeys(profile_ids)
+    if not profile_ids:
+        return changes
+
+    stmt = (
+        select(MatchPlayer.profile_id, MatchPlayer.new_rating)
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Match.leaderboard_id == tournament.leaderboard_id,
+            MatchPlayer.profile_id.in_(profile_ids),
+            MatchPlayer.outcome.is_not(None),
+            MatchPlayer.new_rating.is_not(None),
+        )
+        # Oldest-first: the first row per profile is its first in-window rated
+        # point, the last is its latest; match_id breaks same-instant ties.
+        .order_by(Match.started_at.asc(), Match.match_id.asc())
+    )
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+
+    ratings_by_profile: dict[int, list[int]] = {}
+    for profile_id, new_rating in (await session.execute(stmt)).all():
+        ratings_by_profile.setdefault(profile_id, []).append(new_rating)
+    for profile_id, ratings in ratings_by_profile.items():
+        if len(ratings) >= 2:
+            changes[profile_id] = ratings[-1] - ratings[0]
+    return changes
+
+
 async def _team_by_tournament_player(
     session: AsyncSession,
     tournament_id: int,
@@ -683,6 +731,26 @@ async def _presentation_by_profile(
     )
     rows = (await session.execute(stmt)).all()
     return dict(rows)
+
+
+def _resolve_display_name(name: str, presentation: dict) -> str:
+    """The label the FE renders: ``presentation.displayName``, else ``name`` (#243).
+
+    ``displayName`` is the one ``presentation`` key the API interprets — it's a
+    *label*, and the read surfaces that carry ``name`` (``/standings``,
+    ``/standings/history``, ``/summary``) are the source of truth for what's on
+    screen, so resolving it here drops the FE's per-endpoint re-join to
+    ``/standings`` just to read the override. The rest of the bag stays opaque,
+    and the raw ladder handle stays in ``alias``. Mirrors the FE's
+    ``displayName ?? name`` except that a degenerate empty/whitespace override
+    is treated as unset (we don't blank out a real label) and a non-string
+    value is ignored — the bag's contents are host-controlled, but ``name`` is
+    typed ``str``.
+    """
+    display = presentation.get("displayName")
+    if isinstance(display, str) and display.strip():
+        return display
+    return name
 
 
 @router.get("/{tournament_slug}/standings")
@@ -769,7 +837,7 @@ async def get_standings(
                 StandingRow(
                     tournament_player_id=entry.id,
                     profile_id=player.profile_id,
-                    name=entry.name,
+                    name=_resolve_display_name(entry.name, entry.presentation),
                     alias=player.alias,
                     country=player.country,
                     team=teams_by_tournament_player.get(entry.id),
@@ -799,7 +867,7 @@ async def get_standings(
                 StandingRow(
                     tournament_player_id=entry.id,
                     profile_id=None,
-                    name=entry.name,
+                    name=_resolve_display_name(entry.name, entry.presentation),
                     alias=entry.name,
                     country=None,
                     team=teams_by_tournament_player.get(entry.id),
@@ -1022,6 +1090,11 @@ class _SummaryCandidate(NamedTuple):
     profile_id: int
     name: str
     record: TournamentRecord
+    # Signed in-window net rating delta (last − first rated point), or None
+    # when the entrant has < 2 in-window rated points — backs biggest_climber
+    # (#243). Summary-specific, so it rides the candidate rather than the
+    # shared public ``TournamentRecord``.
+    net_rating_change: int | None
 
 
 class _SummaryLeader(NamedTuple):
@@ -1035,24 +1108,33 @@ class _SummaryLeader(NamedTuple):
 
 def _pick_leader(
     candidates: list[_SummaryCandidate],
-    metric: Callable[[TournamentRecord], int | float | None],
+    metric: Callable[[_SummaryCandidate], int | float | None],
 ) -> _SummaryLeader | None:
     """The entrant with the highest ``metric``, or ``None`` if none qualifies.
 
-    ``metric(record)`` returns the card's value, or ``None`` to disqualify the
-    entrant (no rating yet, below the min-games guard, a zero count). Ties
-    break by higher ``games_played``, then lower ``tournament_player_id`` — a
-    total order, so the chosen leader is stable across polls (#238).
+    ``metric(candidate)`` returns the card's value, or ``None`` to disqualify
+    the entrant (no rating yet, below the min-games guard, a zero count, < 2
+    in-window rated points). The metric reads the whole candidate so a card can
+    key off summary-specific fields (``net_rating_change``) as well as the
+    ``record``. Ties break by higher ``games_played``, then lower
+    ``tournament_player_id`` — a total order, so the chosen leader is stable
+    across polls (#238). The value may be negative (``biggest_climber``); only
+    ``None`` disqualifies.
     """
     best: _SummaryLeader | None = None
     best_key: tuple[int | float, int, int] | None = None
-    for tournament_player_id, profile_id, name, record in candidates:
-        value = metric(record)
+    for candidate in candidates:
+        value = metric(candidate)
         if value is None:
             continue
-        key = (value, record.games_played, -tournament_player_id)
+        key = (value, candidate.record.games_played, -candidate.tournament_player_id)
         if best_key is None or key > best_key:
-            best = _SummaryLeader(tournament_player_id, profile_id, name, value)
+            best = _SummaryLeader(
+                candidate.tournament_player_id,
+                candidate.profile_id,
+                candidate.name,
+                value,
+            )
             best_key = key
     return best
 
@@ -1085,18 +1167,23 @@ async def get_summary(
         ),
     ),
 ) -> TournamentSummary:
-    """Headline "leader" stat cards for the tournament's roster (#238).
+    """Headline "leader" stat cards for the tournament's roster (#238, #243).
 
-    One card per metric — longest win streak, highest peak rating, most games
-    played, most wins, best win rate — each naming the leading linked entrant
-    and their value, all computed in-window (the same
-    ``[start_date, grand_finals_date]`` bounds as ``tournament_record``) over
-    the tournament players' matches on its leaderboard. A card is ``null``
-    when no entrant qualifies (empty roster, a metric nobody has earned, or
-    — for ``best_win_rate`` — nobody past the minimum-games guard). The
-    longest-win-streak card additionally carries the peak run's date range,
-    which the capped per-row recent-matchups can't surface. Lets the stats
-    page hit one compact endpoint instead of scanning the full standings.
+    Five cards mirroring the stats page's headline row — highest peak rating,
+    best win rate, longest win streak, biggest climber, most games played —
+    each naming the leading linked entrant and their value, all computed
+    in-window (the same ``[start_date, grand_finals_date]`` bounds as
+    ``tournament_record``) over the tournament players' matches on its
+    leaderboard. ``biggest_climber`` is the greatest **signed** in-window net
+    rating change (last − first rated point), so it can be negative when the
+    field declined. A card is ``null`` when no entrant qualifies (empty roster,
+    a metric nobody has earned, fewer than two in-window rated points for the
+    climber, or — for ``best_win_rate`` — nobody past the minimum-games guard).
+    The longest-win-streak card additionally carries the peak run's date range,
+    which the capped per-row recent-matchups can't surface. Each card's
+    ``name`` is the resolved display label (``presentation.displayName``
+    override, #243). Lets the stats page hit one compact endpoint instead of
+    scanning the full standings.
 
     ``win_rate_min_games`` overrides the best-win-rate sample-size guard
     (default ``_DEFAULT_WIN_RATE_MIN_GAMES``); it only gates that one card.
@@ -1112,6 +1199,7 @@ async def get_summary(
                 TournamentPlayer.id,
                 TournamentPlayer.profile_id,
                 TournamentPlayer.name,
+                TournamentPlayer.presentation,
             ).where(
                 TournamentPlayer.tournament_id == tournament.id,
                 TournamentPlayer.profile_id.is_not(None),
@@ -1121,25 +1209,33 @@ async def get_summary(
     if not roster:
         return TournamentSummary(
             last_polled_at=None,
-            longest_win_streak=None,
             highest_peak_rating=None,
-            most_games_played=None,
-            most_wins=None,
             best_win_rate=None,
+            longest_win_streak=None,
+            biggest_climber=None,
+            most_games_played=None,
         )
 
-    profile_ids = [profile_id for _, profile_id, _ in roster]
+    profile_ids = [profile_id for _, profile_id, _, _ in roster]
     names = await _civilization_names(session)
     records = await _tournament_record_by_profile(session, tournament, profile_ids, names)
+    net_changes = await _net_rating_change_by_profile(session, tournament, profile_ids)
     candidates = [
-        _SummaryCandidate(tournament_player_id, profile_id, name, records[profile_id])
-        for tournament_player_id, profile_id, name in roster
+        _SummaryCandidate(
+            tournament_player_id,
+            profile_id,
+            _resolve_display_name(name, presentation),
+            records[profile_id],
+            net_changes[profile_id],
+        )
+        for tournament_player_id, profile_id, name, presentation in roster
     ]
 
-    # `or None` drops a zero count (0 wins → no "most wins" leader); peak
-    # rating is already None when unrated; the win-rate guard requires a real
-    # sample so a 1–0 player's 100% doesn't headline.
-    streak = _pick_leader(candidates, lambda r: r.longest_win_streak or None)
+    # `or None` drops a zero count (0 wins → no streak leader); peak rating is
+    # already None when unrated; net rating change is already None below the
+    # 2-rated-point floor; the win-rate guard requires a real sample so a 1–0
+    # player's 100% doesn't headline.
+    streak = _pick_leader(candidates, lambda c: c.record.longest_win_streak or None)
     streak_card: StreakSummaryCard | None = None
     if streak is not None:
         _, streak_start, streak_end = await _longest_win_streak_run(
@@ -1158,15 +1254,19 @@ async def get_summary(
         # Latest in-window match across the roster — the freshness signal, like
         # the other aggregate endpoints (here the record's `last_match_at`).
         last_polled_at=compute_last_polled_at(r.last_match_at for r in records.values()),
-        longest_win_streak=streak_card,
-        highest_peak_rating=_summary_card(_pick_leader(candidates, lambda r: r.peak_rating)),
-        most_games_played=_summary_card(_pick_leader(candidates, lambda r: r.games_played or None)),
-        most_wins=_summary_card(_pick_leader(candidates, lambda r: r.wins or None)),
+        highest_peak_rating=_summary_card(_pick_leader(candidates, lambda c: c.record.peak_rating)),
         best_win_rate=_summary_card(
             _pick_leader(
                 candidates,
-                lambda r: r.win_pct if r.games_played >= win_rate_min_games else None,
+                lambda c: c.record.win_pct if c.record.games_played >= win_rate_min_games else None,
             )
+        ),
+        longest_win_streak=streak_card,
+        # Signed — a negative leader means everyone declined and this entrant
+        # dropped the least; None is the only disqualifier (< 2 rated points).
+        biggest_climber=_summary_card(_pick_leader(candidates, lambda c: c.net_rating_change)),
+        most_games_played=_summary_card(
+            _pick_leader(candidates, lambda c: c.record.games_played or None)
         ),
     )
 
@@ -1309,6 +1409,7 @@ async def get_standings_history(
                 TournamentPlayer.id,
                 TournamentPlayer.profile_id,
                 TournamentPlayer.name,
+                TournamentPlayer.presentation,
                 PlayerRating.max_rating,
                 PlayerRating.current_rating,
             )
@@ -1329,7 +1430,13 @@ async def get_standings_history(
     if not roster:
         return StandingsHistory(last_polled_at=None, buckets=[], players=[], teams=[])
 
+    # Base handle drives the sort tiebreak below (the name-sorted tail), kept
+    # identical to ``/standings``' SQL ``ORDER BY TournamentPlayer.name`` so the
+    # two surfaces always agree on order (#226). The resolved label
+    # (``displayName`` override, #243) is what the series *returns* — output
+    # only, so it never desyncs the ordering from the live table.
     name_by_tp = {r.id: r.name for r in roster}
+    display_name_by_tp = {r.id: _resolve_display_name(r.name, r.presentation) for r in roster}
     profile_by_tp = {r.id: r.profile_id for r in roster}
     cur_max_by_tp = {r.id: r.max_rating for r in roster}
     cur_rating_by_tp = {r.id: r.current_rating for r in roster}
@@ -1480,7 +1587,7 @@ async def get_standings_history(
             PlayerStandingHistory(
                 tournament_player_id=tp_id,
                 profile_id=profile_by_tp[tp_id],
-                name=name_by_tp[tp_id],
+                name=display_name_by_tp[tp_id],
                 points=player_points[tp_id],
             )
             for tp_id in name_by_tp

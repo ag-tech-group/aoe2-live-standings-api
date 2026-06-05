@@ -141,15 +141,18 @@ class StandingRow(BaseModel):
     is completed-match form; ``tournament_record`` is the player's record
     within the tournament's date window; ``in_match`` / ``live_match_id``
     are current live-match status. Sorted by ``current_rating`` desc
-    (NULLS LAST), then every unrated row — linked or not — by display
-    ``name`` (#187 unified the old three-tier sort that special-cased an
-    unlinked tail).
+    (NULLS LAST), then every unrated row — linked or not — by the base roster
+    name (#187 unified the old three-tier sort that special-cased an unlinked
+    tail). The returned ``name`` is the resolved display label (the
+    ``presentation.displayName`` override when set, #243), but the sort keys on
+    the base name, so ordering is independent of any override.
 
     An unlinked row (no ``profile_id`` yet — a streamer whose account
-    hasn't minted) carries null ``profile_id``, its ``name`` as the display
-    label (``alias`` falls back to it), its ``presentation`` bag (so
-    flag/streamUrls work identically), and null/zero for every polled
-    field. ``updated_at`` is null too — no polled refresh signal applies.
+    hasn't minted) carries null ``profile_id``, its resolved ``name`` as the
+    display label (``alias`` falls back to the base roster name), its
+    ``presentation`` bag (so flag/streamUrls work identically), and null/zero
+    for every polled field. ``updated_at`` is null too — no polled refresh
+    signal applies.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -163,8 +166,11 @@ class StandingRow(BaseModel):
     # The optional enrichment link to a polled identity; null on an unlinked
     # row (#187). Address rows by tournament_player_id, not this.
     profile_id: int | None
-    # The display label for this tournament — always present. ``alias`` is
-    # the current polled ladder alias (enrichment) and may differ.
+    # The resolved display label for this tournament — always present. The
+    # host's ``presentation.displayName`` override when set, else the base
+    # roster name (#243). ``alias`` carries the raw polled ladder handle
+    # (enrichment) and may differ; the rows are still ordered by the base name,
+    # not this resolved label.
     name: str
     alias: str
     country: str | None
@@ -316,19 +322,21 @@ class SummaryCard(BaseModel):
     """One headline "leader" card: the leading roster player + their value.
 
     Names the entrant who tops one in-window metric (longest win streak,
-    peak rating, games played, wins, win rate) on the tournament's
-    leaderboard. ``tournament_player_id`` is the stable roster key (#187);
-    ``profile_id`` is its linked polled identity (always set — only linked
-    entrants have match data to rank). ``name`` is the display label, the
-    same source/meaning as ``StandingRow.name``.
+    peak rating, games played, net rating change, win rate) on the
+    tournament's leaderboard. ``tournament_player_id`` is the stable roster
+    key (#187); ``profile_id`` is its linked polled identity (always set —
+    only linked entrants have match data to rank). ``name`` is the display
+    label, the same source/meaning as ``StandingRow.name`` (``displayName``
+    override resolved server-side, #243).
     """
 
     tournament_player_id: int
     profile_id: int
     name: str
     # The leading value for this card's metric. An integer for the count /
-    # rating cards (longest win streak, peak rating, games played, wins); a
-    # 0–100 one-dp percentage for the win-rate card.
+    # rating cards (longest win streak, peak rating, games played, and the
+    # ``biggest_climber`` net-rating delta — which is **signed**, so it can be
+    # negative); a 0–100 one-dp percentage for the win-rate card.
     value: int | float
 
 
@@ -348,26 +356,38 @@ class StreakSummaryCard(SummaryCard):
 
 
 class TournamentSummary(BaseModel):
-    """Headline "leader" stat cards for a tournament (#238).
+    """Headline "leader" stat cards for a tournament (#238, #243).
 
-    Each card names the leading roster entrant for one metric, all computed
-    in-window (the same ``[start_date, grand_finals_date]`` bounds as
-    ``tournament_record``) over linked entrants only — their ladder
-    opponents' rows are excluded. A card is ``null`` when no entrant
-    qualifies: an empty roster, a metric no one has earned (zero wins → no
-    ``most_wins`` leader), or — for ``best_win_rate`` — nobody past the
-    minimum-games guard. Leaders are tie-broken deterministically (higher
-    ``games_played``, then lower ``tournament_player_id``) so each card is
-    stable across polls. ``last_polled_at`` is the latest in-window match
-    across the roster, mirroring the other aggregate endpoints.
+    The five cards mirror the stats page's headline row exactly (#243):
+    ``highest_peak_rating``, ``best_win_rate``, ``longest_win_streak``,
+    ``biggest_climber``, ``most_games_played``. Each names the leading roster
+    entrant for one metric, computed in-window (the same
+    ``[start_date, grand_finals_date]`` bounds as ``tournament_record``) over
+    linked entrants only — their ladder opponents' rows are excluded. (Peak
+    rating is the one lifetime read; everything else, ``biggest_climber``
+    included, is window-scoped.)
+
+    A card is ``null`` when no entrant qualifies: an empty roster, a metric no
+    one has earned (zero in-window wins → no ``longest_win_streak`` leader),
+    nothing rankable in-window (``biggest_climber`` needs ≥2 in-window rated
+    points), or — for ``best_win_rate`` — nobody past the minimum-games guard.
+    Leaders are tie-broken deterministically (higher ``games_played``, then
+    lower ``tournament_player_id``) so each card is stable across polls.
+    ``last_polled_at`` is the latest in-window match across the roster,
+    mirroring the other aggregate endpoints.
     """
 
     last_polled_at: datetime | None
-    longest_win_streak: StreakSummaryCard | None
     highest_peak_rating: SummaryCard | None
-    most_games_played: SummaryCard | None
-    most_wins: SummaryCard | None
     best_win_rate: SummaryCard | None
+    longest_win_streak: StreakSummaryCard | None
+    # The greatest signed net rating change within the tournament window —
+    # last in-window rated point minus first (#243). Signed: a card with a
+    # negative ``value`` means the field declined and this entrant dropped the
+    # least. ``null`` when no entrant has ≥2 in-window rated points to measure
+    # a change across.
+    biggest_climber: SummaryCard | None
+    most_games_played: SummaryCard | None
 
 
 class StandingHistoryPoint(BaseModel):
@@ -391,18 +411,20 @@ class PlayerStandingHistory(BaseModel):
     ``points[i]`` is the entrant's standing at ``buckets[i]`` (see
     ``StandingsHistory``). Every entrant holds a position at every bucket
     (#226) — there are no null points; an unrated entrant simply sits at the
-    name-sorted tail with a null ``peak_rating``. ``name`` is the display
-    label, so the chart legend is self-describing without a join back to
-    ``/standings`` — the same ``TournamentPlayer.name`` source and meaning as
-    ``StandingRow.name``.
+    name-sorted tail with a null ``peak_rating``. ``name`` is the resolved
+    display label, so the chart legend is self-describing without a join back to
+    ``/standings`` — the same source and meaning as ``StandingRow.name``,
+    including its ``presentation.displayName`` override (#243). The tail's order
+    still tie-breaks on the base roster name, matching the live table.
     """
 
     tournament_player_id: int
     # Null for an unlinked roster row (no polled identity yet); the row still
     # holds a position, by name at the tail.
     profile_id: int | None
-    # The display label for this tournament — always present (NOT NULL since
-    # #187); the same label the live ``/standings`` table sorts and renders by.
+    # The resolved display label — always present (NOT NULL since #187); the
+    # ``presentation.displayName`` override when set, else the base roster name
+    # (#243), matching what the live ``/standings`` table renders.
     name: str
     points: list[StandingHistoryPoint]
 
