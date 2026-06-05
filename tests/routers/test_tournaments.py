@@ -2269,20 +2269,34 @@ class TestTournamentSummary:
         body = (await client.get("/v1/tournaments/cup/summary")).json()
         assert body == self._ALL_NULL
 
-    async def test_roster_without_matches_returns_all_null_cards(
+    async def test_rated_entrant_without_matches_leads_only_the_peak_card(
         self, client: AsyncClient, session: AsyncSession
     ):
-        # A rostered, rated entrant with no in-window matches earns nothing —
-        # every metric is a zero count / null rating, so each card is null
-        # rather than a value-0 card naming an arbitrary player.
+        # A rostered, rated entrant with no in-window matches earns nothing on
+        # the four in-window cards — but the lifetime peak card reads all-time
+        # max_rating, so it still names them (#246 corrects #244). The other
+        # four stay null rather than a value-0 card naming an arbitrary player.
         player = make_player(1)
-        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=2000, max_rating=2000)
+        )
         session.add(player)
-        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        tournament = make_tournament("cup", profile_ids=[1], leaderboard_id=3)
+        session.add(tournament)
         await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
 
         body = (await client.get("/v1/tournaments/cup/summary")).json()
-        assert body == self._ALL_NULL
+        assert body["highest_peak_rating"] == {
+            "tournament_player_id": tp[1],
+            "profile_id": 1,
+            "name": "p1",
+            "value": 2000,
+        }
+        assert body["best_win_rate"] is None
+        assert body["longest_win_streak"] is None
+        assert body["biggest_climber"] is None
+        assert body["most_games_played"] is None
 
     async def test_picks_the_leader_for_each_card(self, client: AsyncClient, session: AsyncSession):
         # Three entrants, each dominant on a different metric:
@@ -2290,8 +2304,15 @@ class TestTournamentSummary:
         #        climber leader), only 4 games
         #   p2 — one peak at 2100 (rating leader), rating 2100→2050 (−50), 2 games
         #   p3 — eight games, six wins (games + win-rate leader), flat at 1600 (0)
-        for profile_id in (1, 2, 3):
-            session.add(make_player(profile_id))
+        # All-time max_rating tracks each one's in-window peak here, so p2 leads
+        # the lifetime peak card too; the all-time-vs-in-window divergence has
+        # its own dedicated test.
+        for profile_id, max_rating in ((1, 1540), (2, 2100), (3, 1600)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(profile_id, leaderboard_id=3, max_rating=max_rating)
+            )
+            session.add(player)
         # p1: WIN x4, peak new_rating 1540.
         for match_id, day, rating in ((1, 1, 1510), (2, 2, 1520), (3, 3, 1530), (4, 4, 1540)):
             match = make_match(match_id, leaderboard_id=3, started_at=_day(day))
@@ -2489,7 +2510,9 @@ class TestTournamentSummary:
         # so longest_win_streak is null while most_games_played and
         # highest_peak_rating still name them. (Both losses settle at 1480, so
         # the climber is a flat 0 — a value, not null; see the climber tests.)
-        session.add(make_player(1))
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, max_rating=1480))
+        session.add(player)
         for match_id in (1, 2):
             match = make_match(match_id, leaderboard_id=3, started_at=_day(match_id))
             match.players.append(
@@ -2505,6 +2528,66 @@ class TestTournamentSummary:
         assert body["longest_win_streak"] is None
         assert body["most_games_played"]["value"] == 2
         assert body["highest_peak_rating"]["value"] == 1480
+
+    async def test_highest_peak_rating_ranks_by_all_time_max_not_in_window_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The peak card reads the immutable all-time max_rating (the host's
+        # decision), NOT the in-window tournament_record.peak_rating. p1's
+        # all-time max (1764) is highest even though its in-window peak (1694)
+        # trails p2's in-window peak (1702); p2's all-time max is only 1739. So
+        # p1 leads. (#246 corrects #244, which ranked by the in-window peak and
+        # would name p2/1702 here.)
+        p1 = make_player(1)
+        p1.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1694, max_rating=1764)
+        )
+        p2 = make_player(2)
+        p2.ratings.append(
+            make_player_rating(2, leaderboard_id=3, current_rating=1702, max_rating=1739)
+        )
+        session.add_all([p1, p2])
+        # In-window matches: p1 peaks at 1694, p2 at 1702 — the reverse of the
+        # all-time order, so ranking by the wrong column flips the leader.
+        m1 = make_match(1, leaderboard_id=3, started_at=_day(1))
+        m1.players.append(make_match_player(1, profile_id=1, new_rating=1694))
+        m2 = make_match(2, leaderboard_id=3, started_at=_day(1))
+        m2.players.append(make_match_player(2, profile_id=2, new_rating=1702))
+        session.add_all([m1, m2])
+        tournament = make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3)
+        session.add(tournament)
+        await session.commit()
+        tp = {p.profile_id: p.id for p in tournament.tracked_players}
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["highest_peak_rating"]
+        assert card == {
+            "tournament_player_id": tp[1],
+            "profile_id": 1,
+            "name": "p1",
+            "value": 1764,
+        }
+
+    async def test_highest_peak_rating_value_matches_standings_max_rating(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The peak card's value is exactly the all-time max_rating /standings
+        # exposes as StandingRow.max_rating (the PEAK column) — one source of
+        # truth, distinct from the in-window peak (here 1820 vs 1600).
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1600, max_rating=1820)
+        )
+        session.add(player)
+        match = make_match(1, leaderboard_id=3, started_at=_day(1))
+        match.players.append(make_match_player(1, profile_id=1, new_rating=1600))
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        summary = (await client.get("/v1/tournaments/cup/summary")).json()
+        standings = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        standings_max = {row["profile_id"]: row["max_rating"] for row in standings}[1]
+        assert summary["highest_peak_rating"]["value"] == standings_max == 1820
 
     async def test_biggest_climber_is_signed_and_can_be_negative(
         self, client: AsyncClient, session: AsyncSession
