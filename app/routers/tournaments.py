@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import time
 from asyncio import Lock
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import Row, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -56,6 +57,8 @@ from app.schemas import (
     StandingRow,
     StandingsHistory,
     StandingTeam,
+    StreakSummaryCard,
+    SummaryCard,
     TeamMemberRead,
     TeamStandingHistory,
     TeamStandingHistoryPoint,
@@ -63,6 +66,7 @@ from app.schemas import (
     TournamentCreate,
     TournamentRead,
     TournamentRecord,
+    TournamentSummary,
     TournamentUpdate,
     compute_last_polled_at,
 )
@@ -91,6 +95,13 @@ _TOURNAMENT_CONFIG_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalid
 # recent-first; the consumer renders a compact form strip and can show
 # fewer client-side.
 _RECENT_RESULTS_LIMIT = 10
+
+# Default minimum in-window games an entrant must have played to be eligible
+# for the summary "best win rate" card (#238) — so a lone 1–0 player's 100%
+# doesn't headline over a proven 25–5. 5 balances "a real sample" against
+# "don't exclude early-tournament leaders"; overridable per request via the
+# `win_rate_min_games` query param.
+_DEFAULT_WIN_RATE_MIN_GAMES = 5
 
 # A player counts as "in a match" while their live match sits in one of
 # these states — mirrors the live-feed filter.
@@ -435,6 +446,39 @@ async def _stream_live_roster_rows(
     return live
 
 
+def _longest_win_run(
+    outcomes: list[tuple[MatchOutcome, datetime | None]],
+) -> tuple[int, datetime | None, datetime | None]:
+    """Longest run of consecutive wins in a newest-first outcome list.
+
+    ``outcomes`` is ``(outcome, completed_at)`` pairs ordered newest-first
+    (the match-query order), so within a run the first pair seen is its
+    newest win and the last is its oldest. Returns ``(length, start, end)``:
+    the peak run's win count, and the ``completed_at`` of its first
+    (chronologically oldest) and last (newest) win. Equal-length runs keep
+    the most-recent one (strictly-greater compare). ``(0, None, None)`` when
+    there are no wins. The single source of truth for "longest win streak"
+    shared by ``_tournament_record_by_profile`` (count only) and the summary
+    streak card's date helper (#237, #238).
+    """
+    best_len = 0
+    best_start: datetime | None = None  # oldest win of the peak run
+    best_end: datetime | None = None  # newest win of the peak run
+    run_len = 0
+    run_end: datetime | None = None  # newest win of the current run
+    for outcome, completed_at in outcomes:
+        if outcome != MatchOutcome.WIN:
+            run_len = 0
+            continue
+        if run_len == 0:
+            run_end = completed_at  # first pair of the run = its newest win
+        run_len += 1
+        # Newest-first, so `completed_at` is this run's oldest win so far.
+        if run_len > best_len:
+            best_len, best_start, best_end = run_len, completed_at, run_end
+    return best_len, best_start, best_end
+
+
 async def _tournament_record_by_profile(
     session: AsyncSession,
     tournament: Tournament,
@@ -524,12 +568,9 @@ async def _tournament_record_by_profile(
                 break
             run += 1
         # Longest win run anywhere in the window (#237): a peak, not the
-        # current `streak`. Order-independent, so newest-first `outs` is fine.
-        longest_win_streak = 0
-        win_run = 0
-        for outcome in outs:
-            win_run = win_run + 1 if outcome == MatchOutcome.WIN else 0
-            longest_win_streak = max(longest_win_streak, win_run)
+        # current `streak`. Shared with the summary streak card's date helper
+        # (#238) so both agree on the run; here only the length is kept.
+        longest_win_streak, _, _ = _longest_win_run([(r.outcome, r.completed_at) for r in rows])
         ratings = [r.new_rating for r in rows if r.new_rating is not None]
         records[profile_id] = TournamentRecord(
             games_played=len(outs),
@@ -558,6 +599,40 @@ async def _tournament_record_by_profile(
             ],
         )
     return records
+
+
+async def _longest_win_streak_run(
+    session: AsyncSession,
+    tournament: Tournament,
+    profile_id: int,
+) -> tuple[int, datetime | None, datetime | None]:
+    """One profile's longest in-window win run + its (start, end) completions.
+
+    Mirrors the window / leaderboard / outcome filter of
+    ``_tournament_record_by_profile`` scoped to a single profile, so the run
+    length here equals that profile's ``longest_win_streak`` there. Returns
+    ``(length, streak_start, streak_end)`` — the peak run's win count and the
+    ``completed_at`` of its first (oldest) and last (newest) win. Queried only
+    for the summary card's streak leader, so the per-profile second pass stays
+    off the shared standings/teams path that calls
+    ``_tournament_record_by_profile`` (#238).
+    """
+    stmt = (
+        select(MatchPlayer.outcome, Match.completed_at)
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Match.leaderboard_id == tournament.leaderboard_id,
+            MatchPlayer.profile_id == profile_id,
+            MatchPlayer.outcome.is_not(None),
+        )
+        .order_by(Match.started_at.desc())
+    )
+    if tournament.start_date is not None:
+        stmt = stmt.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    rows = (await session.execute(stmt)).all()
+    return _longest_win_run([(r.outcome, r.completed_at) for r in rows])
 
 
 async def _team_by_tournament_player(
@@ -937,6 +1012,162 @@ async def get_civ_stats(
         last_polled_at=last_polled_at,
         overall=_sorted_civ_stats(overall, names),
         by_player=by_player,
+    )
+
+
+class _SummaryCandidate(NamedTuple):
+    """A linked roster entrant paired with its in-window record (#238)."""
+
+    tournament_player_id: int
+    profile_id: int
+    name: str
+    record: TournamentRecord
+
+
+class _SummaryLeader(NamedTuple):
+    """The entrant that tops one summary metric, with the leading value."""
+
+    tournament_player_id: int
+    profile_id: int
+    name: str
+    value: int | float
+
+
+def _pick_leader(
+    candidates: list[_SummaryCandidate],
+    metric: Callable[[TournamentRecord], int | float | None],
+) -> _SummaryLeader | None:
+    """The entrant with the highest ``metric``, or ``None`` if none qualifies.
+
+    ``metric(record)`` returns the card's value, or ``None`` to disqualify the
+    entrant (no rating yet, below the min-games guard, a zero count). Ties
+    break by higher ``games_played``, then lower ``tournament_player_id`` — a
+    total order, so the chosen leader is stable across polls (#238).
+    """
+    best: _SummaryLeader | None = None
+    best_key: tuple[int | float, int, int] | None = None
+    for tournament_player_id, profile_id, name, record in candidates:
+        value = metric(record)
+        if value is None:
+            continue
+        key = (value, record.games_played, -tournament_player_id)
+        if best_key is None or key > best_key:
+            best = _SummaryLeader(tournament_player_id, profile_id, name, value)
+            best_key = key
+    return best
+
+
+def _summary_card(leader: _SummaryLeader | None) -> SummaryCard | None:
+    """Build a plain ``SummaryCard`` from a picked leader, or pass ``None`` on."""
+    if leader is None:
+        return None
+    return SummaryCard(
+        tournament_player_id=leader.tournament_player_id,
+        profile_id=leader.profile_id,
+        name=leader.name,
+        value=leader.value,
+    )
+
+
+@router.get("/{tournament_slug}/summary")
+async def get_summary(
+    request: Request,
+    response: Response,
+    tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
+    win_rate_min_games: int = Query(
+        _DEFAULT_WIN_RATE_MIN_GAMES,
+        ge=1,
+        description=(
+            "Minimum in-window games an entrant must have played to be eligible "
+            "for the best_win_rate card — guards against a tiny-sample 100%. "
+            "Affects only best_win_rate; the other cards ignore it."
+        ),
+    ),
+) -> TournamentSummary:
+    """Headline "leader" stat cards for the tournament's roster (#238).
+
+    One card per metric — longest win streak, highest peak rating, most games
+    played, most wins, best win rate — each naming the leading linked entrant
+    and their value, all computed in-window (the same
+    ``[start_date, grand_finals_date]`` bounds as ``tournament_record``) over
+    the tournament players' matches on its leaderboard. A card is ``null``
+    when no entrant qualifies (empty roster, a metric nobody has earned, or
+    — for ``best_win_rate`` — nobody past the minimum-games guard). The
+    longest-win-streak card additionally carries the peak run's date range,
+    which the capped per-row recent-matchups can't surface. Lets the stats
+    page hit one compact endpoint instead of scanning the full standings.
+
+    ``win_rate_min_games`` overrides the best-win-rate sample-size guard
+    (default ``_DEFAULT_WIN_RATE_MIN_GAMES``); it only gates that one card.
+    """
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
+
+    # Entrants are linked roster rows (profile_id set); unlinked rows have no
+    # polled identity and thus no match data — the helper's IN filter skips
+    # them. Mirrors /civ-stats' roster resolution.
+    roster = (
+        await session.execute(
+            select(
+                TournamentPlayer.id,
+                TournamentPlayer.profile_id,
+                TournamentPlayer.name,
+            ).where(
+                TournamentPlayer.tournament_id == tournament.id,
+                TournamentPlayer.profile_id.is_not(None),
+            )
+        )
+    ).all()
+    if not roster:
+        return TournamentSummary(
+            last_polled_at=None,
+            longest_win_streak=None,
+            highest_peak_rating=None,
+            most_games_played=None,
+            most_wins=None,
+            best_win_rate=None,
+        )
+
+    profile_ids = [profile_id for _, profile_id, _ in roster]
+    names = await _civilization_names(session)
+    records = await _tournament_record_by_profile(session, tournament, profile_ids, names)
+    candidates = [
+        _SummaryCandidate(tournament_player_id, profile_id, name, records[profile_id])
+        for tournament_player_id, profile_id, name in roster
+    ]
+
+    # `or None` drops a zero count (0 wins → no "most wins" leader); peak
+    # rating is already None when unrated; the win-rate guard requires a real
+    # sample so a 1–0 player's 100% doesn't headline.
+    streak = _pick_leader(candidates, lambda r: r.longest_win_streak or None)
+    streak_card: StreakSummaryCard | None = None
+    if streak is not None:
+        _, streak_start, streak_end = await _longest_win_streak_run(
+            session, tournament, streak.profile_id
+        )
+        streak_card = StreakSummaryCard(
+            tournament_player_id=streak.tournament_player_id,
+            profile_id=streak.profile_id,
+            name=streak.name,
+            value=streak.value,
+            streak_start=streak_start,
+            streak_end=streak_end,
+        )
+
+    return TournamentSummary(
+        # Latest in-window match across the roster — the freshness signal, like
+        # the other aggregate endpoints (here the record's `last_match_at`).
+        last_polled_at=compute_last_polled_at(r.last_match_at for r in records.values()),
+        longest_win_streak=streak_card,
+        highest_peak_rating=_summary_card(_pick_leader(candidates, lambda r: r.peak_rating)),
+        most_games_played=_summary_card(_pick_leader(candidates, lambda r: r.games_played or None)),
+        most_wins=_summary_card(_pick_leader(candidates, lambda r: r.wins or None)),
+        best_win_rate=_summary_card(
+            _pick_leader(
+                candidates,
+                lambda r: r.win_pct if r.games_played >= win_rate_min_games else None,
+            )
+        ),
     )
 
 
