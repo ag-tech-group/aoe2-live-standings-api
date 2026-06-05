@@ -321,13 +321,13 @@ class CivStats(BaseModel):
 class SummaryCard(BaseModel):
     """One headline "leader" card: the leading roster player + their value.
 
-    Names the entrant who tops one in-window metric (longest win streak,
-    peak rating, games played, net rating change, win rate) on the
-    tournament's leaderboard. ``tournament_player_id`` is the stable roster
-    key (#187); ``profile_id`` is its linked polled identity (always set —
-    only linked entrants have match data to rank). ``name`` is the display
-    label, the same source/meaning as ``StandingRow.name`` (``displayName``
-    override resolved server-side, #243).
+    Names the entrant who tops one metric — all-time peak rating, or one of the
+    in-window metrics (longest win streak, games played, net rating change, win
+    rate) — on the tournament's leaderboard. ``tournament_player_id`` is the
+    stable roster key (#187); ``profile_id`` is its linked polled identity
+    (always set — only linked entrants have match data to rank). ``name`` is the
+    display label, the same source/meaning as ``StandingRow.name``
+    (``displayName`` override resolved server-side, #243).
     """
 
     tournament_player_id: int
@@ -378,6 +378,10 @@ class TournamentSummary(BaseModel):
     """
 
     last_polled_at: datetime | None
+    # The one lifetime card: ``value`` is the entrant's all-time
+    # ``PlayerRating.max_rating`` (the host's all-time-peak decision, same as
+    # ``StandingRow.max_rating``), not the in-window peak. ``null`` when no
+    # entrant is rated on this leaderboard.
     highest_peak_rating: SummaryCard | None
     best_win_rate: SummaryCard | None
     longest_win_streak: StreakSummaryCard | None

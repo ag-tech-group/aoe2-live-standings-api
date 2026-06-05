@@ -683,6 +683,34 @@ async def _net_rating_change_by_profile(
     return changes
 
 
+async def _max_rating_by_profile(
+    session: AsyncSession,
+    tournament: Tournament,
+    profile_ids: list[int],
+) -> dict[int, int | None]:
+    """Map each profile to its all-time peak rating on the tournament's leaderboard.
+
+    ``PlayerRating.max_rating`` — the immutable lifetime peak the standings PEAK
+    column shows (the host's all-time-peak decision), the same source
+    ``get_standings`` / ``get_standings_history`` read. ``None`` for a profile
+    with no rating row on this leaderboard yet. Backs the summary
+    ``highest_peak_rating`` card — the **one lifetime read**; every other card
+    is window-scoped. (Corrects #244, which ranked this card by the in-window
+    ``tournament_record.peak_rating`` and so could name the wrong entrant and
+    value when an all-time peak predates the window.)
+    """
+    ratings: dict[int, int | None] = dict.fromkeys(profile_ids)
+    if not profile_ids:
+        return ratings
+    stmt = select(PlayerRating.profile_id, PlayerRating.max_rating).where(
+        PlayerRating.leaderboard_id == tournament.leaderboard_id,
+        PlayerRating.profile_id.in_(profile_ids),
+    )
+    for profile_id, max_rating in (await session.execute(stmt)).all():
+        ratings[profile_id] = max_rating
+    return ratings
+
+
 async def _team_by_tournament_player(
     session: AsyncSession,
     tournament_id: int,
@@ -1095,6 +1123,10 @@ class _SummaryCandidate(NamedTuple):
     # (#243). Summary-specific, so it rides the candidate rather than the
     # shared public ``TournamentRecord``.
     net_rating_change: int | None
+    # All-time peak (``PlayerRating.max_rating``) on the tournament's
+    # leaderboard — the host's lifetime-peak decision. Backs highest_peak_rating,
+    # the one card that reads lifetime not in-window; None when unrated there.
+    max_rating: int | None
 
 
 class _SummaryLeader(NamedTuple):
@@ -1171,14 +1203,17 @@ async def get_summary(
 
     Five cards mirroring the stats page's headline row — highest peak rating,
     best win rate, longest win streak, biggest climber, most games played —
-    each naming the leading linked entrant and their value, all computed
-    in-window (the same ``[start_date, grand_finals_date]`` bounds as
-    ``tournament_record``) over the tournament players' matches on its
+    each naming the leading linked entrant and their value. ``highest_peak_rating``
+    is the **one lifetime read**: it ranks by all-time ``PlayerRating.max_rating``
+    (the host's all-time-peak decision, same as ``StandingRow.max_rating``). The
+    other four are computed in-window (the same ``[start_date, grand_finals_date]``
+    bounds as ``tournament_record``) over the tournament players' matches on its
     leaderboard. ``biggest_climber`` is the greatest **signed** in-window net
     rating change (last − first rated point), so it can be negative when the
     field declined. A card is ``null`` when no entrant qualifies (empty roster,
-    a metric nobody has earned, fewer than two in-window rated points for the
-    climber, or — for ``best_win_rate`` — nobody past the minimum-games guard).
+    a metric nobody has earned, no rating on this leaderboard for the peak card,
+    fewer than two in-window rated points for the climber, or — for
+    ``best_win_rate`` — nobody past the minimum-games guard).
     The longest-win-streak card additionally carries the peak run's date range,
     which the capped per-row recent-matchups can't surface. Each card's
     ``name`` is the resolved display label (``presentation.displayName``
@@ -1220,6 +1255,7 @@ async def get_summary(
     names = await _civilization_names(session)
     records = await _tournament_record_by_profile(session, tournament, profile_ids, names)
     net_changes = await _net_rating_change_by_profile(session, tournament, profile_ids)
+    max_ratings = await _max_rating_by_profile(session, tournament, profile_ids)
     candidates = [
         _SummaryCandidate(
             tournament_player_id,
@@ -1227,11 +1263,12 @@ async def get_summary(
             _resolve_display_name(name, presentation),
             records[profile_id],
             net_changes[profile_id],
+            max_ratings[profile_id],
         )
         for tournament_player_id, profile_id, name, presentation in roster
     ]
 
-    # `or None` drops a zero count (0 wins → no streak leader); peak rating is
+    # `or None` drops a zero count (0 wins → no streak leader); all-time peak is
     # already None when unrated; net rating change is already None below the
     # 2-rated-point floor; the win-rate guard requires a real sample so a 1–0
     # player's 100% doesn't headline.
@@ -1254,7 +1291,10 @@ async def get_summary(
         # Latest in-window match across the roster — the freshness signal, like
         # the other aggregate endpoints (here the record's `last_match_at`).
         last_polled_at=compute_last_polled_at(r.last_match_at for r in records.values()),
-        highest_peak_rating=_summary_card(_pick_leader(candidates, lambda c: c.record.peak_rating)),
+        # The one lifetime card: ranks by all-time max_rating (the host's
+        # all-time-peak decision, same as StandingRow.max_rating), NOT the
+        # in-window record.peak_rating. Corrects #244.
+        highest_peak_rating=_summary_card(_pick_leader(candidates, lambda c: c.max_rating)),
         best_win_rate=_summary_card(
             _pick_leader(
                 candidates,
