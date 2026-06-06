@@ -124,19 +124,31 @@ def parse_player_stats(
 def parse_recent_matches(
     payload: dict[str, Any],
     leaderboard_for_matchtype: dict[int, int] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Turn a ``getRecentMatchHistory`` payload into (match_rows, match_player_rows).
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Turn a ``getRecentMatchHistory`` payload into (match_rows, match_player_rows, alias_rows).
 
     ``leaderboard_for_matchtype`` maps Relic's ``matchtype_id`` to the
     canonical ``leaderboard_id`` (e.g. 6 -> 3 for 1v1 RM Ranked). Sourced
     from the cached ``getAvailableLeaderboards`` snapshot; pass ``None``
     when the cache hasn't been loaded yet and we'll write ``None`` for the
     derived ``leaderboard_id`` column.
+
+    The third return — ``alias_rows`` (``{profile_id, alias}``) — is the
+    payload's top-level ``profiles`` array: a name for *every* participant in
+    these matches, including the untracked ladder opponents of tracked players.
+    Persisted to ``profile_aliases`` so the recent-games hint can name an
+    opponent we don't otherwise track (#349). Blank aliases are dropped so a
+    later poll's empty value can't overwrite a real name.
     """
     mapping = leaderboard_for_matchtype or {}
 
     matches: list[dict[str, Any]] = []
     players: list[dict[str, Any]] = []
+    aliases: list[dict[str, Any]] = [
+        {"profile_id": prof["profile_id"], "alias": prof["alias"]}
+        for prof in payload.get("profiles", [])
+        if prof.get("profile_id") is not None and prof.get("alias")
+    ]
     for raw in payload.get("matchHistoryStats", []):
         match_id = raw["id"]
         completed_at = _from_unix(raw.get("completiontime"))
@@ -180,7 +192,7 @@ def parse_recent_matches(
                 }
             )
 
-    return matches, players
+    return matches, players, aliases
 
 
 def _parse_outcome(resulttype: int | None) -> MatchOutcome | None:

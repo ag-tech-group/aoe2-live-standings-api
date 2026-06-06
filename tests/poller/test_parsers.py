@@ -210,7 +210,7 @@ class TestParseRecentMatches:
             ]
         }
 
-        matches, players = parse_recent_matches(payload, leaderboard_for_matchtype={26: 13})
+        matches, players, _ = parse_recent_matches(payload, leaderboard_for_matchtype={26: 13})
 
         assert len(matches) == 1
         match = matches[0]
@@ -241,7 +241,7 @@ class TestParseRecentMatches:
                 }
             ]
         }
-        matches, _ = parse_recent_matches(payload)
+        matches, _, _ = parse_recent_matches(payload)
         assert matches[0]["state"] == MatchState.IN_PROGRESS
         assert matches[0]["completed_at"] is None
 
@@ -259,7 +259,7 @@ class TestParseRecentMatches:
                 }
             ]
         }
-        matches, _ = parse_recent_matches(payload, leaderboard_for_matchtype={6: 3})
+        matches, _, _ = parse_recent_matches(payload, leaderboard_for_matchtype={6: 3})
         assert matches[0]["leaderboard_id"] is None
 
     def test_resulttype_outside_known_values_is_none(self):
@@ -278,8 +278,32 @@ class TestParseRecentMatches:
                 }
             ]
         }
-        _, players = parse_recent_matches(payload)
+        _, players, _ = parse_recent_matches(payload)
         assert players[0]["outcome"] is None
+
+    def test_extracts_aliases_from_profiles_array(self):
+        # The top-level `profiles` array names every participant — including
+        # untracked opponents — and a blank alias is dropped so it can't
+        # overwrite a real name on a later poll (#349).
+        payload = {
+            "matchHistoryStats": [],
+            "profiles": [
+                {"profile_id": 199325, "alias": "TheViper"},
+                {"profile_id": 409748, "alias": "Hera"},
+                {"profile_id": 5, "alias": ""},
+                {"profile_id": None, "alias": "ghost"},
+                {"alias": "no-id"},
+            ],
+        }
+        _, _, aliases = parse_recent_matches(payload)
+        assert aliases == [
+            {"profile_id": 199325, "alias": "TheViper"},
+            {"profile_id": 409748, "alias": "Hera"},
+        ]
+
+    def test_missing_profiles_array_yields_no_aliases(self):
+        _, _, aliases = parse_recent_matches({"matchHistoryStats": []})
+        assert aliases == []
 
 
 class TestParseLiveAdvertisements:
@@ -432,7 +456,7 @@ class TestParseMatchPlayerCiv:
                 }
             ]
         }
-        _, players = parse_recent_matches(payload)
+        _, players, _ = parse_recent_matches(payload)
         assert players[0]["civilization_id"] == UNKNOWN_CIVILIZATION_ID
 
 

@@ -40,6 +40,7 @@ from app.models import (
     MatchPlayer,
     Player,
     PlayerRating,
+    ProfileAlias,
 )
 from app.poller.broadcast import LiveStreamMeta
 
@@ -125,6 +126,24 @@ async def upsert_player_rating(session: AsyncSession, data: dict[str, Any]) -> N
             for k in values
             if k not in ("profile_id", "leaderboard_id")
         },
+    )
+    await session.execute(stmt)
+
+
+async def upsert_profile_alias(session: AsyncSession, data: dict[str, Any]) -> None:
+    """Insert a ProfileAlias, or overwrite its alias on profile_id conflict.
+
+    Latest alias wins — a rename surfaces on the next poll that sees the
+    profile. ``updated_at`` is set on both paths since ``ON CONFLICT`` bypasses
+    the ORM's ``onupdate`` (mirrors ``upsert_player``). The parser already
+    drops blank aliases, so a conflict update never blanks a real name.
+    """
+    insert = dialect_insert(session)
+    values = {**data, "updated_at": func.now()}
+    stmt = insert(ProfileAlias).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["profile_id"],
+        set_={k: getattr(stmt.excluded, k) for k in values if k != "profile_id"},
     )
     await session.execute(stmt)
 

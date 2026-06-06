@@ -29,6 +29,34 @@ class Player(Base):
     )
 
 
+class ProfileAlias(Base):
+    """A ``profile_id`` → display alias mirror for *any* profile we've seen.
+
+    Distinct from ``Player``: that table is the rich, polled record for the
+    *tracked* roster only (``poll_player_stats`` resolves its set from the
+    union of rosters). This table is a lightweight name cache for *every*
+    participant the recent-matches poller observes — crucially including the
+    untracked ladder opponents of tracked players, who never get a ``Player``
+    row (see the FK-free ``MatchPlayer.profile_id``). It's upserted from the
+    ``profiles`` array of ``getRecentMatchHistory`` (latest alias wins), so an
+    opponent's name can be rendered in the recent-games hint (#349) without
+    tracking them.
+
+    No FK to ``players``: most rows here have no ``Player`` counterpart, and
+    the one a tracked profile does have is richer anyway.
+    """
+
+    __tablename__ = "profile_aliases"
+
+    profile_id: Mapped[int] = mapped_column(primary_key=True)
+    alias: Mapped[str]
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class PlayerRating(Base):
     __tablename__ = "player_ratings"
 
