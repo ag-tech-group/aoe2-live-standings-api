@@ -22,7 +22,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.events import EventType, emit_nudge
 from app.poller.parsers import parse_recent_matches
 from app.poller.roster import get_tracked_profile_ids
-from app.poller.upserts import upsert_match_from_recent, upsert_match_player
+from app.poller.upserts import (
+    upsert_match_from_recent,
+    upsert_match_player,
+    upsert_profile_alias,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -77,11 +81,15 @@ async def tick_recent_matches(
                     error=str(result),
                 )
                 continue
-            matches, players = parse_recent_matches(result, matchtype_to_leaderboard)
+            matches, players, aliases = parse_recent_matches(result, matchtype_to_leaderboard)
             for match in matches:
                 await upsert_match_from_recent(session, match)
             for mp in players:
                 await upsert_match_player(session, mp)
+            # Names for everyone in these matches — incl. untracked opponents —
+            # so the recent-games hint can label them (#349).
+            for alias_row in aliases:
+                await upsert_profile_alias(session, alias_row)
             total_matches += len(matches)
             total_players += len(players)
         # Match writes drive the recent-results display — emit a NOTIFY so

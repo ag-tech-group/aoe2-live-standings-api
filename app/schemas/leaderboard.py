@@ -65,6 +65,19 @@ class RecentMatchup(BaseModel):
     # The opponent's civ display name; null when ``opponent_civilization_id``
     # is null or its id isn't in the reference yet.
     opponent_civilization_name: str | None
+    # The opposing player's identity, resolved for the same single opponent as
+    # the civ fields above (#349). ``opponent_profile_id`` is their polled id;
+    # ``opponent_name`` is their display label — a fellow entrant's resolved
+    # tournament name, else their polled ladder alias. ``opponent_tournament_
+    # player_id`` is set ONLY when the opponent is another player on *this*
+    # tournament's roster — the consumer's cue to highlight a streamer-vs-
+    # streamer game and link to their row; null for an ordinary ladder
+    # opponent. All three are null when no single opponent resolves (non-1v1,
+    # or no opposing-team row); ``opponent_name`` alone is null if the
+    # opponent's alias hasn't been polled into ``profile_aliases`` yet.
+    opponent_profile_id: int | None
+    opponent_name: str | None
+    opponent_tournament_player_id: int | None
     map_name: str
     # When the match finished; null only if it settled without a completion
     # time (not expected for a counted, outcome-bearing game).
@@ -476,3 +489,48 @@ class StandingsHistory(BaseModel):
     buckets: list[datetime]
     players: list[PlayerStandingHistory]
     teams: list[TeamStandingHistory]
+
+
+class HeadToHeadPlayer(BaseModel):
+    """One entrant's side of a head-to-head game (#349).
+
+    ``tournament_player_id`` is the stable roster key; ``profile_id`` its
+    linked polled identity. ``name`` is the resolved display label (the same
+    source/meaning as ``StandingRow.name``). ``old_rating`` / ``new_rating``
+    are this player's rating going into and coming out of the game — the
+    "elo at the time" the card shows — null on an unranked game or before the
+    upstream settled the delta. ``civilization_name`` is folded from the
+    civilizations reference; null when the id isn't in it yet.
+    """
+
+    tournament_player_id: int
+    profile_id: int
+    name: str
+    civilization_id: int
+    civilization_name: str | None
+    old_rating: int | None
+    new_rating: int | None
+    outcome: MatchOutcome | None
+
+
+class HeadToHeadMatch(BaseModel):
+    """A completed game where two of the tournament's entrants faced each other.
+
+    Backs the head-to-head stat card (#349): the matchup, map, each entrant's
+    civ + elo-at-the-time + result, and the game's duration. ``entrants`` carries
+    only the tournament's own roster players in the match (two on a 1v1
+    leaderboard), winner first then by pre-game rating. ``match_id`` is the
+    upstream Relic match id — the consumer builds the external link from it
+    (e.g. ``https://www.aoe2insights.com/match/{match_id}/``). Carried
+    newest-game-first in the list envelope.
+    """
+
+    match_id: int
+    map_name: str
+    started_at: datetime
+    completed_at: datetime | None
+    # Wall-clock game length in whole seconds (``completed_at − started_at``).
+    # Derived server-side, not stored; null only if the match carries no
+    # completion time (not expected for a completed game).
+    duration_seconds: int | None
+    entrants: list[HeadToHeadPlayer]

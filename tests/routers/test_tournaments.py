@@ -13,6 +13,7 @@ from app.models import (
     LiveStream,
     MatchOutcome,
     MatchState,
+    ProfileAlias,
     Team,
     TeamMember,
     Tournament,
@@ -1358,6 +1359,233 @@ class TestStandingsRecentMatchups:
         ]["recent_matchups"][0]
         assert matchup["civilization_name"] == "Burgundians"
         assert matchup["opponent_civilization_name"] == "Japanese"
+
+
+class TestStandingsRecentMatchupOpponentIdentity:
+    """recent_matchups opponent identity + streamer highlight (#349)."""
+
+    async def test_untracked_opponent_named_from_profile_aliases_no_link(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The entrant (profile 1) faces an untracked ladder player (999) whose
+        # alias the recent-matches poller cached in profile_aliases. The hint
+        # shows that name but no roster link (they're not a fellow entrant).
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        session.add(ProfileAlias(profile_id=999, alias="LadderRando"))
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(1, profile_id=1, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        match.players.append(make_match_player(1, profile_id=999, team_id=1))
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        matchup = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]["recent_matchups"][0]
+        assert matchup["opponent_profile_id"] == 999
+        assert matchup["opponent_name"] == "LadderRando"
+        assert matchup["opponent_tournament_player_id"] is None
+
+    async def test_opponent_name_null_when_alias_not_polled(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Untracked opponent with no profile_aliases row yet: id is surfaced,
+        # name is null, still no roster link.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(1, profile_id=1, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        match.players.append(make_match_player(1, profile_id=999, team_id=1))
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        matchup = (await client.get("/v1/tournaments/cup/standings")).json()["items"][0][
+            "tournament_record"
+        ]["recent_matchups"][0]
+        assert matchup["opponent_profile_id"] == 999
+        assert matchup["opponent_name"] is None
+        assert matchup["opponent_tournament_player_id"] is None
+
+    async def test_fellow_entrant_opponent_links_to_roster_row(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Two roster streamers face each other: the opponent resolves to the
+        # fellow entrant's roster id (the highlight cue) and display name, not
+        # a bare alias.
+        for pid, rating in ((1, 2000), (2, 1900)):
+            p = make_player(pid)
+            p.ratings.append(make_player_rating(pid, leaderboard_id=3, current_rating=rating))
+            session.add(p)
+        match = make_match(1, leaderboard_id=3)
+        match.players.append(
+            make_match_player(1, profile_id=1, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        match.players.append(
+            make_match_player(1, profile_id=2, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        rows = {row["profile_id"]: row for row in items}
+        opponent_tp_id = rows[2]["tournament_player_id"]
+        matchup = rows[1]["tournament_record"]["recent_matchups"][0]
+        assert matchup["opponent_profile_id"] == 2
+        assert matchup["opponent_tournament_player_id"] == opponent_tp_id
+        assert matchup["opponent_name"] == "p2"
+
+
+class TestHeadToHead:
+    """GET /{slug}/head-to-head: the streamer-vs-streamer feed (#349)."""
+
+    async def test_unknown_tournament_returns_404(self, client: AsyncClient):
+        assert (await client.get("/v1/tournaments/nope/head-to-head")).status_code == 404
+
+    async def test_empty_when_fewer_than_two_entrants(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add(make_player(1))
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+        body = (await client.get("/v1/tournaments/cup/head-to-head")).json()
+        assert body["items"] == []
+
+    async def test_returns_only_games_between_two_entrants(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Three matches: 1-v-2 (both entrants → counts), 1-v-999 (one entrant,
+        # a ladder game → excluded), and 2-v-3 (both entrants → counts).
+        for pid in (1, 2, 3):
+            session.add(make_player(pid))
+        # entrant-vs-entrant
+        m1 = make_match(101, leaderboard_id=3)
+        m1.players.append(make_match_player(101, profile_id=1, team_id=0, outcome=MatchOutcome.WIN))
+        m1.players.append(
+            make_match_player(101, profile_id=2, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        # entrant-vs-ladder (excluded)
+        m2 = make_match(102, leaderboard_id=3)
+        m2.players.append(make_match_player(102, profile_id=1, team_id=0, outcome=MatchOutcome.WIN))
+        m2.players.append(
+            make_match_player(102, profile_id=999, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        # entrant-vs-entrant
+        m3 = make_match(103, leaderboard_id=3)
+        m3.players.append(make_match_player(103, profile_id=2, team_id=0, outcome=MatchOutcome.WIN))
+        m3.players.append(
+            make_match_player(103, profile_id=3, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        session.add_all([m1, m2, m3])
+        session.add(make_tournament("cup", profile_ids=[1, 2, 3], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/head-to-head")).json()["items"]
+        assert {m["match_id"] for m in items} == {101, 103}
+        # Each entry carries exactly the two entrants, winner first.
+        h2h = next(m for m in items if m["match_id"] == 101)
+        assert [e["profile_id"] for e in h2h["entrants"]] == [1, 2]
+        assert h2h["entrants"][0]["outcome"] == "win"
+        assert h2h["entrants"][1]["outcome"] == "loss"
+
+    async def test_entry_shape_map_elo_duration_link(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add_all([make_player(1), make_player(2)])
+        session.add_all(
+            [
+                Civilization(civilization_id=7, name="Burgundians"),
+                Civilization(civilization_id=23, name="Japanese"),
+            ]
+        )
+        match = make_match(
+            483348537,
+            leaderboard_id=3,
+            map_name="Border Dispute.rms",
+            started_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 18, 12, 8, 21, tzinfo=UTC),
+        )
+        match.players.append(
+            make_match_player(
+                483348537,
+                profile_id=1,
+                team_id=0,
+                civilization_id=7,
+                outcome=MatchOutcome.WIN,
+                old_rating=1236,
+                new_rating=1254,
+            )
+        )
+        match.players.append(
+            make_match_player(
+                483348537,
+                profile_id=2,
+                team_id=1,
+                civilization_id=23,
+                outcome=MatchOutcome.LOSS,
+                old_rating=1276,
+                new_rating=1258,
+            )
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3))
+        await session.commit()
+
+        h2h = (await client.get("/v1/tournaments/cup/head-to-head")).json()["items"][0]
+        assert h2h["match_id"] == 483348537
+        assert h2h["map_name"] == "Border Dispute.rms"
+        assert h2h["duration_seconds"] == 501  # 8m21s, from completed - started
+        winner = h2h["entrants"][0]
+        assert winner["profile_id"] == 1
+        assert winner["old_rating"] == 1236
+        assert winner["new_rating"] == 1254
+        assert winner["civilization_name"] == "Burgundians"
+
+    async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
+        # A game before start_date is out of window and excluded.
+        session.add_all([make_player(1), make_player(2)])
+        before = make_match(
+            201,
+            leaderboard_id=3,
+            started_at=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 1, 12, 30, tzinfo=UTC),
+        )
+        before.players.append(make_match_player(201, profile_id=1, team_id=0))
+        before.players.append(
+            make_match_player(201, profile_id=2, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        inside = make_match(
+            202,
+            leaderboard_id=3,
+            started_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 10, 12, 30, tzinfo=UTC),
+        )
+        inside.players.append(make_match_player(202, profile_id=1, team_id=0))
+        inside.players.append(
+            make_match_player(202, profile_id=2, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        session.add_all([before, inside])
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 5, 5, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 5, 20, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/head-to-head")).json()["items"]
+        assert {m["match_id"] for m in items} == {202}
 
     async def test_capped_window_scoped_and_newest_first(
         self, client: AsyncClient, session: AsyncSession

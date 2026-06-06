@@ -18,7 +18,7 @@ from typing import NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import Row, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 
 from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
@@ -37,6 +37,7 @@ from app.models import (
     MatchState,
     Player,
     PlayerRating,
+    ProfileAlias,
     Team,
     TeamMember,
     Tournament,
@@ -47,6 +48,8 @@ from app.poller.broadcast import PLATFORM_TWITCH
 from app.schemas import (
     CivStat,
     CivStats,
+    HeadToHeadMatch,
+    HeadToHeadPlayer,
     ListEnvelope,
     PlayerCivStats,
     PlayerProgression,
@@ -479,6 +482,62 @@ def _longest_win_run(
     return best_len, best_start, best_end
 
 
+async def _roster_label_by_profile(
+    session: AsyncSession,
+    tournament_id: int,
+) -> dict[int, tuple[int, str]]:
+    """Map each linked roster profile to its ``(tournament_player_id, name)``.
+
+    Powers the streamer-vs-streamer cues (#349): an opponent whose profile is
+    in this map is a fellow entrant, so the consumer highlights the game and
+    can link to their roster row. ``name`` is the resolved display label —
+    same source/meaning as ``/standings`` (``presentation.displayName``
+    override, #243). Reads every linked roster row (not just the standings-
+    visible ones), so a just-linked entrant whose ``Player`` hasn't polled yet
+    still resolves as a streamer.
+    """
+    rows = (
+        await session.execute(
+            select(
+                TournamentPlayer.id,
+                TournamentPlayer.profile_id,
+                TournamentPlayer.name,
+                TournamentPlayer.presentation,
+            ).where(
+                TournamentPlayer.tournament_id == tournament_id,
+                TournamentPlayer.profile_id.is_not(None),
+            )
+        )
+    ).all()
+    return {
+        profile_id: (tp_id, _resolve_display_name(name, presentation))
+        for tp_id, profile_id, name, presentation in rows
+    }
+
+
+async def _aliases_by_profile(
+    session: AsyncSession,
+    profile_ids: set[int],
+) -> dict[int, str]:
+    """Map untracked-opponent profiles to their polled ladder alias (#349).
+
+    Reads the ``profile_aliases`` name cache the recent-matches poller fills
+    from each payload's ``profiles`` array — so an opponent we don't track
+    still has a display name. Empty when ``profile_ids`` is empty or none have
+    been polled yet.
+    """
+    if not profile_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(ProfileAlias.profile_id, ProfileAlias.alias).where(
+                ProfileAlias.profile_id.in_(profile_ids)
+            )
+        )
+    ).all()
+    return dict(rows)
+
+
 async def _tournament_record_by_profile(
     session: AsyncSession,
     tournament: Tournament,
@@ -512,14 +571,26 @@ async def _tournament_record_by_profile(
     if not profile_ids:
         return records
 
-    # Opponent civ for the recent-matchup tooltip (#218): a correlated scalar
-    # subquery, NOT a join — a join would fan the entrant's match rows out
-    # one-per-opponent and corrupt the counts/streak folded from the same
-    # rows. One opponent per match on a 1v1 leaderboard (this event); the
-    # `order_by` keeps a team-game leaderboard's pick deterministic.
+    # Opponent civ + identity for the recent-matchup tooltip (#218, #349):
+    # correlated scalar subqueries, NOT a join — a join would fan the entrant's
+    # match rows out one-per-opponent and corrupt the counts/streak folded from
+    # the same rows. One opponent per match on a 1v1 leaderboard (this event);
+    # the shared `order_by(opponent.profile_id).limit(1)` makes both subqueries
+    # resolve the *same* opposing row deterministically, so the civ and the
+    # profile_id below always describe one consistent opponent.
     opponent = aliased(MatchPlayer)
     opponent_civilization_id = (
         select(opponent.civilization_id)
+        .where(
+            opponent.match_id == MatchPlayer.match_id,
+            opponent.team_id != MatchPlayer.team_id,
+        )
+        .order_by(opponent.profile_id)
+        .limit(1)
+        .scalar_subquery()
+    )
+    opponent_profile_id = (
+        select(opponent.profile_id)
         .where(
             opponent.match_id == MatchPlayer.match_id,
             opponent.team_id != MatchPlayer.team_id,
@@ -539,6 +610,7 @@ async def _tournament_record_by_profile(
             Match.completed_at,
             Match.map_name,
             opponent_civilization_id.label("opponent_civilization_id"),
+            opponent_profile_id.label("opponent_profile_id"),
         )
         .join(Match, Match.match_id == MatchPlayer.match_id)
         .where(
@@ -556,6 +628,20 @@ async def _tournament_record_by_profile(
     rows_by_profile: dict[int, list[Row]] = {}
     for row in (await session.execute(stmt)).all():
         rows_by_profile.setdefault(row.profile_id, []).append(row)
+
+    # Resolve the opponent name shown on each capped recent-matchup row (#349).
+    # A fellow entrant resolves to their tournament display label + roster id
+    # (the consumer's highlight/link cue for a streamer-vs-streamer game); any
+    # other ladder opponent resolves to their polled alias. Two small lookups,
+    # keyed only on the opponents that actually surface in the capped window.
+    roster_label = await _roster_label_by_profile(session, tournament.id)
+    capped_opponent_ids = {
+        row.opponent_profile_id
+        for rows in rows_by_profile.values()
+        for row in rows[:_RECENT_RESULTS_LIMIT]
+        if row.opponent_profile_id is not None and row.opponent_profile_id not in roster_label
+    }
+    alias_opponents = await _aliases_by_profile(session, capped_opponent_ids)
 
     for profile_id, rows in rows_by_profile.items():
         outs = [r.outcome for r in rows]
@@ -591,6 +677,17 @@ async def _tournament_record_by_profile(
                         names.get(r.opponent_civilization_id)
                         if r.opponent_civilization_id is not None
                         else None
+                    ),
+                    opponent_profile_id=r.opponent_profile_id,
+                    opponent_tournament_player_id=(
+                        roster_label[r.opponent_profile_id][0]
+                        if r.opponent_profile_id in roster_label
+                        else None
+                    ),
+                    opponent_name=(
+                        roster_label[r.opponent_profile_id][1]
+                        if r.opponent_profile_id in roster_label
+                        else alias_opponents.get(r.opponent_profile_id)
                     ),
                     map_name=r.map_name,
                     completed_at=r.completed_at,
@@ -1308,6 +1405,111 @@ async def get_summary(
         most_games_played=_summary_card(
             _pick_leader(candidates, lambda c: c.record.games_played or None)
         ),
+    )
+
+
+@router.get("/{tournament_slug}/head-to-head")
+async def get_head_to_head(
+    request: Request,
+    response: Response,
+    tournament: Tournament = Depends(get_tournament),
+    session: AsyncSession = Depends(get_async_session),
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=200,
+        description="Max head-to-head games to return, newest first (1-200, default 50).",
+    ),
+) -> ListEnvelope[HeadToHeadMatch]:
+    """Completed games where two of the tournament's entrants faced each other (#349).
+
+    The streamer-vs-streamer feed: every in-window completed match on the
+    tournament's leaderboard that has two or more linked entrants in it. The
+    "two or more entrants" test is one query's ``HAVING COUNT(DISTINCT …) >= 2``,
+    so — unlike filtering the most-recent-N ``/matches`` list client-side — it
+    can't miss an old head-to-head game buried behind a wall of ladder games.
+
+    Each entry carries the matchup, map, each entrant's civ + elo-going-in +
+    result, and the game's duration; the consumer builds the external match
+    link from ``match_id``. Window is the same ``[start_date, grand_finals_date]``
+    bounds as ``tournament_record`` (a null bound is open). Newest game first.
+    """
+    apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
+
+    # Linked entrants only — a head-to-head needs two rostered profiles, and an
+    # unlinked row has no match data. Fewer than two means no game can qualify.
+    roster_label = await _roster_label_by_profile(session, tournament.id)
+    if len(roster_label) < 2:
+        return ListEnvelope[HeadToHeadMatch](last_polled_at=None, items=[])
+
+    # match_ids on this leaderboard, in-window, with >= 2 distinct entrants.
+    candidate_match_ids = (
+        select(MatchPlayer.match_id)
+        .join(Match, Match.match_id == MatchPlayer.match_id)
+        .where(
+            Match.leaderboard_id == tournament.leaderboard_id,
+            Match.state == MatchState.COMPLETED,
+            MatchPlayer.profile_id.in_(roster_label.keys()),
+        )
+    )
+    if tournament.start_date is not None:
+        candidate_match_ids = candidate_match_ids.where(Match.started_at >= tournament.start_date)
+    if tournament.grand_finals_date is not None:
+        candidate_match_ids = candidate_match_ids.where(
+            Match.started_at <= tournament.grand_finals_date
+        )
+    candidate_match_ids = candidate_match_ids.group_by(MatchPlayer.match_id).having(
+        func.count(func.distinct(MatchPlayer.profile_id)) >= 2
+    )
+
+    stmt = (
+        select(Match)
+        .options(selectinload(Match.players))
+        .where(Match.match_id.in_(candidate_match_ids))
+        .order_by(Match.started_at.desc())
+        .limit(limit)
+    )
+    matches = (await session.execute(stmt)).scalars().all()
+
+    civ_names = await _civilization_names(session)
+    items: list[HeadToHeadMatch] = []
+    for match in matches:
+        entrants = [
+            HeadToHeadPlayer(
+                tournament_player_id=roster_label[mp.profile_id][0],
+                profile_id=mp.profile_id,
+                name=roster_label[mp.profile_id][1],
+                civilization_id=mp.civilization_id,
+                civilization_name=civ_names.get(mp.civilization_id),
+                old_rating=mp.old_rating,
+                new_rating=mp.new_rating,
+                outcome=mp.outcome,
+            )
+            for mp in match.players
+            if mp.profile_id in roster_label
+        ]
+        # Winner first, then by pre-game rating desc — a stable, readable order
+        # for the two-sided card. (Non-entrant rows are already filtered out.)
+        entrants.sort(key=lambda e: (e.outcome != MatchOutcome.WIN, -(e.old_rating or 0)))
+        duration_seconds = (
+            int((match.completed_at - match.started_at).total_seconds())
+            if match.completed_at is not None
+            else None
+        )
+        items.append(
+            HeadToHeadMatch(
+                match_id=match.match_id,
+                map_name=match.map_name,
+                started_at=match.started_at,
+                completed_at=match.completed_at,
+                duration_seconds=duration_seconds,
+                entrants=entrants,
+            )
+        )
+
+    return ListEnvelope[HeadToHeadMatch](
+        last_polled_at=compute_last_polled_at([m.updated_at for m in matches]),
+        items=items,
     )
 
 

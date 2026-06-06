@@ -9,7 +9,7 @@ from app.models.match import (
     MatchPlayer,
     MatchState,
 )
-from app.models.player import Player, PlayerRating
+from app.models.player import Player, PlayerRating, ProfileAlias
 from app.models.stream import HostLiveStream, LiveStream
 from app.models.tournament import (
     Team,
@@ -32,6 +32,7 @@ __all__ = [
     "MatchState",
     "Player",
     "PlayerRating",
+    "ProfileAlias",
     "Team",
     "TeamMember",
     "Tournament",
