@@ -20,6 +20,24 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/aoe2_live_standings"
 
+    # --- Cloud SQL connector → Managed Connection Pooling (#196) --------------
+    # When True, the request-query engine connects through the Cloud SQL Python
+    # connector to the instance's MCP *transaction pooler* (over TCP) instead of
+    # the direct unix-socket `database_url`. Set True only on the prod api
+    # service once MCP is live; dev, tests, and the worker keep the direct DSN.
+    #
+    # `database_url` stays the DIRECT path and is deliberately NOT routed through
+    # the pooler: the LISTEN/NOTIFY listener (`app/events.py`) and the Alembic
+    # migrate job both need a session-pinned connection (transaction pooling
+    # drops LISTEN and session advisory locks), and the built-in `/cloudsql`
+    # unix socket reaches Postgres directly, bypassing the pooler. The connector
+    # takes connection *components*, not a DSN, so they live as separate settings.
+    db_use_connector: bool = False
+    db_instance_connection_name: str = ""  # "project:region:instance"
+    db_user: str = ""
+    db_password: str = ""
+    db_name: str = "aoe2_live_standings"
+
     environment: str = "development"
 
     cors_origins: str = ""
@@ -132,6 +150,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Default database credentials (postgres:postgres) must not be used "
                 "outside development — set DATABASE_URL to a real connection string"
+            )
+
+        # The connector path can't build a connection without all three
+        # components; catch a half-configured pooler rollout at boot rather
+        # than on the first DB checkout.
+        if self.db_use_connector and not (
+            self.db_instance_connection_name and self.db_user and self.db_password
+        ):
+            raise ValueError(
+                "DB_USE_CONNECTOR is set but DB_INSTANCE_CONNECTION_NAME / DB_USER / "
+                "DB_PASSWORD are not all provided — the connector can't reach the "
+                "Managed Connection Pooling endpoint without them"
             )
 
         # The default JWKS URL is the prod criticalbit-auth-api host;

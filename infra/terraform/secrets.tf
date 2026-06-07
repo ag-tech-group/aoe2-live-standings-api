@@ -42,6 +42,27 @@ resource "google_secret_manager_secret_version" "database_url" {
   )
 }
 
+# --- DB_APP_PASSWORD (connector path, #196) --------------------------------
+#
+# The Cloud SQL Python connector takes connection *components*, not a DSN, so
+# the api service needs the app password on its own (the instance connection
+# name, user, and db name are non-secret env vars in run.tf). Same value as the
+# password embedded in DATABASE_URL — that secret stays the DIRECT unix-socket
+# DSN used by the LISTEN listener + the Alembic migrate job; this one feeds the
+# pooled request engine. Fully TF-managed, like database-url.
+resource "google_secret_manager_secret" "db_app_password" {
+  secret_id = "db-app-password"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "db_app_password" {
+  secret      = google_secret_manager_secret.db_app_password.id
+  secret_data = random_password.db_user.result
+}
+
 # --- SENTRY_DSN ------------------------------------------------------------
 #
 # The Cloud Run services in `run.tf` reference this via `secret_key_ref`
