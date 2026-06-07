@@ -3404,6 +3404,70 @@ class TestStandingsHistory:
         assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1268}
         assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1208}
 
+    async def test_in_event_peak_climbs_from_pre_event_baseline_not_current_max(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Regression for #357 (the kings-gauntlet Grubby case): an entrant whose
+        # all-time peak (max_rating) was first reached *during* the event must
+        # climb into it from their pre-event peak. The series must NOT show the
+        # eventual max before the race, then dip to the first in-event rating.
+        # Real shape: pre-event peak 1657, entered the event at 1672, climbed to
+        # a new all-time high of 1742 (== max_rating).
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1689, max_rating=1742)
+        )
+        session.add(player)
+        start = datetime(2026, 6, 1, 18, 0, tzinfo=UTC)
+        # A pre-window match establishes the carried-in peak (1657).
+        pre = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2026, 5, 31, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 31, 12, 30, tzinfo=UTC),
+        )
+        pre.players.append(make_match_player(1, profile_id=1, new_rating=1657))
+        session.add(pre)
+        # In-event: enter below the carried-in peak (1672), then set a new
+        # all-time high (1742) that ties max_rating — the Case-B trigger that
+        # used to force the baseline to 0 and the pre-race buckets to cur_max.
+        for match_id, day, rating in ((2, 2, 1672), (3, 5, 1742)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=start,
+                grand_finals_date=datetime(2026, 6, 16, 18, 0, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        points = (await client.get("/v1/tournaments/cup/standings/history")).json()["players"][0][
+            "points"
+        ]
+        peaks = [p["peak_rating"] for p in points]
+        # The entrant is rated and carries a pre-event peak, so no null gaps, and
+        # the series only ever rises — the #357 invariant ("peak only goes up").
+        assert all(p is not None for p in peaks)
+        assert peaks == sorted(peaks)
+        # It starts at the carried-in pre-event peak (1657), NOT the eventual
+        # all-time max (1742), and never dips below it.
+        assert peaks[0] == 1657
+        assert min(peaks) == 1657
+        # The climb passes through the entry rating, and the final bucket equals
+        # the live max_rating once the new high is actually reached in-event.
+        assert 1672 in peaks
+        assert peaks[-1] == 1742
+
     async def test_unrated_member_holds_tail_position(
         self, client: AsyncClient, session: AsyncSession
     ):

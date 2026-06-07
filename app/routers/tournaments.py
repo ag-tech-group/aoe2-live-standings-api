@@ -1628,12 +1628,15 @@ async def get_standings_history(
     entity's ``peak_rating`` as of a bucket is ``max(pre-event baseline,
     in-window peak-so-far)`` — flat at their lifetime peak unless they set a
     new high mid-event. The baseline is the current ``max_rating`` when it tops
-    every in-window rating (the common case, exact); the in-window series comes
-    from the immutable match log (same source as ``/progression``), windowed to
-    the tournament dates. So the latest bucket equals the live ``/standings``
-    order and past buckets stay stable. Teams (``teams[].points``) rank by
-    combined peak (sum of members' as-of-bucket ``max_rating``), matching the
-    Teams page.
+    every in-window rating (peak set pre-event — the common case, exact); when
+    the all-time peak was instead first reached *in-event*, the baseline is the
+    pre-event peak from the match log, so the line climbs into that peak rather
+    than teleporting to it before it was earned (#357). The in-window series
+    comes from the immutable match log (same source as ``/progression``),
+    windowed to the tournament dates. So the latest bucket equals the live
+    ``/standings`` order and past buckets stay stable. Teams (``teams[].points``)
+    rank by combined peak (sum of members' as-of-bucket ``max_rating``),
+    matching the Teams page.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -1708,6 +1711,28 @@ async def get_standings_history(
                 (_to_utc(completed_at), new_rating)
             )
 
+    # Carried-in pre-event peak per entrant from the immutable match log: the
+    # highest post-match rating on this leaderboard *before* the window opened.
+    # It's the baseline a Case-B entrant — one whose all-time peak was first
+    # reached *during* the event — climbs from, so the series rises into that
+    # peak instead of teleporting to it before it was earned (#357). A null
+    # ``start_date`` means there's no pre-event period, so nothing to carry in.
+    pre_event_peak_by_tp: dict[int, int] = {}
+    if tp_by_profile and tournament.start_date is not None:
+        pre_stmt = (
+            select(MatchPlayer.profile_id, func.max(MatchPlayer.new_rating))
+            .join(Match, Match.match_id == MatchPlayer.match_id)
+            .where(
+                Match.leaderboard_id == tournament.leaderboard_id,
+                MatchPlayer.profile_id.in_(list(tp_by_profile)),
+                MatchPlayer.new_rating.is_not(None),
+                Match.started_at < tournament.start_date,
+            )
+            .group_by(MatchPlayer.profile_id)
+        )
+        for profile_id, pre_peak in (await session.execute(pre_stmt)).all():
+            pre_event_peak_by_tp[tp_by_profile[profile_id]] = pre_peak
+
     # Time axis: a daily anchor at each midnight in the window + a marker at
     # every match completion (a potential reorder). Each bucket is "as of" its
     # timestamp (matches with completed_at <= it); a bucket is emitted at a
@@ -1743,18 +1768,29 @@ async def get_standings_history(
         members_by_team.setdefault(team_id, []).append(tp_id)
         team_meta[team_id] = (team_name, team_initials)
 
-    # Carried-in peak baseline per entrant: the current max_rating when it tops
-    # every in-event rating (set pre-event → flat line), else 0 (a new high was
-    # set in-event, so the in-window climb tracks it). #226.
-    baseline_by_tp: dict[int, int] = {}
+    # Carried-in peak baseline per entrant. The as-of-bucket peak is
+    # max(baseline, in-window peak-so-far), so it only ever rises (#226, #357):
+    #   - Unrated (no PlayerRating on this leaderboard): None — the entrant
+    #     holds the name-sorted tail until an in-window rating appears.
+    #   - All-time peak set strictly before the event (cur_max tops every
+    #     in-window rating, or there are no in-window games): cur_max is the
+    #     exact carried-in peak — a flat line, and it pins the final bucket to
+    #     the live max_rating.
+    #   - All-time peak first reached *in-event* (an in-window rating ties
+    #     cur_max): carry in the pre-event peak from the match log so the line
+    #     climbs from there up to cur_max rather than teleporting to cur_max
+    #     before it was earned (#357). None when the log has no pre-event
+    #     coverage — the entrant simply enters at their first in-window rating.
+    baseline_by_tp: dict[int, int | None] = {}
     for tp_id in name_by_tp:
         cur_max = cur_max_by_tp[tp_id]
         in_event_total = max((r for _, r in points_by_tp.get(tp_id, [])), default=None)
-        baseline_by_tp[tp_id] = (
-            cur_max
-            if cur_max is not None and (in_event_total is None or cur_max > in_event_total)
-            else 0
-        )
+        if cur_max is None:
+            baseline_by_tp[tp_id] = None
+        elif in_event_total is None or cur_max > in_event_total:
+            baseline_by_tp[tp_id] = cur_max
+        else:
+            baseline_by_tp[tp_id] = pre_event_peak_by_tp.get(tp_id)
 
     # Sweep the candidate times once, advancing each entrant's in-event points,
     # ranking the full roster (and teams) at each, and emitting on order change.
@@ -1780,9 +1816,16 @@ async def get_standings_history(
         cur_at: dict[int, int | None] = {}
         for tp_id in name_by_tp:
             rp = run_peak[tp_id]
-            peak_at[tp_id] = (
-                max(baseline_by_tp[tp_id], rp) if rp is not None else cur_max_by_tp[tp_id]
-            )
+            baseline = baseline_by_tp[tp_id]
+            # As-of-bucket peak = max(carried-in baseline, in-window
+            # peak-so-far); either side may be absent. Both None (unrated with
+            # no in-window rating yet) → null peak, sorted to the name tail.
+            if baseline is None:
+                peak_at[tp_id] = rp
+            elif rp is None:
+                peak_at[tp_id] = baseline
+            else:
+                peak_at[tp_id] = max(baseline, rp)
             cur_at[tp_id] = (
                 run_cur[tp_id] if run_cur[tp_id] is not None else cur_rating_by_tp[tp_id]
             )
