@@ -50,3 +50,37 @@ class TestProductionSettingsValidation:
             auth_jwks_url="https://auth-api.criticalbit.gg/auth/jwks",
         )
         assert not s.is_development
+
+    def test_connector_without_components_in_production_raises(self):
+        # DB_USE_CONNECTOR with no instance/user/password can't reach the
+        # pooler — catch the half-configured rollout at boot (#196).
+        with pytest.raises(ValidationError) as exc:
+            Settings(
+                environment="production",
+                database_url="postgresql+asyncpg://app_user:strongsecret@/db?host=/cloudsql/p:r:i",
+                auth_jwks_url="https://auth-api.criticalbit.gg/auth/jwks",
+                db_use_connector=True,
+            )
+        assert "DB_USE_CONNECTOR" in str(exc.value) or "connector" in str(exc.value)
+
+    def test_connector_with_components_in_production_passes(self):
+        # Fully-specified connector config (the prod api service) constructs.
+        s = Settings(
+            environment="production",
+            database_url="postgresql+asyncpg://app_user:strongsecret@/db?host=/cloudsql/p:r:i",
+            auth_jwks_url="https://auth-api.criticalbit.gg/auth/jwks",
+            db_use_connector=True,
+            db_instance_connection_name="proj:region:inst",
+            db_user="app_user",
+            db_password="strongsecret",
+        )
+        assert s.db_use_connector
+
+    def test_connector_flag_off_skips_component_check(self):
+        # The default (direct DSN) path needs no connector components.
+        s = Settings(
+            environment="production",
+            database_url="postgresql+asyncpg://app_user:strongsecret@/db?host=/cloudsql/p:r:i",
+            auth_jwks_url="https://auth-api.criticalbit.gg/auth/jwks",
+        )
+        assert not s.db_use_connector
