@@ -99,3 +99,14 @@ class TestEventStream:
         with pytest.raises(asyncio.CancelledError):
             await frame_task
         assert hub.subscriber_count == 0
+
+    async def test_closes_and_unsubscribes_when_lifetime_cap_reached(self, monkeypatch):
+        """The connection-lifetime cap (#204) ends a stream even if the client
+        never disconnects — defense against an undetected dead tab pinning the
+        instance. A past deadline makes the generator break on its first loop."""
+        monkeypatch.setattr("app.routers.stream._MAX_STREAM_LIFETIME_SECONDS", 0.0)
+        gen = _event_stream(_FakeRequest())
+
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), timeout=5)
+        assert hub.subscriber_count == 0

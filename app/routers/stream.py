@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Request
@@ -29,6 +30,17 @@ _HEARTBEAT_INTERVAL_SECONDS = 20
 # TCP connection and any intermediary proxies from going idle.
 _HEARTBEAT = ": heartbeat\n\n"
 
+# Hard ceiling on a single SSE connection's lifetime, enforced in-process and
+# independent of Cloud Run's request timeout (#204 defense-in-depth). Behind
+# Cloudflare + Cloud Run a closed tab's disconnect often isn't propagated to the
+# origin, so `is_disconnected()` never fires and the stream lingers — pinning an
+# instance (and, before Managed Connection Pooling, its DB pool). The platform
+# request timeout (600s in run.tf) bounds this at the infra layer; matching it
+# here means a dead tab still self-terminates if that timeout is later changed,
+# without relying on the platform to recycle it. The browser EventSource
+# reconnects transparently, exactly as on a platform-timeout recycle.
+_MAX_STREAM_LIFETIME_SECONDS = 600
+
 
 def _format_nudge(nudge: Nudge) -> str:
     """Render a Nudge as an SSE event frame."""
@@ -37,14 +49,25 @@ def _format_nudge(nudge: Nudge) -> str:
 
 
 async def _event_stream(request: Request) -> AsyncIterator[str]:
-    """Yield SSE frames for one connected client until it disconnects."""
+    """Yield SSE frames for one connected client until it disconnects or the
+    connection-lifetime cap is reached."""
     queue = hub.subscribe()
+    deadline = time.monotonic() + _MAX_STREAM_LIFETIME_SECONDS
     try:
         while True:
             if await request.is_disconnected():
                 break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Lifetime cap reached — close cleanly so an undetected dead
+                # tab can't pin the instance indefinitely; EventSource reconnects.
+                break
             try:
-                nudge = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_INTERVAL_SECONDS)
+                # Cap the wait at the remaining lifetime so we don't overshoot
+                # the deadline by up to a heartbeat interval.
+                nudge = await asyncio.wait_for(
+                    queue.get(), timeout=min(_HEARTBEAT_INTERVAL_SECONDS, remaining)
+                )
             except TimeoutError:
                 # No nudge this interval — emit a heartbeat to keep the
                 # connection (and intermediary proxies) alive.
