@@ -63,23 +63,20 @@ resource "google_cloud_run_v2_service" "api" {
     max_instance_request_concurrency = 1000
 
     scaling {
-      # min=1 keeps a warm instance so the LISTEN/NOTIFY connection stays
-      # open continuously. max=22 (#195) with concurrency=1000 gives
-      # 22,000 concurrent SSE seats (~1.375x the saturated launch peak).
+      # min=1 keeps a warm instance for the nudge poll loop. max=40 (#195)
+      # with concurrency=1000 gives 40,000 concurrent SSE seats' worth of
+      # capacity (~2.5x the saturated launch peak).
       #
-      # 22 is the connection-budget ceiling WITHOUT pooling. Each api
-      # instance holds 4 DB connections (3 pool + 1 LISTEN); a deploy
-      # flurry briefly doubles live revisions (SSE stickiness), so peak
-      # backends ~= 8 * maxScale + 6. At 22 that's 182, under the ~197
-      # effective cap (200 - 3 superuser); 24 would hit 198. Validated by
-      # launch: maxScale=20 produced exactly 166 backends on the deploy
-      # flurry. Going past ~24 (toward the #195 target of 40 — steady-safe
-      # at 166 but flurry-fatal at 326) needs PgBouncer (#196) to multiplex
-      # the per-instance pools onto few DB connections; held until that
-      # lands. Supersedes the emergency maxScale=10 cap from the 2026-06-01
-      # outage.
+      # Safe at 40 now that all DB access goes through Managed Connection
+      # Pooling (#196): num_backends is bounded by the pooler's server pool
+      # (tens), not instances x pool, so it no longer scales with maxScale or
+      # with deploy-flurry revision overlap. Nudges are polled via
+      # nudge_versions (no LISTEN), so there's no per-instance direct
+      # connection either. (Pre-pooling this was capped at 22 — peak backends
+      # ~= 8*maxScale + 6 would have blown past the 200 cap at 40; that ceiling
+      # is gone.) Supersedes the maxScale=22 connection-budget cap.
       min_instance_count = 1
-      max_instance_count = 22
+      max_instance_count = 40
     }
 
     volumes {
