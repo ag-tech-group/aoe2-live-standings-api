@@ -85,7 +85,13 @@ resource "google_cloud_run_v2_service" "api" {
     volumes {
       name = "cloudsql"
       cloud_sql_instance {
-        instances = [google_sql_database_instance.main.connection_name]
+        # Both sockets mounted during the cutover (#196): main_v2 (the new
+        # target, for the migrate job) and main (so rollback is a flag + secret
+        # flip with no re-mount). Drop main here once it's retired.
+        instances = [
+          google_sql_database_instance.main.connection_name,
+          google_sql_database_instance.main_v2.connection_name,
+        ]
       }
     }
 
@@ -105,8 +111,8 @@ resource "google_cloud_run_v2_service" "api" {
           # after the event.
           memory = "1Gi"
         }
-        # The LISTEN connection is event-driven and needs CPU between
-        # requests to deliver NOTIFY callbacks (and run its 30s ping).
+        # cpu_idle=false so the nudge poll loop (and the connector's pooled
+        # connections) keep ticking between requests, not only during them.
         cpu_idle = false
       }
 
@@ -140,12 +146,42 @@ resource "google_cloud_run_v2_service" "api" {
         value = "false"
       }
 
-      # The api service runs the LISTEN/NOTIFY listener so SSE clients
-      # connected to it receive nudges fanned out from the worker's
-      # writes.
+      # The api service runs the nudge poller (poll_for_nudges) so SSE clients
+      # connected to it refetch when the worker advances nudge_versions.
       env {
         name  = "LISTENER_ENABLED"
         value = "true"
+      }
+
+      # Cloud SQL connector → Managed Connection Pooling (#196). The whole api
+      # DB footprint — request queries AND the nudge poll — goes through the
+      # connector to main_v2's transaction pooler (app/database.py). No LISTEN /
+      # direct connection anywhere. Rollback: DB_USE_CONNECTOR=false + repoint
+      # DATABASE_URL back to main (both sockets stay mounted, so no re-mount).
+      env {
+        name  = "DB_USE_CONNECTOR"
+        value = "true"
+      }
+      env {
+        name  = "DB_INSTANCE_CONNECTION_NAME"
+        value = google_sql_database_instance.main_v2.connection_name
+      }
+      env {
+        name  = "DB_USER"
+        value = var.db_user
+      }
+      env {
+        name  = "DB_NAME"
+        value = var.db_name
+      }
+      env {
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.db_app_password.secret_id
+            version = "latest"
+          }
+        }
       }
 
       env {
@@ -229,7 +265,13 @@ resource "google_cloud_run_v2_service" "worker" {
     volumes {
       name = "cloudsql"
       cloud_sql_instance {
-        instances = [google_sql_database_instance.main.connection_name]
+        # Both sockets mounted during the cutover (#196): main_v2 (the new
+        # target, for the migrate job) and main (so rollback is a flag + secret
+        # flip with no re-mount). Drop main here once it's retired.
+        instances = [
+          google_sql_database_instance.main.connection_name,
+          google_sql_database_instance.main_v2.connection_name,
+        ]
       }
     }
 
@@ -273,12 +315,41 @@ resource "google_cloud_run_v2_service" "worker" {
         value = "true"
       }
 
-      # No listener on the worker — it has no SSE clients to fan out
-      # nudges to. The worker's writes emit `pg_notify`s that the api
-      # service's listener consumes.
+      # No nudge poller on the worker — it has no SSE clients. Its writes bump
+      # nudge_versions, which the api instances' pollers pick up.
       env {
         name  = "LISTENER_ENABLED"
         value = "false"
+      }
+
+      # Cloud SQL connector → MCP pooler (#196). The worker's writes (and the
+      # nudge_versions bump) go through the connector with the statement-cache
+      # flags — under MCP the /cloudsql socket also routes to the transaction
+      # pooler, so a raw socket connection isn't safe for the worker either.
+      env {
+        name  = "DB_USE_CONNECTOR"
+        value = "true"
+      }
+      env {
+        name  = "DB_INSTANCE_CONNECTION_NAME"
+        value = google_sql_database_instance.main_v2.connection_name
+      }
+      env {
+        name  = "DB_USER"
+        value = var.db_user
+      }
+      env {
+        name  = "DB_NAME"
+        value = var.db_name
+      }
+      env {
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.db_app_password.secret_id
+            version = "latest"
+          }
+        }
       }
 
       # Sentry DSN — same Secret Manager source as the api service. The
