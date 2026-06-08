@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.sentry import _scrub_pii, init_sentry
+from app.sentry import _scrub_pii, _traces_sampler, init_sentry
 
 
 class TestInitSentry:
@@ -35,24 +35,14 @@ class TestInitSentry:
         kwargs = calls[0]
         assert kwargs["dsn"] == "https://abc@o.example.com/1"
         assert kwargs["environment"] == "production"
-        # Prod sampling: 10% traces, 100% errors (which Sentry handles
-        # via its own internal sampling regardless of trace rate).
-        assert kwargs["traces_sample_rate"] == 0.1
+        # Prod tracing uses the per-path sampler, not a flat rate; errors
+        # are still captured at 100% (Sentry samples errors independently
+        # of the trace rate).
+        assert kwargs["traces_sampler"] is _traces_sampler
+        assert "traces_sample_rate" not in kwargs
         # PII off by default at this layer (only opaque UUIDs).
         assert kwargs["send_default_pii"] is False
         assert kwargs["before_send"] is _scrub_pii
-
-    def test_dev_environment_samples_traces_fully(self, monkeypatch: pytest.MonkeyPatch):
-        # Development gets 100% trace sampling so every local request
-        # has a trace to inspect; volume isn't a concern.
-        monkeypatch.setattr("app.sentry.settings.sentry_dsn", "https://abc@o.example.com/1")
-        monkeypatch.setattr("app.sentry.settings.environment", "development")
-        calls: list[dict[str, Any]] = []
-        monkeypatch.setattr("sentry_sdk.init", lambda **kwargs: calls.append(kwargs))
-
-        init_sentry()
-
-        assert calls[0]["traces_sample_rate"] == 1.0
 
     def test_ignores_cloud_trace_exporter_logger(self, monkeypatch: pytest.MonkeyPatch):
         # The Cloud Trace span exporter logs at ERROR on every failed
@@ -79,6 +69,40 @@ class TestInitSentry:
         init_sentry()
 
         assert ignored == []
+
+
+class TestTracesSampler:
+    """`_traces_sampler` returns per-path trace rates — dev traces
+    everything; prod reduces the rate on high-frequency/low-signal paths
+    (health probes, the SSE stream) to protect the monthly spans budget."""
+
+    def _ctx(self, path: str) -> dict[str, Any]:
+        # Mirror the sampling context Sentry's Starlette/FastAPI ASGI
+        # integration passes: the raw scope under the "asgi_scope" key.
+        return {"asgi_scope": {"type": "http", "path": path}}
+
+    def test_dev_samples_everything(self, monkeypatch: pytest.MonkeyPatch):
+        # Dev traces every path fully — even a low-value one — so a local
+        # request always has a trace to inspect.
+        monkeypatch.setattr("app.sentry.settings.environment", "development")
+        assert _traces_sampler(self._ctx("/v1/tournaments/x/standings")) == 1.0
+        assert _traces_sampler(self._ctx("/health")) == 1.0
+
+    def test_prod_default_path_uses_default_rate(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("app.sentry.settings.environment", "production")
+        assert _traces_sampler(self._ctx("/v1/tournaments/x/standings")) == 0.03
+
+    def test_prod_low_value_paths_use_reduced_rate(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("app.sentry.settings.environment", "production")
+        for path in ("/", "/health", "/v1/stream"):
+            assert _traces_sampler(self._ctx(path)) == 0.01, path
+
+    def test_prod_missing_scope_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch):
+        # A transaction with no usable asgi_scope (e.g. a non-HTTP
+        # transaction) gets the default rate rather than raising.
+        monkeypatch.setattr("app.sentry.settings.environment", "production")
+        assert _traces_sampler({}) == 0.03
+        assert _traces_sampler({"asgi_scope": None}) == 0.03
 
 
 class TestScrubPii:
