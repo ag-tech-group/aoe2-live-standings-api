@@ -22,7 +22,7 @@ from typing import Any
 import sentry_sdk
 from sentry_sdk.integrations.logging import ignore_logger
 
-from app.config import settings
+from app.config import API_V1_PREFIX, settings
 from app.logging import PII_KEY_PATTERN
 
 # Loggers whose records are operational transport noise rather than
@@ -55,13 +55,56 @@ def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | 
     return _scrub(event)
 
 
+# Prod trace sample rates. Errors are always captured at 100% regardless
+# of these (Sentry handles error sampling independently of traces).
+_DEFAULT_TRACES_SAMPLE_RATE = 0.03
+_LOW_VALUE_TRACES_SAMPLE_RATE = 0.01
+
+# High-frequency, low-signal request paths sampled below the default rate
+# so they don't dominate the monthly Sentry spans budget:
+#   - "/" and "/health": container liveness/info probes.
+#   - f"{API_V1_PREFIX}/stream": the long-lived SSE nudge stream — each
+#     (re)connect is its own transaction across ~thousands of seats, but a
+#     content-free nudge stream carries no perf signal worth tracing at the
+#     default rate.
+# Defined here rather than imported from app.main to avoid a circular import:
+# app.main calls init_sentry() at module load, before its own _HEALTH_PATHS.
+_LOW_VALUE_TRACE_PATHS = frozenset(("/", "/health", f"{API_V1_PREFIX}/stream"))
+
+
+def _traces_sampler(sampling_context: dict[str, Any]) -> float:
+    """Per-transaction trace sample rate (the ``traces_sampler`` hook).
+
+    Development traces everything so a local request always has a trace.
+    In prod, the high-frequency/low-signal paths in
+    ``_LOW_VALUE_TRACE_PATHS`` sample at the reduced rate and everything
+    else at the default — a flat ``traces_sample_rate`` would spend the
+    bulk of the monthly spans budget on probe and SSE-reconnect noise.
+
+    Sampling is decided independently per service: an inbound
+    ``sentry-trace`` parent decision is intentionally NOT inherited, so
+    the API down-samples its own root transactions regardless of any
+    upstream FE sampling. Revisit only if end-to-end FE→API trace
+    completeness ever outweighs the volume saving.
+    """
+    if settings.is_development:
+        return 1.0
+    scope = sampling_context.get("asgi_scope")
+    path = scope.get("path", "") if hasattr(scope, "get") else ""
+    if path in _LOW_VALUE_TRACE_PATHS:
+        return _LOW_VALUE_TRACES_SAMPLE_RATE
+    return _DEFAULT_TRACES_SAMPLE_RATE
+
+
 def init_sentry() -> None:
     """Initialize the Sentry SDK. No-op when ``SENTRY_DSN`` is empty.
 
-    Sampling rationale: 100% errors regardless. Traces are sampled at
-    10% in prod (volume control) and 100% in dev (so a local request
-    always has a trace). Profiling on with ``trace`` lifecycle, which
-    only profiles when a trace is sampled.
+    Sampling rationale: 100% errors regardless. Traces go through
+    ``_traces_sampler`` — 100% in dev (so a local request always has a
+    trace), and in prod the default rate with high-frequency/low-signal
+    paths (health probes, the SSE stream) cut further to keep the
+    monthly Sentry spans budget in check. Profiling on with ``trace``
+    lifecycle, which only profiles when a trace is sampled.
 
     ``send_default_pii=False`` is deliberate — at this service's
     layer the only "user" identifier is the opaque criticalbit UUID
@@ -75,7 +118,7 @@ def init_sentry() -> None:
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
         environment=settings.environment,
-        traces_sample_rate=1.0 if settings.is_development else 0.1,
+        traces_sampler=_traces_sampler,
         profile_session_sample_rate=1.0,
         profile_lifecycle="trace",
         send_default_pii=False,
