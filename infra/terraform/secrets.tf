@@ -33,12 +33,17 @@ resource "google_secret_manager_secret" "database_url" {
 
 resource "google_secret_manager_secret_version" "database_url" {
   secret = google_secret_manager_secret.database_url.id
+  # Cutover (#196): repointed to main_v2's socket. With both services on the
+  # connector (DB_USE_CONNECTOR) post-Option-B, the only remaining user of this
+  # DSN is the Alembic migrate job. ROLLBACK: change the four refs back to
+  # `.app` / `.main` and re-apply (Cloud Run picks up the new "latest" version
+  # on the next revision roll); both sockets stay mounted, so no re-mount.
   secret_data = format(
     "postgresql+asyncpg://%s:%s@/%s?host=/cloudsql/%s",
-    google_sql_user.app.name,
+    google_sql_user.app_v2.name,
     random_password.db_user.result,
-    google_sql_database.app.name,
-    google_sql_database_instance.main.connection_name,
+    google_sql_database.app_v2.name,
+    google_sql_database_instance.main_v2.connection_name,
   )
 }
 
