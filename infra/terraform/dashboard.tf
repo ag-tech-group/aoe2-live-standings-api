@@ -130,7 +130,7 @@ resource "google_monitoring_dashboard" "event_day" {
                 plotType = "LINE"
                 timeSeriesQuery = {
                   timeSeriesFilter = {
-                    filter = "metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"${var.project_id}:${var.db_instance_name}\""
+                    filter = "metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"${var.project_id}:${google_sql_database_instance.main_v2.name}\""
                     aggregation = {
                       alignmentPeriod  = "60s"
                       perSeriesAligner = "ALIGN_MEAN"
@@ -153,7 +153,7 @@ resource "google_monitoring_dashboard" "event_day" {
                 plotType = "LINE"
                 timeSeriesQuery = {
                   timeSeriesFilter = {
-                    filter = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"${var.project_id}:${var.db_instance_name}\""
+                    filter = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"${var.project_id}:${google_sql_database_instance.main_v2.name}\""
                     aggregation = {
                       alignmentPeriod  = "60s"
                       perSeriesAligner = "ALIGN_MEAN"
