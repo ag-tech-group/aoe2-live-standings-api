@@ -82,11 +82,10 @@ resource "google_cloud_run_v2_service" "api" {
     volumes {
       name = "cloudsql"
       cloud_sql_instance {
-        # Both sockets mounted during the cutover (#196): main_v2 (the new
-        # target, for the migrate job) and main (so rollback is a flag + secret
-        # flip with no re-mount). Drop main here once it's retired.
+        # main_v2's socket (the live instance). `main` was dropped here when it
+        # was retired (#254) — it had been kept only as a no-re-mount rollback
+        # target during the #196 cutover soak.
         instances = [
-          google_sql_database_instance.main.connection_name,
           google_sql_database_instance.main_v2.connection_name,
         ]
       }
@@ -262,11 +261,10 @@ resource "google_cloud_run_v2_service" "worker" {
     volumes {
       name = "cloudsql"
       cloud_sql_instance {
-        # Both sockets mounted during the cutover (#196): main_v2 (the new
-        # target, for the migrate job) and main (so rollback is a flag + secret
-        # flip with no re-mount). Drop main here once it's retired.
+        # main_v2's socket (the live instance). `main` was dropped here when it
+        # was retired (#254) — it had been kept only as a no-re-mount rollback
+        # target during the #196 cutover soak.
         instances = [
-          google_sql_database_instance.main.connection_name,
           google_sql_database_instance.main_v2.connection_name,
         ]
       }

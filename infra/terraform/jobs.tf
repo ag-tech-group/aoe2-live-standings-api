@@ -83,11 +83,9 @@ resource "google_cloud_run_v2_job" "migrate" {
       volumes {
         name = "cloudsql"
         cloud_sql_instance {
-          # Both sockets (#196 cutover): the migrate job's DATABASE_URL now
-          # targets main_v2, so it needs main_v2's socket mounted; main stays
-          # for rollback symmetry with the services. Drop main once it's retired.
+          # main_v2's socket only — the migrate job's DATABASE_URL targets
+          # main_v2. `main` was dropped here when it was retired (#254).
           instances = [
-            google_sql_database_instance.main.connection_name,
             google_sql_database_instance.main_v2.connection_name,
           ]
         }
