@@ -78,15 +78,12 @@ resource "google_sql_database_instance" "main" {
     }
   }
 
-  # GCP-side guard: the Cloud SQL API rejects an instance delete while this
-  # is true. Pairs with the Terraform-side prevent_destroy below — the two
-  # block deletion at different layers (the cloud API vs. `tofu` planning a
-  # destroy in the first place).
-  deletion_protection = true
-
-  lifecycle {
-    prevent_destroy = true
-  }
+  # Guards removed (#254): retiring `main` now that main_v2 has soaked.
+  # deletion_protection=false lets the Cloud SQL API delete it, and the
+  # prevent_destroy lifecycle guard is gone so `tofu` will plan the destroy.
+  # This change only declaws + decouples (non-destructive); the destroy
+  # (removing this block + the `app` db/user) is the follow-up apply (PR 2).
+  deletion_protection = false
 }
 
 resource "google_sql_database" "app" {

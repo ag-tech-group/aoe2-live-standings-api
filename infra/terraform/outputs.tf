@@ -5,7 +5,7 @@ output "service_url" {
 
 output "db_connection_name" {
   description = "Cloud SQL instance connection name (project:region:instance). Pass to Cloud SQL Auth Proxy for local migration runs."
-  value       = google_sql_database_instance.main.connection_name
+  value       = google_sql_database_instance.main_v2.connection_name
 }
 
 output "artifact_registry_repo" {
