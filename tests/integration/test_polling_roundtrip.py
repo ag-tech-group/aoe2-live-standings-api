@@ -18,7 +18,7 @@ import respx
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.events import EventType, emit_nudge, hub, listen_for_nudges
+from app.events import EventType, emit_nudge, hub, poll_for_nudges
 from app.poller.leaderboards import load_leaderboards
 from app.poller.live_matches import tick_live_matches
 from app.poller.player_stats import tick_player_stats
@@ -415,25 +415,24 @@ async def test_upstream_failure_isolated_to_one_poller(
 
 
 @pytest.mark.asyncio
-async def test_emit_nudge_drives_local_hub_via_listener(
-    patched_engine, patched_session_maker: async_sessionmaker
+async def test_emit_nudge_drives_local_hub_via_poller(
+    patched_session_maker: async_sessionmaker, monkeypatch
 ):
-    """emit_nudge -> Postgres NOTIFY -> listen_for_nudges -> hub.publish.
+    """emit_nudge -> nudge_versions bump -> poll_for_nudges -> hub.publish.
 
-    End-to-end check that the LISTEN/NOTIFY pipeline works: a transaction's
-    ``emit_nudge`` is held until commit, the listener's dedicated asyncpg
-    connection receives the NOTIFY, parses the JSON payload, and
+    End-to-end check of the polling nudge spine (#196 Option B): a transaction's
+    ``emit_nudge`` advances the event's ``polled_at`` on commit, and the
+    per-instance poll loop sees the change through its pooled session and
     republishes to the local ``EventHub`` for SSE fan-out.
     """
-    engine, _ = patched_engine
-    database_url = engine.url.render_as_string(hide_password=False)
+    # Tighten the poll interval so the test doesn't wait the 2s prod cadence.
+    monkeypatch.setattr("app.events._POLL_INTERVAL_SECONDS", 0.05)
 
     nudges = hub.subscribe()
-    listener_task = asyncio.create_task(listen_for_nudges(database_url))
+    poller_task = asyncio.create_task(poll_for_nudges(patched_session_maker))
     try:
-        # The listener needs a beat to open its asyncpg connection and
-        # issue LISTEN; NOTIFYs sent before that aren't delivered to it.
-        await asyncio.sleep(0.5)
+        # Let the first poll establish the baseline (startup never publishes).
+        await asyncio.sleep(0.2)
 
         async with patched_session_maker() as session:
             await emit_nudge(session, EventType.STANDINGS)
@@ -442,9 +441,9 @@ async def test_emit_nudge_drives_local_hub_via_listener(
         nudge = await asyncio.wait_for(nudges.get(), timeout=2.0)
         assert nudge.event == EventType.STANDINGS
     finally:
-        listener_task.cancel()
+        poller_task.cancel()
         try:
-            await listener_task
+            await poller_task
         except asyncio.CancelledError:
             pass
         hub.unsubscribe(nudges)

@@ -9,12 +9,11 @@ asyncpg dialect's prepared-statement cache (``prepared_statement_cache_size=0``)
 
 The SQLite unit suite can't exercise any of this. This stands up a real
 PgBouncer (transaction mode) in front of Postgres — a faithful local stand-in
-for MCP, no cloud credentials — and asserts:
-
-1. Parameterized queries survive transaction pooling with those flags, even
-   when many clients multiplex onto a tiny server pool (the collision case).
-2. LISTEN/NOTIFY is delivered on a DIRECT connection — the reason the listener
-   and migrate job keep the direct unix-socket DSN rather than the pooler.
+for MCP, no cloud credentials — and asserts that parameterized queries survive
+transaction pooling with those flags, even when many clients multiplex onto a
+tiny server pool (the collision case). (The app no longer uses LISTEN/NOTIFY —
+#196 Option B replaced it with polling the ``nudge_versions`` table through the
+pooler — so the pooled query path is the only thing that needs this guard.)
 
 Auto-skipped when Docker is unavailable (see ``tests/integration/conftest.py``).
 """
@@ -23,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 
-import asyncpg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -109,25 +107,3 @@ async def test_parameterized_queries_survive_transaction_pooling(pooled_and_dire
         assert sorted(results) == list(range(40))
     finally:
         await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_listen_notify_delivered_on_direct_connection(pooled_and_direct_dsns):
-    """LISTEN/NOTIFY round-trips on a DIRECT connection — why the listener and
-    Alembic migrate job stay on the direct unix-socket DSN, not the pooler
-    (transaction pooling drops LISTEN; Google's MCP docs list it unsupported)."""
-    _, direct = pooled_and_direct_dsns
-    direct_dsn = direct.replace("+asyncpg", "")
-
-    received = asyncio.Event()
-    listener = await asyncpg.connect(dsn=direct_dsn)
-    try:
-        await listener.add_listener("aoe2_events", lambda *_: received.set())
-        notifier = await asyncpg.connect(dsn=direct_dsn)
-        try:
-            await notifier.execute("SELECT pg_notify('aoe2_events', '{}')")
-        finally:
-            await notifier.close()
-        await asyncio.wait_for(received.wait(), timeout=5.0)
-    finally:
-        await listener.close()
