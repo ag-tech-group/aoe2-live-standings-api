@@ -30,8 +30,16 @@ from app.models import (  # noqa: F401
 # access to the values within the .ini file in use.
 config = context.config
 
-# Set the database URL from our settings (not from alembic.ini)
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Set the database URL from our settings (not from alembic.ini).
+# Transaction-pooling safety (#196): under Managed Connection Pooling the
+# /cloudsql socket routes to the transaction pooler, where cached prepared
+# statements collide across pooled server connections. Disable the SQLAlchemy
+# asyncpg dialect's prepared-statement cache here (and asyncpg's own client
+# cache via connect_args in run_async_migrations). Harmless on a direct,
+# non-pooled connection (dev/CI Postgres), so it's applied unconditionally.
+_db_url = settings.database_url
+_db_url += ("&" if "?" in _db_url else "?") + "prepared_statement_cache_size=0"
+config.set_main_option("sqlalchemy.url", _db_url)
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
@@ -77,6 +85,9 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # asyncpg client-side statement cache off — see the URL note above
+        # (transaction-pooling safety under MCP).
+        connect_args={"statement_cache_size": 0},
     )
 
     async with connectable.connect() as connection:
