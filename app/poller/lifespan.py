@@ -32,7 +32,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.database import async_session_maker
-from app.events import hub, listen_for_nudges, sample_subscriber_count
+from app.events import hub, poll_for_nudges, sample_subscriber_count
 from app.poller.broadcast import (
     TwitchLiveClient,
     YouTubeLiveClient,
@@ -57,14 +57,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     broadcast_http = None
 
     if settings.listener_enabled:
+        # Poll nudge_versions through the (pooled) engine and fan changes out to
+        # this instance's SSE clients. Replaces LISTEN/NOTIFY so the api holds
+        # no session-pinned connection (works through MCP's transaction pooler).
         tasks.append(
             asyncio.create_task(
-                listen_for_nudges(settings.database_url),
-                name="listen_nudges",
+                poll_for_nudges(async_session_maker),
+                name="poll_nudges",
             )
         )
         # Sample the SSE subscriber count on the read tier — these instances
-        # host the hub the listener fans nudges out to, so this is where the
+        # host the hub the poll loop fans nudges out to, so this is where the
         # live-seat number lives (#194).
         tasks.append(
             asyncio.create_task(
@@ -72,7 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 name="sample_sse_subscribers",
             )
         )
-        logger.info("listener_starting")
+        logger.info("nudge_poller_starting")
 
     if settings.polling_enabled:
         client = build_upstream_client()

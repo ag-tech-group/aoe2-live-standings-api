@@ -1,32 +1,35 @@
-"""SSE pub/sub, driven by Postgres ``LISTEN/NOTIFY``.
+"""SSE pub/sub, driven by polling a small ``nudge_versions`` table.
 
-The polling worker emits a NOTIFY on the ``aoe2_events`` channel after
-each successful commit (``emit_nudge`` inside the transaction, so a
-rolled-back write never fires a nudge). Every read-tier instance runs
-a long-lived LISTEN connection (``listen_for_nudges``) that receives
-those payloads and republishes them to its local ``EventHub`` — which
-fans out to the SSE clients connected to *that* instance.
+The polling worker bumps a per-event ``polled_at`` (``emit_nudge``) inside each
+successful commit, so a rolled-back write never advances it. Every read-tier
+instance runs a poll loop (``poll_for_nudges``) that reads that table through
+its normal (pooled) engine and republishes changes to its local ``EventHub`` —
+which fans out to the SSE clients connected to *that* instance.
 
-A nudge carries no domain data — just "this slice changed, refetch" —
-so the REST endpoints stay the single source of truth.
+This replaces the earlier Postgres ``LISTEN/NOTIFY`` spine (#196 Option B):
+``LISTEN`` needs a session-pinned connection, which Managed Connection Pooling's
+transaction mode can't provide. Polling a tiny table goes through the pooler
+like any other query, so the api holds **no** direct/session-pinned connection
+and ``num_backends`` no longer scales with instance count. The cost is up to
+``_POLL_INTERVAL_SECONDS`` of nudge latency — imperceptible against the 15–60s
+upstream poll cadence.
 
-The LISTEN/NOTIFY layer is the cross-instance pub/sub issue #14 calls
-for; in Phase 2 of #14 the listener runs in the same process as the
-pollers, and Phase 3 splits them into separate Cloud Run services.
+A nudge carries no domain data — just "this slice changed, refetch" — so the
+REST endpoints stay the single source of truth.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
-import asyncpg
 import structlog
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.models.nudge import NudgeVersion
 
 logger = structlog.get_logger(__name__)
 
@@ -36,21 +39,10 @@ logger = structlog.get_logger(__name__)
 # how many were missed. 16 is generous; a healthy client drains instantly.
 _SUBSCRIBER_QUEUE_MAXSIZE = 16
 
-# Single NOTIFY channel for every nudge type; the JSON payload carries
-# ``event`` (one of EventType) and ``polled_at``. Keeping it to one
-# channel means one LISTEN connection per read-tier instance, regardless
-# of how many event types we add.
-_CHANNEL = "aoe2_events"
-
-# Liveness ping cadence on the LISTEN connection. NOTIFY delivery alone
-# can't tell us the connection has died (asyncpg's add_listener is
-# passive), so we ping periodically and reconnect on failure.
-_LISTENER_PING_SECONDS = 30
-
-# Backoff between reconnect attempts when the LISTEN connection drops.
-# Long enough not to hammer the DB during a restart; short enough that
-# nudges resume quickly once it recovers.
-_LISTENER_RECONNECT_SECONDS = 5
+# How often each instance polls ``nudge_versions`` for changes. 2s keeps nudge
+# latency well under the 15s live-match cadence while costing only a tiny
+# indexed-PK scan per instance every couple seconds (≈0.5 qps/instance).
+_POLL_INTERVAL_SECONDS = 2
 
 # Cadence for sampling the live SSE subscriber count into the logs, where
 # the `sse_subscriber_count` log-based metric turns it into a Cloud
@@ -94,10 +86,10 @@ class EventHub:
     def publish(self, event: EventType, polled_at: datetime | None = None) -> None:
         """Fan a nudge out to every current subscriber.
 
-        Called by the NOTIFY listener for each incoming nudge from the DB.
-        ``polled_at`` is the timestamp the poller stamped on the payload;
-        if omitted (e.g. in tests that call ``publish`` directly to
-        exercise the hub in isolation), falls back to ``now()``.
+        Called by the poll loop for each event whose ``polled_at`` advanced.
+        ``polled_at`` is the timestamp the worker stamped; if omitted (e.g. in
+        tests that call ``publish`` directly to exercise the hub in isolation),
+        falls back to ``now()``.
         """
         nudge = Nudge(event=event, polled_at=polled_at or datetime.now(tz=UTC))
         for queue in self._subscribers:
@@ -114,7 +106,7 @@ class EventHub:
 
 
 # Module-level singleton — imported by the stream router (subscribe) and
-# by the NOTIFY listener (publish).
+# by the poll loop (publish).
 hub = EventHub()
 
 
@@ -128,9 +120,9 @@ async def sample_subscriber_count(event_hub: EventHub) -> None:
     into a per-instance Cloud Monitoring series — the only direct read on
     SSE-seat demand, which is the api tier's binding resource (#194).
 
-    Runs on the read tier (``listener_enabled``) beside the NOTIFY listener;
-    the ``asyncio.sleep`` surfaces ``CancelledError`` at lifespan shutdown so
-    the task exits cleanly.
+    Runs on the read tier (``listener_enabled``) beside the poll loop; the
+    ``asyncio.sleep`` surfaces ``CancelledError`` at lifespan shutdown so the
+    task exits cleanly.
     """
     while True:
         await asyncio.sleep(_SUBSCRIBER_SAMPLE_SECONDS)
@@ -138,62 +130,54 @@ async def sample_subscriber_count(event_hub: EventHub) -> None:
 
 
 async def emit_nudge(session: AsyncSession, event: EventType) -> None:
-    """Queue a Postgres NOTIFY inside the session's transaction.
+    """Advance this event's nudge version inside the session's transaction.
 
-    The NOTIFY is held until ``COMMIT`` succeeds — a rolled-back
-    transaction never fires the nudge, so "data changed" is signalled iff
-    the data actually changed. No-op on non-PostgreSQL dialects (the
-    SQLite used by the unit tests has no ``LISTEN/NOTIFY``).
+    Bumps ``nudge_versions.polled_at`` to ``now()`` for ``event``; the write is
+    part of the caller's transaction, so a rolled-back transaction never
+    advances it — "data changed" is signalled iff the data actually changed.
+    Each api instance's ``poll_for_nudges`` turns the advance into an SSE nudge.
+    Read-modify-write works on every dialect (the unit tests' SQLite included);
+    the worker is a singleton emitting one row per event type, so there's no
+    same-row contention to need a dialect-specific UPSERT.
     """
-    if session.bind is None or session.bind.dialect.name != "postgresql":
-        return
-    payload = json.dumps({"event": event.value, "polled_at": datetime.now(tz=UTC).isoformat()})
-    await session.execute(
-        text("SELECT pg_notify(:channel, :payload)"),
-        {"channel": _CHANNEL, "payload": payload},
-    )
+    now = datetime.now(tz=UTC)
+    row = await session.get(NudgeVersion, event.value)
+    if row is None:
+        session.add(NudgeVersion(event=event.value, polled_at=now))
+    else:
+        row.polled_at = now
 
 
-def _asyncpg_dsn(database_url: str) -> str:
-    """Strip SQLAlchemy's ``+asyncpg`` driver marker for a plain asyncpg DSN."""
-    return database_url.replace("+asyncpg", "")
+async def poll_for_nudges(session_maker: async_sessionmaker[AsyncSession]) -> None:
+    """Poll ``nudge_versions`` and drive the local hub when an event advances.
 
-
-def _on_notify(_connection, _pid, _channel, payload: str) -> None:
-    """asyncpg LISTEN callback: parse the payload and drive the local hub."""
-    try:
-        data = json.loads(payload)
-        hub.publish(
-            EventType(data["event"]),
-            polled_at=datetime.fromisoformat(data["polled_at"]),
-        )
-    except (KeyError, ValueError) as e:
-        logger.warning("nudge_parse_failed", error=str(e), payload=payload)
-
-
-async def listen_for_nudges(database_url: str) -> None:
-    """Long-running LISTEN task: drive the local hub from incoming NOTIFY.
-
-    One dedicated asyncpg connection per process. A periodic ping detects
-    a dropped connection (asyncpg's ``add_listener`` is passive, so we
-    can't otherwise tell when the wire goes silent); on failure, the loop
-    reconnects after ``_LISTENER_RECONNECT_SECONDS``. The task is
-    cancelled at lifespan shutdown.
+    Replaces the LISTEN/NOTIFY listener. Uses a short-lived session per poll so
+    it holds no connection between polls — fully pooler-friendly. On the first
+    poll it records the current versions WITHOUT publishing (a freshly-connected
+    SSE client already has current data from its REST fetch; nudges are for
+    *subsequent* changes). Cancelled at lifespan shutdown.
     """
-    dsn = _asyncpg_dsn(database_url)
+    last_seen: dict[str, datetime] = {}
+    initialized = False
+    logger.info("nudge_poller_started", interval_seconds=_POLL_INTERVAL_SECONDS)
     while True:
         try:
-            conn = await asyncpg.connect(dsn=dsn)
-            try:
-                await conn.add_listener(_CHANNEL, _on_notify)
-                logger.info("nudge_listener_started", channel=_CHANNEL)
-                while True:
-                    await asyncio.sleep(_LISTENER_PING_SECONDS)
-                    await conn.fetchval("SELECT 1")
-            finally:
-                await conn.close()
+            async with session_maker() as session:
+                rows = (await session.execute(select(NudgeVersion))).scalars().all()
+            for row in rows:
+                previous = last_seen.get(row.event)
+                last_seen[row.event] = row.polled_at
+                if not initialized:
+                    continue
+                if previous is None or row.polled_at > previous:
+                    try:
+                        hub.publish(EventType(row.event), polled_at=row.polled_at)
+                    except ValueError:
+                        logger.warning("nudge_unknown_event", event=row.event)
+            initialized = True
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("nudge_listener_failed", error=str(e))
-            await asyncio.sleep(_LISTENER_RECONNECT_SECONDS)
+            # A transient DB blip shouldn't kill the loop; log and retry next tick.
+            logger.error("nudge_poll_failed", error=str(e))
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
