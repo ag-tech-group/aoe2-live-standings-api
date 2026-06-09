@@ -17,10 +17,12 @@ containing an Authorization header or an api_key value.
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any
 
 import sentry_sdk
-from sentry_sdk.integrations.logging import ignore_logger
+from sentry_sdk.integrations.logging import LoggingIntegration, ignore_logger
 
 from app.config import API_V1_PREFIX, settings
 from app.logging import PII_KEY_PATTERN
@@ -53,6 +55,67 @@ def _scrub_pii(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | 
         return obj
 
     return _scrub(event)
+
+
+# Transient upstream-availability failures from the poller's outbound calls
+# to the Relic/worldsedgelink community API. During an upstream outage every
+# poll task fails at once and the per-profile fan-out multiplies it; left
+# alone, each distinct rendered log line fingerprints into its own Sentry
+# issue, exploding a single outage into dozens of escalating issues and
+# burning the (un-sampled) error quota — the 2026-06-09 worldsedgelink 502
+# storm. We keep capturing them (so the outage stays visible) but pin them
+# to one stable fingerprint: one "poller upstream unavailable" issue with a
+# rising count, instead of a storm. Only 5xx / connection-level failures
+# match — a 4xx (e.g. a stale profile 404ing) keeps its own grouping so a
+# genuinely actionable signal isn't swallowed.
+_POLLER_LOGGER_PREFIX = "app.poller."
+_TRANSIENT_UPSTREAM_RE = re.compile(
+    r"\b50[234]\b|Bad Gateway|Service Unavailable|Gateway Time|"
+    r"Connect(?:Error|Timeout)|Read(?:Error|Timeout)|PoolTimeout|"
+    r"ConnectionError|RemoteProtocolError",
+    re.IGNORECASE,
+)
+_UPSTREAM_UNAVAILABLE_FINGERPRINT = ["poller-upstream-unavailable"]
+
+
+def _event_text(event: dict[str, Any]) -> str:
+    """Best-effort flatten of an event's message text for signature matching.
+
+    Poller errors arrive via the logging integration, so the structlog event
+    dict (carrying the logger name + the upstream error string) lands in
+    ``logentry``; we also fold in any top-level ``message`` for safety.
+    """
+    logentry = event.get("logentry") or {}
+    parts = (
+        logentry.get("message"),
+        logentry.get("formatted"),
+        event.get("message"),
+    )
+    return " ".join(p for p in parts if isinstance(p, str))
+
+
+def _group_transient_upstream_errors(event: dict[str, Any]) -> None:
+    """Collapse poller transient-upstream failures under one fingerprint.
+
+    Mutates ``event`` in place. A no-op for everything else — non-poller
+    events and real poller bugs (parse errors, logic errors) keep Sentry's
+    default grouping so they surface distinctly.
+    """
+    text = _event_text(event)
+    logger_name = event.get("logger") or ""
+    from_poller = logger_name.startswith(_POLLER_LOGGER_PREFIX) or _POLLER_LOGGER_PREFIX in text
+    if from_poller and _TRANSIENT_UPSTREAM_RE.search(text):
+        event["fingerprint"] = list(_UPSTREAM_UNAVAILABLE_FINGERPRINT)
+
+
+def _before_send(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``before_send`` hook: group transient upstream noise, then scrub PII.
+
+    Grouping runs first so the fingerprint is set before the (returned)
+    scrubbed event is handed back to the SDK.
+    """
+    _group_transient_upstream_errors(event)
+    return _scrub_pii(event, hint)
 
 
 # Prod trace sample rates. Errors are always captured at 100% regardless
@@ -106,6 +169,13 @@ def init_sentry() -> None:
     monthly Sentry spans budget in check. Profiling on with ``trace``
     lifecycle, which only profiles when a trace is sampled.
 
+    Logs: ``enable_logs`` ships structlog records to the Sentry Logs
+    product, floored at WARNING (``sentry_logs_level``) so the INFO
+    firehose doesn't drain the separately-metered logs budget.
+    ``before_send`` groups transient upstream-availability noise under one
+    fingerprint (so an upstream outage is one visible issue, not a storm)
+    before the PII scrub.
+
     ``send_default_pii=False`` is deliberate — at this service's
     layer the only "user" identifier is the opaque criticalbit UUID
     from the JWT ``sub`` claim, which isn't PII; actual PII lives
@@ -122,11 +192,21 @@ def init_sentry() -> None:
         profile_session_sample_rate=1.0,
         profile_lifecycle="trace",
         send_default_pii=False,
-        before_send=_scrub_pii,
+        before_send=_before_send,
         # Bring structlog ERROR-level entries (e.g., `poll_<task>_failed`)
         # into Sentry alongside the exceptions auto-captured from
         # FastAPI handlers and lifespan tasks.
         enable_logs=True,
+        # Forward only WARNING+ records to the Sentry Logs product (the paid,
+        # separately-metered logs stream). `event_level` stays at its default
+        # (ERROR) so error capture is unchanged; this only lifts the floor on
+        # the high-volume INFO firehose (httpx request lines, per-request
+        # access logs, `poll_*_ok`) that was driving the monthly logs budget
+        # toward its cap. The full INFO stream still reaches stdout ->
+        # Cloud Logging. Passing the instance overrides only the logging
+        # integration's config; the other auto-enabled integrations
+        # (FastAPI, Starlette, asyncio) stay on.
+        integrations=[LoggingIntegration(sentry_logs_level=logging.WARNING)],
     )
 
     # Keep operational transport noise out of Sentry. The Cloud Trace span

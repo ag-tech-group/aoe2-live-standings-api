@@ -1,12 +1,20 @@
-"""Tests for app/sentry.py — init no-op gating + before_send PII scrubbing."""
+"""Tests for app/sentry.py — init gating, log floor, before_send grouping + PII scrub."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
+from sentry_sdk.integrations.logging import LoggingIntegration
 
-from app.sentry import _scrub_pii, _traces_sampler, init_sentry
+from app.sentry import (
+    _before_send,
+    _group_transient_upstream_errors,
+    _scrub_pii,
+    _traces_sampler,
+    init_sentry,
+)
 
 
 class TestInitSentry:
@@ -42,7 +50,17 @@ class TestInitSentry:
         assert "traces_sample_rate" not in kwargs
         # PII off by default at this layer (only opaque UUIDs).
         assert kwargs["send_default_pii"] is False
-        assert kwargs["before_send"] is _scrub_pii
+        assert kwargs["before_send"] is _before_send
+        # Logs: enabled, but the Sentry Logs stream is floored at WARNING so
+        # the INFO firehose (httpx request lines, per-request access logs,
+        # poll_*_ok) doesn't drain the separately-metered logs budget. Error
+        # capture is independent — the integration's event_level stays ERROR.
+        assert kwargs["enable_logs"] is True
+        logging_integrations = [
+            i for i in kwargs["integrations"] if isinstance(i, LoggingIntegration)
+        ]
+        assert len(logging_integrations) == 1
+        assert logging_integrations[0]._sentry_logs_handler.level == logging.WARNING
 
     def test_ignores_cloud_trace_exporter_logger(self, monkeypatch: pytest.MonkeyPatch):
         # The Cloud Trace span exporter logs at ERROR on every failed
@@ -161,3 +179,95 @@ class TestScrubPii:
         event = {"message": "user supplied password hunter2"}
         out = _scrub_pii(event, {})
         assert out["message"] == "user supplied password hunter2"
+
+
+class TestGroupTransientUpstreamErrors:
+    """`_group_transient_upstream_errors` pins poller transient-upstream
+    failures (5xx / connection-level) to one fingerprint, so an upstream
+    outage shows as a single visible issue instead of a per-task/per-profile
+    storm. Real poller bugs and non-poller events keep default grouping."""
+
+    def _event(self, logger: str, message: str) -> dict[str, Any]:
+        return {"logger": logger, "logentry": {"message": message}}
+
+    def test_pins_fingerprint_on_5xx_from_poller(self):
+        event = self._event(
+            "app.poller.live_matches",
+            "{'error': \"Server error '502 Bad Gateway' for url "
+            "'https://aoe-api.worldsedgelink.com/...'\", "
+            "'event': 'poll_live_matches_failed'}",
+        )
+        _group_transient_upstream_errors(event)
+        assert event["fingerprint"] == ["poller-upstream-unavailable"]
+
+    def test_pins_fingerprint_on_503_status_breakdown(self):
+        event = self._event(
+            "app.poller.recent_matches",
+            "{'failed': 12, 'statuses': {503: 12}, 'event': 'recent_matches_fetch_failed'}",
+        )
+        _group_transient_upstream_errors(event)
+        assert event["fingerprint"] == ["poller-upstream-unavailable"]
+
+    def test_pins_fingerprint_on_connection_failure(self):
+        event = self._event(
+            "app.poller.player_stats",
+            "{'sample_error': 'ConnectTimeout', 'event': 'poll_player_stats_failed'}",
+        )
+        _group_transient_upstream_errors(event)
+        assert event["fingerprint"] == ["poller-upstream-unavailable"]
+
+    def test_ignores_non_transient_poller_error(self):
+        # A 404 (a stale/invalid profile) is actionable on its own — keep its
+        # own grouping rather than sweeping it into the outage bucket.
+        event = self._event(
+            "app.poller.recent_matches",
+            "{'statuses': {404: 1}, 'event': 'recent_matches_fetch_failed'}",
+        )
+        _group_transient_upstream_errors(event)
+        assert "fingerprint" not in event
+
+    def test_ignores_poller_logic_error(self):
+        event = self._event(
+            "app.poller.parsers",
+            "{'error': 'KeyError: matchtype_id', 'event': 'parse_failed'}",
+        )
+        _group_transient_upstream_errors(event)
+        assert "fingerprint" not in event
+
+    def test_ignores_5xx_from_non_poller(self):
+        event = self._event("app.routers.players", "502 Bad Gateway from somewhere")
+        _group_transient_upstream_errors(event)
+        assert "fingerprint" not in event
+
+    def test_detects_poller_via_message_when_logger_field_absent(self):
+        # Resilient to the logger name living only in the rendered payload.
+        event = {
+            "logentry": {
+                "message": "{'event': 'poll_live_matches_failed', "
+                "'logger': 'app.poller.live_matches', "
+                "'error': '503 Service Unavailable'}"
+            }
+        }
+        _group_transient_upstream_errors(event)
+        assert event["fingerprint"] == ["poller-upstream-unavailable"]
+
+
+class TestBeforeSend:
+    """`_before_send` composes upstream grouping with the PII scrub."""
+
+    def test_groups_and_scrubs(self):
+        event = {
+            "logger": "app.poller.live_matches",
+            "logentry": {"message": "Server error '502 Bad Gateway'"},
+            "extra": {"authorization": "Bearer secret"},
+        }
+        out = _before_send(event, {})
+        assert out is not None
+        assert out["fingerprint"] == ["poller-upstream-unavailable"]
+        assert out["extra"]["authorization"] == "[REDACTED]"
+
+    def test_passes_through_unrelated_event(self):
+        event = {"logger": "app.routers.players", "logentry": {"message": "boom"}}
+        out = _before_send(event, {})
+        assert out is not None
+        assert "fingerprint" not in out

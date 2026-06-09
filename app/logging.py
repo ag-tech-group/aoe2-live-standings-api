@@ -72,6 +72,13 @@ def setup_logging() -> None:
 
     # Quiet noisy third-party loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # httpx logs one INFO line per outbound request ("HTTP Request: GET ...
+    # 200 OK"). The poller fires thousands of upstream calls an hour, so at
+    # prod volume these dominate both Cloud Logging and the (separately
+    # metered) Sentry logs budget while carrying no signal — a real failure
+    # already surfaces as a poll_*_failed ERROR. Drop them to WARNING so only
+    # anomalies (timeouts, the rate-limit hook) survive.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:

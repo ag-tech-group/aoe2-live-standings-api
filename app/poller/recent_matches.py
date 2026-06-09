@@ -14,6 +14,7 @@ no dedupe needed in Python.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 
 import httpx
 import structlog
@@ -33,6 +34,41 @@ logger = structlog.get_logger(__name__)
 _ENDPOINT = "/community/leaderboard/getRecentMatchHistory"
 _DEFAULT_INTERVAL_SECONDS = 60
 _DEFAULT_CONCURRENCY = 4
+# Cap the per-profile id list on the aggregated failure log so a large
+# roster failing wholesale (an outage) doesn't dump hundreds of ids.
+_MAX_LOGGED_FAILED_PROFILE_IDS = 10
+
+
+def _failure_key(exc: Exception) -> int | str:
+    """Bucket a fetch failure by upstream HTTP status, else exception type."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    return type(exc).__name__
+
+
+def _log_fetch_failures(failures: list[tuple[int, Exception]], total: int) -> None:
+    """Emit one aggregated error for a cycle's per-profile fetch failures.
+
+    This is a fan-out task (one request per profile), so a worldsedgelink
+    outage fails every profile at once. Logging per profile turned a single
+    outage into N near-identical ERROR lines — N Sentry issues (the
+    profile_id rides in the payload) and N events against the un-sampled
+    error quota (the 2026-06-09 502 storm). Folding them into one event per
+    cycle keeps the diagnostic split — the status breakdown plus a capped id
+    sample separates "upstream is down" (``{502: 18}``) from "one profile is
+    stale" (``{404: 1}``) — at a fraction of the volume. The Sentry-side
+    fingerprint in ``app/sentry.py`` then collapses these across all poll
+    tasks into one issue.
+    """
+    statuses = Counter(_failure_key(exc) for _, exc in failures)
+    logger.error(
+        "recent_matches_fetch_failed",
+        failed=len(failures),
+        total=total,
+        statuses=dict(statuses),
+        profile_ids=[pid for pid, _ in failures[:_MAX_LOGGED_FAILED_PROFILE_IDS]],
+        sample_error=str(failures[0][1]),
+    )
 
 
 async def _fetch_one(
@@ -72,14 +108,12 @@ async def tick_recent_matches(
 
     total_matches = 0
     total_players = 0
+    # Collected and logged once after the loop — see _log_fetch_failures.
+    failures: list[tuple[int, Exception]] = []
     async with session_maker() as session:
         for profile_id, result in zip(profile_ids, results, strict=True):
             if isinstance(result, Exception):
-                logger.error(
-                    "recent_matches_fetch_failed",
-                    profile_id=profile_id,
-                    error=str(result),
-                )
+                failures.append((profile_id, result))
                 continue
             matches, players, aliases = parse_recent_matches(result, matchtype_to_leaderboard)
             for match in matches:
@@ -96,6 +130,8 @@ async def tick_recent_matches(
         # SSE subscribers on every read-tier instance get a refetch nudge.
         await emit_nudge(session, EventType.MATCHES)
         await session.commit()
+    if failures:
+        _log_fetch_failures(failures, total=len(profile_ids))
     logger.info(
         "poll_recent_matches_ok",
         profiles=len(profile_ids),
