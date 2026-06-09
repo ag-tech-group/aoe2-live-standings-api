@@ -74,7 +74,7 @@ resource "google_monitoring_dashboard" "event_day" {
           width  = 6
           height = 4
           widget = {
-            title = "API request latency (ms)"
+            title = "API request latency (ms, log scale)"
             xyChart = {
               dataSets = [
                 for percentile in ["50", "95", "99"] : {
@@ -90,6 +90,15 @@ resource "google_monitoring_dashboard" "event_day" {
                   }
                 }
               ]
+              # Log scale so the real request latencies (single-to-low-hundreds
+              # of ms) stay readable alongside the long-lived /v1/stream SSE
+              # connections, which run up to the 600s Cloud Run request timeout
+              # and would otherwise flatten the whole chart. The Cloud Run
+              # request_latencies metric has no URL/path label, so SSE can't be
+              # filtered out here — log scale keeps both visible.
+              yAxis = {
+                scale = "LOG10"
+              }
             }
           }
         },
