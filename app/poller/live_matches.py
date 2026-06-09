@@ -77,5 +77,9 @@ async def run_live_matches_poller(
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("poll_live_matches_failed", error=str(e))
+            # Log the exception type too: a transport failure (timeout,
+            # connect error) often has an empty str(e), so error alone is
+            # uninformative and dodges the upstream-unavailable grouping in
+            # app/sentry.py. error_type carries the signature either way.
+            logger.error("poll_live_matches_failed", error=str(e), error_type=type(e).__name__)
         await asyncio.sleep(interval_seconds)
