@@ -183,6 +183,41 @@ class TestTickRecentMatches:
         matches = (await session.execute(select(Match))).scalars().all()
         assert len(matches) == 1
 
+    async def test_upstream_outage_logs_one_aggregated_error(
+        self, upstream_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An upstream outage fails every profile in the fan-out. The cycle
+        # must emit ONE aggregated error (not one per profile), carrying a
+        # status breakdown — so a worldsedgelink 502 storm collapses to a
+        # single log line / Sentry event instead of N.
+        errors: list[tuple[str, dict]] = []
+
+        class _RecordingLogger:
+            def error(self, event: str, **kw: object) -> None:
+                errors.append((event, kw))
+
+            def info(self, *args: object, **kw: object) -> None:
+                pass
+
+        monkeypatch.setattr("app.poller.recent_matches.logger", _RecordingLogger())
+
+        with respx.mock(base_url=_TEST_BASE_URL) as mock:
+            mock.get("/community/leaderboard/getRecentMatchHistory").respond(502)
+            await tick_recent_matches(
+                upstream_client,
+                [1, 2, 3],
+                session_maker_for_tasks,
+                matchtype_to_leaderboard={6: 3},
+            )
+
+        assert len(errors) == 1
+        event, kw = errors[0]
+        assert event == "recent_matches_fetch_failed"
+        assert kw["failed"] == 3
+        assert kw["total"] == 3
+        assert kw["statuses"] == {502: 3}
+        assert sorted(kw["profile_ids"]) == [1, 2, 3]
+
 
 class TestTickLiveMatches:
     async def test_writes_only_tracked_lobbies(
