@@ -209,9 +209,12 @@ class TestGroupTransientUpstreamErrors:
         assert event["fingerprint"] == ["poller-upstream-unavailable"]
 
     def test_pins_fingerprint_on_connection_failure(self):
+        # The real shape after the live_matches/player_stats fix: a transport
+        # failure has an empty `error` (empty str(e)), and `error_type` carries
+        # the signature the fingerprint matches on.
         event = self._event(
             "app.poller.player_stats",
-            "{'sample_error': 'ConnectTimeout', 'event': 'poll_player_stats_failed'}",
+            "{'error': '', 'event': 'poll_player_stats_failed', 'error_type': 'ConnectTimeout'}",
         )
         _group_transient_upstream_errors(event)
         assert event["fingerprint"] == ["poller-upstream-unavailable"]
