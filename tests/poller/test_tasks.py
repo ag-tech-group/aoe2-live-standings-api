@@ -224,20 +224,18 @@ class TestTickLiveMatches:
         self, upstream_client: httpx.AsyncClient, session: AsyncSession
     ):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "Arabia.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1779000000,
                     "state": 0,
                     "matchmembers": [{"profile_id": 199325}, {"profile_id": 409748}],
                 },
                 {
-                    "match_id": 2,
+                    "id": 2,
                     "mapname": "Arena.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1779000100,
                     "state": 0,
                     "matchmembers": [{"profile_id": 99}, {"profile_id": 100}],
                 },
@@ -256,12 +254,11 @@ class TestTickLiveMatches:
         self, upstream_client: httpx.AsyncClient, session: AsyncSession
     ):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "Arabia.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1779000000,
                     "state": 0,
                     "matchmembers": [{"profile_id": 199325}, {"profile_id": 409748}],
                 }
@@ -289,12 +286,11 @@ class TestTickLiveMatches:
         await session.commit()
 
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "x.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1,
                     "state": 1,
                     "matchmembers": [{"profile_id": 199325}],
                 }

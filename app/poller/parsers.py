@@ -225,6 +225,13 @@ def parse_live_advertisements(
     feed ``replace_live_match_players`` — they back the ``in_match`` flag on
     the standings rows.
 
+    Current upstream shape (captured 2026-06-10, #267): the lobby list is
+    the top-level ``matches`` key and each lobby's id is ``id`` (only the
+    ``matchmembers`` entries carry a ``match_id``); ``creation_time`` is
+    gone. The originally-coded ``advertisements`` / ``match_id`` shape never
+    matched a live payload we can reproduce — it is kept only as a fallback
+    in case it predates a silent upstream rename.
+
     No ``MatchPlayer`` rows are written from here: advertisement members are
     mid-game data, and final per-player values (Elo deltas, outcome) only
     land in ``getRecentMatchHistory`` once the match ends. The live-player
@@ -232,26 +239,36 @@ def parse_live_advertisements(
     """
     matches: list[dict[str, Any]] = []
     live_players: list[dict[str, Any]] = []
-    for ad in payload.get("advertisements", []):
+    ads = payload.get("matches") or payload.get("advertisements") or []
+    for ad in ads:
         members = ad.get("matchmembers") or []
         tracked_members = [
             m["profile_id"] for m in members if m.get("profile_id") in tracked_profile_ids
         ]
         if not tracked_members:
             continue
-        match_id = ad["match_id"]
+        match_id = ad.get("id", ad.get("match_id"))
+        if match_id is None:
+            # A lobby without an id can't be keyed; skip it rather than
+            # abort the whole cycle.
+            continue
         matches.append(
             {
                 "match_id": match_id,
-                "map_name": ad.get("mapname", ""),
+                # Lobby ``mapname`` is usually the junk placeholder "my map"
+                # even when a standard map is hosted — the options blob has
+                # the real one (#267, same mechanism as #265).
+                "map_name": resolve_map_name(ad.get("options"), ad.get("mapname", "")),
                 "matchtype_id": ad.get("matchtype_id", 0),
                 # Live data doesn't carry the leaderboard mapping — the
                 # recent-matches feed fills `leaderboard_id` once the
                 # match completes.
                 "leaderboard_id": None,
-                # Lobby creation time as a placeholder; the real
+                # Current payloads carry no creation time, so first-sighting
+                # time (within one 15s poll) stands in; the real
                 # `startgametime` lands when recent-matches sees the
-                # completed match.
+                # completed match. (`creation_time` existed in the legacy
+                # shape and is still honored if present.)
                 "started_at": _from_unix(ad.get("creation_time")) or datetime.now(tz=UTC),
                 "completed_at": None,
                 "description": ad.get("description"),

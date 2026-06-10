@@ -333,20 +333,18 @@ class TestParseRecentMatches:
 class TestParseLiveAdvertisements:
     def test_filters_to_tracked_profile_lobbies(self):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "Arabia.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1779000000,
                     "state": 0,
                     "matchmembers": [{"profile_id": 199325}, {"profile_id": 409748}],
                 },
                 {
-                    "match_id": 2,
+                    "id": 2,
                     "mapname": "Arena.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1779000100,
                     "state": 0,
                     "matchmembers": [{"profile_id": 99}, {"profile_id": 100}],
                 },
@@ -359,12 +357,11 @@ class TestParseLiveAdvertisements:
 
     def test_live_player_row_per_tracked_member(self):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "x.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1,
                     "state": 0,
                     "matchmembers": [
                         {"profile_id": 1},
@@ -380,12 +377,11 @@ class TestParseLiveAdvertisements:
 
     def test_state_zero_maps_to_staging(self):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "x.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1,
                     "state": 0,
                     "matchmembers": [{"profile_id": 1}],
                 }
@@ -396,12 +392,11 @@ class TestParseLiveAdvertisements:
 
     def test_state_nonzero_maps_to_in_progress(self):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "x.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1,
                     "state": 2,
                     "matchmembers": [{"profile_id": 1}],
                 }
@@ -412,18 +407,80 @@ class TestParseLiveAdvertisements:
 
     def test_empty_tracked_set_returns_empty(self):
         payload = {
-            "advertisements": [
+            "matches": [
                 {
-                    "match_id": 1,
+                    "id": 1,
                     "mapname": "x.rms",
                     "matchtype_id": 0,
-                    "creation_time": 1,
                     "state": 0,
                     "matchmembers": [{"profile_id": 1}],
                 }
             ]
         }
         assert parse_live_advertisements(payload, tracked_profile_ids=set()) == ([], [])
+
+    def test_legacy_advertisements_shape_still_parses(self):
+        # The pre-rename shape (#267): list under `advertisements`, lobby id
+        # as `match_id`, with a `creation_time`. Kept as a fallback.
+        payload = {
+            "advertisements": [
+                {
+                    "match_id": 7,
+                    "mapname": "Arabia.rms",
+                    "matchtype_id": 0,
+                    "creation_time": 1779000000,
+                    "state": 0,
+                    "matchmembers": [{"profile_id": 1}],
+                }
+            ]
+        }
+        matches, live_players = parse_live_advertisements(payload, tracked_profile_ids={1})
+        assert matches[0]["match_id"] == 7
+        assert matches[0]["started_at"] == datetime.fromtimestamp(1779000000, tz=UTC)
+        assert live_players == [{"match_id": 7, "profile_id": 1}]
+
+    def test_map_name_resolved_from_options_blob(self):
+        # Lobby `mapname` is usually the "my map" placeholder even when a
+        # standard map is hosted; the options blob carries the real one
+        # (#267, same mechanism as #265).
+        from tests.poller.test_map_names import encode_options
+
+        payload = {
+            "matches": [
+                {
+                    "id": 1,
+                    "mapname": "my map",
+                    "matchtype_id": 0,
+                    "state": 0,
+                    "options": encode_options({"10": "10878"}),
+                    "matchmembers": [{"profile_id": 1}],
+                }
+            ]
+        }
+        matches, _ = parse_live_advertisements(payload, tracked_profile_ids={1})
+        assert matches[0]["map_name"] == "Black Forest"
+
+    def test_lobby_without_id_is_skipped(self):
+        payload = {
+            "matches": [
+                {
+                    "mapname": "x.rms",
+                    "matchtype_id": 0,
+                    "state": 0,
+                    "matchmembers": [{"profile_id": 1}],
+                },
+                {
+                    "id": 2,
+                    "mapname": "y.rms",
+                    "matchtype_id": 0,
+                    "state": 0,
+                    "matchmembers": [{"profile_id": 1}],
+                },
+            ]
+        }
+        matches, live_players = parse_live_advertisements(payload, tracked_profile_ids={1})
+        assert [m["match_id"] for m in matches] == [2]
+        assert live_players == [{"match_id": 2, "profile_id": 1}]
 
 
 class TestParseAvailableLeaderboards:
