@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.models.match import UNKNOWN_CIVILIZATION_ID, MatchOutcome, MatchState
+from app.poller.map_names import resolve_map_name
 
 # Upstream uses -1 to mean "no rank on this leaderboard" (player never
 # qualified). We normalize to None so the rank columns can carry a clean
@@ -160,7 +161,10 @@ def parse_recent_matches(
         matches.append(
             {
                 "match_id": match_id,
-                "map_name": raw.get("mapname", ""),
+                # ``mapname`` lies for ranked automatch games (#265); the
+                # real map is derived from the ``options`` blob, with
+                # ``mapname`` as the fallback for custom maps / unknown ids.
+                "map_name": resolve_map_name(raw.get("options"), raw.get("mapname", "")),
                 "matchtype_id": raw.get("matchtype_id", 0),
                 "leaderboard_id": mapping.get(raw.get("matchtype_id")),
                 "started_at": _from_unix(raw.get("startgametime")),
