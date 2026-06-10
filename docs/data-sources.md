@@ -98,6 +98,12 @@ Sample responses (uncommitted, on local disk): `/tmp/aoe2-spike/{hera,accm,batch
 - The poller decodes the blob in `app/poller/map_names.py` and resolves the name through a verified-only locstring table (each entry cross-checked against replay-derived data); unknown ids fall back to raw `mapname` and log `unknown_map_locstring` once per process. Extend the table by decoding key 10 for a few matches on the new map and confirming the name against a replay-derived source (e.g. aoe2insights match pages).
 - `slotinfo` (same wrapping) carries per-slot civ/team data but no map. `matchurls` exposes per-player replay downloads (~750 KB gz) — the fully authoritative source, deliberately not used (heavy, needs a replay parser that breaks on game patches).
 
+### 2026-06-10 — `findAdvertisements` response shape (#267)
+
+- The open-lobby list is the top-level **`matches`** key (not `advertisements`), and each lobby's id is **`id`** — `match_id` only appears inside the `matchmembers` entries. There is no `creation_time` field. The shape the live parser originally coded against (`advertisements` + per-lobby `match_id` + `creation_time`) never matched a payload we can reproduce; whether upstream renamed it post-spike or the original fixture was mistranscribed is unknowable (no capture survived). Either way the parser produced zero live rows until #267.
+- Lobby `mapname` is usually the placeholder `"my map"` even when the lobby hosts a standard map — the `options` blob (same format as on match history, see the #265 entry above) carries the real map locstring.
+- All 90 lobbies in the fresh capture were `state=0, visible=1`, `matchtype_id=0` (customs). Ranked automatch still does not appear on this surface, and `state` transitions remain unobserved — the staging→in-progress inference from the spike stands unvalidated.
+
 ## Open questions (deferred, not blocking)
 
 - **`state` field transitions on `findAdvertisements`.** All 88 lobbies in the snapshot were `state=0`. State likely advances (staging → loading → playing → finished) as the match progresses, but the transition needs to be observed live. Validate during the first tournament dress-rehearsal.

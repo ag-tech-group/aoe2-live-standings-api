@@ -197,21 +197,19 @@ def _recent_matches_payload() -> dict[str, Any]:
 def _live_payload() -> dict[str, Any]:
     """Two lobbies; only the first involves a tracked player (Hera)."""
     return {
-        "advertisements": [
+        "matches": [
             {
-                "match_id": 9001,
+                "id": 9001,
                 "mapname": "Arena.rms",
                 "matchtype_id": 0,
-                "creation_time": 1779100000,
                 "state": 0,
                 "matchmembers": [{"profile_id": _HERA}, {"profile_id": 888888}],
                 "description": "Tournament practice",
             },
             {
-                "match_id": 9002,
+                "id": 9002,
                 "mapname": "Migration.rms",
                 "matchtype_id": 0,
-                "creation_time": 1779100100,
                 "state": 0,
                 "matchmembers": [{"profile_id": 555555}, {"profile_id": 666666}],
             },
