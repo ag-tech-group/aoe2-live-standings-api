@@ -227,6 +227,30 @@ class TestParseRecentMatches:
         assert winner["new_rating"] == 1979
         assert winner["civilization_id"] == 16
 
+    def test_map_name_resolved_from_options_blob(self):
+        # ``mapname`` lies for ranked automatch (#265) — when the options
+        # blob carries a verified map locstring id, it wins over mapname.
+        from tests.poller.test_map_names import encode_options
+
+        payload = {
+            "matchHistoryStats": [
+                {
+                    "id": 484298540,
+                    "mapname": "Marketplace.rms",
+                    "matchtype_id": 6,
+                    "options": encode_options({"10": "10878"}),
+                    "startgametime": 1781089031,
+                    "completiontime": 1781090921,
+                    "matchhistoryreportresults": [],
+                    "matchhistorymember": [],
+                }
+            ]
+        }
+
+        matches, _, _ = parse_recent_matches(payload)
+
+        assert matches[0]["map_name"] == "Black Forest"
+
     def test_missing_completiontime_marks_in_progress(self):
         payload = {
             "matchHistoryStats": [

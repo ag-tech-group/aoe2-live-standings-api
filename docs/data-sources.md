@@ -91,6 +91,13 @@ The Relic / World's Edge community backend returns rich JSON on simple GET reque
 
 Sample responses (uncommitted, on local disk): `/tmp/aoe2-spike/{hera,accm,batch}_personalstat.json`, `/tmp/aoe2-spike/hera_matches.json`, `/tmp/aoe2-spike/live_advertisements.json`.
 
+### 2026-06-10 — `mapname` is unreliable; real map lives in the `options` blob (#265)
+
+- `getRecentMatchHistory`'s `mapname` field is wrong for roughly half of ranked automatch games (verified against replay-derived ground truth: 10 of 20 sampled matches mislabeled, e.g. a Black Forest game reported as `Marketplace.rms`). The value never self-corrects.
+- The authoritative map travels in the match's `options` field: `base64(zlib(JSON string))`, where the JSON string is base64 of `[u8 record_count][record_count × (u32 length, ASCII "key:value")]`. Key `10` is the **locstring id** of the map's display name (`10875` = Arabia, `10878` = Black Forest, …; `301xxx` = DLC-shipped pool maps). Key `10` = `0` means a custom RMS file was hosted and `-2` a scenario — for those, `mapname` *is* the hosted file name and is trustworthy. Pre-automatch2 matches (years old) carry the legacy `11` key instead; no map id is recoverable there.
+- The poller decodes the blob in `app/poller/map_names.py` and resolves the name through a verified-only locstring table (each entry cross-checked against replay-derived data); unknown ids fall back to raw `mapname` and log `unknown_map_locstring` once per process. Extend the table by decoding key 10 for a few matches on the new map and confirming the name against a replay-derived source (e.g. aoe2insights match pages).
+- `slotinfo` (same wrapping) carries per-slot civ/team data but no map. `matchurls` exposes per-player replay downloads (~750 KB gz) — the fully authoritative source, deliberately not used (heavy, needs a replay parser that breaks on game patches).
+
 ## Open questions (deferred, not blocking)
 
 - **`state` field transitions on `findAdvertisements`.** All 88 lobbies in the snapshot were `state=0`. State likely advances (staging → loading → playing → finished) as the match progresses, but the transition needs to be observed live. Validate during the first tournament dress-rehearsal.
