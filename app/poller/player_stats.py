@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.events import EventType, emit_nudge
 from app.poller.parsers import parse_player_stats
 from app.poller.roster import get_tracked_profile_ids
-from app.poller.upserts import upsert_player, upsert_player_rating
+from app.poller.upserts import insert_rating_snapshots, upsert_player, upsert_player_rating
 
 logger = structlog.get_logger(__name__)
 
@@ -53,6 +53,10 @@ async def tick_player_stats(
     async with session_maker() as session:
         for row in players:
             await upsert_player(session, row)
+        # Record max_rating changes BEFORE the upsert overwrites the stored
+        # value — the recorded metric history /standings/history replays
+        # (#271). After the players loop so the snapshot FK target exists.
+        snapshots = await insert_rating_snapshots(session, ratings)
         for row in ratings:
             await upsert_player_rating(session, row)
         # Player ratings drive the standings — emit a NOTIFY so SSE
@@ -61,7 +65,12 @@ async def tick_player_stats(
         # fire a phantom nudge.
         await emit_nudge(session, EventType.STANDINGS)
         await session.commit()
-    logger.info("poll_player_stats_ok", players=len(players), ratings=len(ratings))
+    logger.info(
+        "poll_player_stats_ok",
+        players=len(players),
+        ratings=len(ratings),
+        rating_snapshots=snapshots,
+    )
 
 
 async def run_player_stats_poller(
