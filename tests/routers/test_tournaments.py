@@ -3468,6 +3468,155 @@ class TestStandingsHistory:
         assert 1672 in peaks
         assert peaks[-1] == 1742
 
+    async def test_pre_event_log_rating_above_live_max_is_clamped(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Regression for #271 (the captainlance9 case): the match log keeps
+        # ratings upstream has since rebased away — 2021 games up to 1832
+        # against a live ``highestrating`` of 1735. Reaching 1735 in-event
+        # trips the Case-B baseline (#357), which would carry the stale 1832
+        # in and rank the entrant above players with genuinely higher live
+        # peaks for the whole chart. The clamp caps every bucket at the live
+        # ``max_rating``.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1722, max_rating=1735)
+        )
+        session.add(player)
+        # Pre-window match with a higher post-match rating than today's
+        # reported lifetime peak (upstream rebased it down since).
+        pre = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2021, 6, 9, 2, 0, tzinfo=UTC),
+            completed_at=datetime(2021, 6, 9, 2, 59, tzinfo=UTC),
+        )
+        pre.players.append(make_match_player(1, profile_id=1, new_rating=1832))
+        session.add(pre)
+        # In-event: climbs to exactly the live max_rating (the Case-B trigger).
+        for match_id, day, rating in ((2, 3, 1724), (3, 10, 1735)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+                grand_finals_date=datetime(2026, 6, 16, 18, 0, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        peaks = [p["peak_rating"] for p in body["players"][0]["points"]]
+        # Never above the live metric — the stale 1832 must not surface; with
+        # the carried-in baseline capped at cur_max the line is flat at it.
+        assert all(p == 1735 for p in peaks)
+        # Cross-surface invariant (#271): the final bucket equals the live
+        # table's peak.
+        standings = (await client.get("/v1/tournaments/cup/standings")).json()
+        assert peaks[-1] == standings["items"][0]["max_rating"] == 1735
+
+    async def test_in_window_rating_above_live_max_is_clamped(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Regression for #271 (the iyouxin case): a freshly-placed account's
+        # early in-window games carry ratings (placement drift from 1000)
+        # that upstream's ``highestrating`` ignores — the in-window running
+        # peak alone can exceed the live metric, no pre-event baseline
+        # involved. Clamped likewise.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=728, max_rating=819)
+        )
+        session.add(player)
+        for match_id, day, rating in ((1, 1, 854), (2, 3, 819), (3, 7, 728)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            session.add(match)
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        peaks = [p["peak_rating"] for p in body["players"][0]["points"]]
+        # The 854 placement-era rating must not surface as a peak anywhere,
+        # and the final bucket equals the live max_rating.
+        assert all(p is None or p <= 819 for p in peaks)
+        assert peaks[-1] == 819
+
+    async def test_team_combined_clamped_matches_teams_page(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Regression for #271's team symptom: the combined-peak race showed
+        # sums above the Teams page because one member's series carried a
+        # rebased-away log rating. With the clamp, every bucket's combined sum
+        # stays at/below the live sum and the final bucket equals
+        # ``/teams/standings``' combined_rating_sum exactly.
+        clean = make_player(1)
+        clean.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1800, max_rating=1830)
+        )
+        session.add(clean)
+        polluted = make_player(2)
+        polluted.ratings.append(
+            make_player_rating(2, leaderboard_id=3, current_rating=1722, max_rating=1735)
+        )
+        session.add(polluted)
+        pre = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2021, 6, 9, 2, 0, tzinfo=UTC),
+            completed_at=datetime(2021, 6, 9, 2, 59, tzinfo=UTC),
+        )
+        pre.players.append(make_match_player(1, profile_id=2, new_rating=1832))
+        session.add(pre)
+        for match_id, profile_id, rating in ((2, 1, 1800), (3, 2, 1735)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, 2, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, 2, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=profile_id, new_rating=rating)
+            )
+            session.add(match)
+        tournament = make_tournament(
+            "cup",
+            profile_ids=[1, 2],
+            leaderboard_id=3,
+            start_date=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+        tournament.teams.append(make_team(tournament, "Alpha", profile_ids=[1, 2]))
+        session.add(tournament)
+        await session.commit()
+
+        history = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        combined = [p["combined_peak_elo"] for p in history["teams"][0]["points"]]
+        live = (await client.get("/v1/tournaments/cup/teams/standings")).json()
+        # 1830 + 1735 — not 1830 + 1832.
+        assert combined[-1] == live["items"][0]["combined_rating_sum"] == 3565
+        assert all(value <= 3565 for value in combined)
+
     async def test_unrated_member_holds_tail_position(
         self, client: AsyncClient, session: AsyncSession
     ):
