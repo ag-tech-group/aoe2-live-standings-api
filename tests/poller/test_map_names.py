@@ -78,6 +78,13 @@ class TestResolveMapName:
 
         assert name == "Black Forest"
 
+    def test_june_rotation_id_wins_over_wrong_mapname(self):
+        # June 2026 TG-rotation batch (#269): upstream reported Oasis.rms
+        # for matches actually played on Seasons (locstring 10994).
+        blob = encode_options({"10": "10994"})
+
+        assert resolve_map_name(blob, "Oasis.rms") == "Seasons"
+
     def test_unknown_locstring_id_falls_back(self):
         blob = encode_options({"10": "999999"})
 
