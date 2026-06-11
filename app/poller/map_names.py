@@ -36,10 +36,11 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 # Locstring id -> map display name. Every entry verified against
-# replay-derived ground truth on 2026-06-10 (#265). The ids follow the
-# game's string table (10875 = Arabia, then the classic map list in order;
-# the 301xxx block is DLC-shipped pool maps), but entries are only added
-# here once observed + verified, never derived arithmetically.
+# replay-derived ground truth on 2026-06-10 (#265; second batch same day
+# after the June TG-pool rotation, #269). The ids follow the game's string
+# table (10875 = Arabia, then the classic map list in order; the 301xxx
+# block is DLC-shipped pool maps), but entries are only added here once
+# observed + verified, never derived arithmetically.
 MAP_NAME_BY_LOCSTRING_ID: dict[int, str] = {
     10875: "Arabia",
     10878: "Black Forest",
@@ -47,38 +48,50 @@ MAP_NAME_BY_LOCSTRING_ID: dict[int, str] = {
     10883: "Gold Rush",
     10884: "Highland",
     10886: "Mediterranean",
+    10887: "Migration",
     10889: "Team Islands",
     10892: "Mongolia",
     10894: "Yucatan",
     10895: "Arena",
     10897: "Oasis",
     10901: "Nomad",
+    10915: "Budapest",
     10919: "Hideout",
     10920: "Hill Fort",
     10921: "Lombardia",
     10924: "MegaRandom",
+    10926: "CtR Random",
+    10931: "Four Lakes",
     10932: "Land Nomad",
     10938: "Amazon Tunnel",
     10939: "Coastal Forest",
     10940: "African Clearing",
+    10941: "Atacama",
     10945: "Michi",
     10949: "Eruption",
+    10952: "Lowland",
     10953: "Marketplace",
     10956: "Northern Isles",
     10960: "Enclosed",
+    10961: "Haboob",
     10963: "Land Madness",
+    10966: "Morass",
     10968: "Cliffbound",
     10969: "Isthmus",
     10973: "River Divide",
     10978: "Karsts",
     10979: "Glade",
     10980: "Fortified Clearing",
+    10994: "Seasons",
+    10995: "Sherwood Forest",
     11005: "QS Runestones",
+    11006: "QS Arena",
     11012: "Border Dispute",
     11013: "Graupel",
     301100: "Kilimanjaro",
     301104: "Socotra",
     301111: "Bohemia",
+    301153: "Snake Forest",
 }
 
 # Unknown locstring ids already logged this process — one line per new id,
