@@ -31,6 +31,7 @@ from tests.conftest import (
     make_match_player,
     make_player,
     make_player_rating,
+    make_player_rating_snapshot,
     make_team,
     make_tournament,
 )
@@ -3474,34 +3475,54 @@ class TestStandingsHistory:
         # Regression for #271 (the captainlance9 case): the match log keeps
         # ratings upstream has since rebased away — 2021 games up to 1832
         # against a live ``highestrating`` of 1735. Reaching 1735 in-event
-        # trips the Case-B baseline (#357), which would carry the stale 1832
-        # in and rank the entrant above players with genuinely higher live
-        # peaks for the whole chart. The clamp caps every bucket at the live
-        # ``max_rating``.
+        # trips the Case-B baseline (#357), which used to carry the stale
+        # 1832 in and rank the entrant above players with genuinely higher
+        # live peaks for the whole chart. The rebase-aware fold discards the
+        # dead-scale era: the baseline comes from the trailing current-scale
+        # run (the May game at 1720), the line climbs into the in-event high,
+        # and no bucket ever exceeds the live ``max_rating``.
         player = make_player(1)
         player.ratings.append(
             make_player_rating(1, leaderboard_id=3, current_rating=1722, max_rating=1735)
         )
         session.add(player)
-        # Pre-window match with a higher post-match rating than today's
-        # reported lifetime peak (upstream rebased it down since).
-        pre = make_match(
+        # Pre-window, dead scale: a post-match rating above today's reported
+        # lifetime peak proves upstream rebased since — must be discarded,
+        # not clamped into a flat line.
+        pre_rebased = make_match(
             1,
             leaderboard_id=3,
             started_at=datetime(2021, 6, 9, 2, 0, tzinfo=UTC),
             completed_at=datetime(2021, 6, 9, 2, 59, tzinfo=UTC),
         )
-        pre.players.append(make_match_player(1, profile_id=1, new_rating=1832))
-        session.add(pre)
-        # In-event: climbs to exactly the live max_rating (the Case-B trigger).
-        for match_id, day, rating in ((2, 3, 1724), (3, 10, 1735)):
+        pre_rebased.players.append(
+            make_match_player(1, profile_id=1, old_rating=1801, new_rating=1832)
+        )
+        session.add(pre_rebased)
+        # Pre-window, current scale (≤ live peak): survives the fold and
+        # anchors the start of the line.
+        pre_clean = make_match(
+            2,
+            leaderboard_id=3,
+            started_at=datetime(2026, 5, 25, 21, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 25, 21, 40, tzinfo=UTC),
+        )
+        pre_clean.players.append(
+            make_match_player(2, profile_id=1, old_rating=1696, new_rating=1720)
+        )
+        session.add(pre_clean)
+        # In-event: enters at 1678, climbs to exactly the live max_rating
+        # (the Case-B trigger).
+        for match_id, day, old, new in ((3, 3, 1678, 1724), (4, 10, 1724, 1735)):
             match = make_match(
                 match_id,
                 leaderboard_id=3,
                 started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
                 completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
             )
-            match.players.append(make_match_player(match_id, profile_id=1, new_rating=rating))
+            match.players.append(
+                make_match_player(match_id, profile_id=1, old_rating=old, new_rating=new)
+            )
             session.add(match)
         session.add(
             make_tournament(
@@ -3516,9 +3537,11 @@ class TestStandingsHistory:
 
         body = (await client.get("/v1/tournaments/cup/standings/history")).json()
         peaks = [p["peak_rating"] for p in body["players"][0]["points"]]
-        # Never above the live metric — the stale 1832 must not surface; with
-        # the carried-in baseline capped at cur_max the line is flat at it.
-        assert all(p == 1735 for p in peaks)
+        # Starts at the current-scale pre-event peak — the stale 1832 must
+        # not surface anywhere, and the line never exceeds the live metric.
+        assert peaks[0] == 1720
+        assert peaks == sorted(peaks)
+        assert all(p <= 1735 for p in peaks)
         # Cross-surface invariant (#271): the final bucket equals the live
         # table's peak.
         standings = (await client.get("/v1/tournaments/cup/standings")).json()
@@ -3562,6 +3585,172 @@ class TestStandingsHistory:
         # and the final bucket equals the live max_rating.
         assert all(p is None or p <= 819 for p in peaks)
         assert peaks[-1] == 819
+
+    async def test_snapshot_recovers_baseline_invisible_to_match_log(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The Grubby case (#271 follow-up): an active player's pre-event peak
+        # (1739) was set before polling began, so the match log (last N
+        # matches ≈ mid-May onward, max 1646) can't see it — log
+        # reconstruction starts him ~93 too low. A recorded metric
+        # observation (here the earliest in-window one, carried back across
+        # the gap to the start) restores the true baseline; the in-window
+        # climb then rises into the new all-time high.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1815, max_rating=1830)
+        )
+        session.add(player)
+        pre = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 28, 12, 30, tzinfo=UTC),
+        )
+        pre.players.append(make_match_player(1, profile_id=1, old_rating=1640, new_rating=1646))
+        session.add(pre)
+        for match_id, day, old, new in ((2, 2, 1623, 1636), (3, 8, 1750, 1830)):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 6, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 6, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=1, old_rating=old, new_rating=new)
+            )
+            session.add(match)
+        session.add(
+            make_player_rating_snapshot(
+                1,
+                leaderboard_id=3,
+                max_rating=1739,
+                observed_at=datetime(2026, 6, 2, 2, 26, tzinfo=UTC),
+            )
+        )
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        peaks = [p["peak_rating"] for p in body["players"][0]["points"]]
+        # Opens at the observed metric (1739) — not the log's 1646 — and the
+        # in-event high still lands at the right time, ending at the live max.
+        assert peaks[0] == 1739
+        assert peaks == sorted(peaks)
+        assert peaks[-1] == 1830
+
+    async def test_pre_start_snapshot_beats_log_reconstruction(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A recorded pre-start observation is the metric itself, so it wins
+        # even when the log reconstruction disagrees UPWARD: a pre-event game
+        # at 1197 (≤ live max, so the rebase fold keeps it) that upstream's
+        # ``highestrating`` nonetheless ignored (placement-era). Snapshot says
+        # the metric was 1179 at the start — chart that.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1290, max_rating=1293)
+        )
+        session.add(player)
+        pre = make_match(
+            1,
+            leaderboard_id=3,
+            started_at=datetime(2026, 5, 20, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 20, 12, 30, tzinfo=UTC),
+        )
+        pre.players.append(make_match_player(1, profile_id=1, old_rating=1180, new_rating=1197))
+        session.add(pre)
+        # In-event tie of the live max — the Case-B shape that would
+        # otherwise reach for the log's 1197.
+        match = make_match(
+            2,
+            leaderboard_id=3,
+            started_at=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 6, 5, 12, 30, tzinfo=UTC),
+        )
+        match.players.append(make_match_player(2, profile_id=1, old_rating=1084, new_rating=1293))
+        session.add(match)
+        session.add(
+            make_player_rating_snapshot(
+                1,
+                leaderboard_id=3,
+                max_rating=1179,
+                observed_at=datetime(2026, 5, 30, 12, 0, tzinfo=UTC),
+            )
+        )
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        peaks = [p["peak_rating"] for p in body["players"][0]["points"]]
+        assert peaks[0] == 1179
+        assert peaks[-1] == 1293
+
+    async def test_snapshot_rise_emits_bucket_without_matches(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A metric rise the match log never saw (poll-gap game, or a peak
+        # carried on another surface) still moves the chart: the observation
+        # time becomes a bucket and the peak ratchets there. Also covers the
+        # placement wobble — a later lower observation never drags the
+        # charted peak down, and nothing exceeds the live max.
+        player = make_player(1)
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1500, max_rating=1600)
+        )
+        session.add(player)
+        # A second entrant so the snapshot-driven rise reorders something.
+        rival = make_player(2)
+        rival.ratings.append(
+            make_player_rating(2, leaderboard_id=3, current_rating=1550, max_rating=1550)
+        )
+        session.add(rival)
+        for ts, value in (
+            (datetime(2026, 5, 30, 8, 0, tzinfo=UTC), 1480),
+            (datetime(2026, 6, 3, 9, 30, tzinfo=UTC), 1600),
+            (datetime(2026, 6, 4, 9, 30, tzinfo=UTC), 1590),
+        ):
+            session.add(
+                make_player_rating_snapshot(1, leaderboard_id=3, max_rating=value, observed_at=ts)
+            )
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                start_date=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        by_profile = {p["profile_id"]: p for p in body["players"]}
+        # The 09:30 observation is a bucket of its own (not just midnights).
+        assert "2026-06-03T09:30:00Z" in body["buckets"]
+        peaks = [p["peak_rating"] for p in by_profile[1]["points"]]
+        # Baseline from the pre-start observation, ratcheting up at the
+        # in-window one and never wobbling down after it.
+        assert peaks[0] == 1480
+        assert peaks[-1] == 1600
+        assert peaks == sorted(peaks)
+        # P1 (1480) starts below the rival (1550, flat) and overtakes at the
+        # observed rise — the reorder the bucket exists to capture.
+        assert by_profile[1]["points"][0]["position"] == 2
+        assert by_profile[1]["points"][-1]["position"] == 1
 
     async def test_team_combined_clamped_matches_teams_page(
         self, client: AsyncClient, session: AsyncSession

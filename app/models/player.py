@@ -57,6 +57,51 @@ class ProfileAlias(Base):
     )
 
 
+class PlayerRatingSnapshot(Base):
+    """Append-only observations of upstream's reported peak (#271 follow-up).
+
+    ``PlayerRating`` is overwritten in place on every poll, so the metric the
+    standings rank on (``max_rating``) had no recorded history — the history
+    chart had to *reconstruct* past peaks from the match log, which both
+    overstates (rebased-away 2021 ratings, placement games Relic ignores) and
+    understates (the log is "last N matches", so an active player's pre-event
+    peak set before polling began is invisible — the Grubby case). This table
+    records the metric itself: the stats poller appends a row whenever a
+    profile's reported ``max_rating`` on a leaderboard changes (including the
+    first time it's seen), and ``/standings/history`` prefers these recorded
+    observations over log reconstruction.
+
+    Rows are observations, not state — never updated, never overwritten by
+    polls. ``observed_at`` is the poll time (or, for backfilled rows recovered
+    from external captures of the API, the capture time).
+    """
+
+    __tablename__ = "player_rating_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("players.profile_id", ondelete="CASCADE"),
+    )
+    leaderboard_id: Mapped[int]
+    max_rating: Mapped[int]
+    # Context at observation time; the peak series only needs max_rating.
+    current_rating: Mapped[int | None]
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        # The history endpoint reads one player-set's series ordered by time.
+        Index(
+            "ix_player_rating_snapshots_profile_lb_observed",
+            "profile_id",
+            "leaderboard_id",
+            "observed_at",
+        ),
+    )
+
+
 class PlayerRating(Base):
     __tablename__ = "player_ratings"
 

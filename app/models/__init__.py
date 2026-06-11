@@ -10,7 +10,7 @@ from app.models.match import (
     MatchState,
 )
 from app.models.nudge import NudgeVersion
-from app.models.player import Player, PlayerRating, ProfileAlias
+from app.models.player import Player, PlayerRating, PlayerRatingSnapshot, ProfileAlias
 from app.models.stream import HostLiveStream, LiveStream
 from app.models.tournament import (
     Team,
@@ -34,6 +34,7 @@ __all__ = [
     "NudgeVersion",
     "Player",
     "PlayerRating",
+    "PlayerRatingSnapshot",
     "ProfileAlias",
     "Team",
     "TeamMember",

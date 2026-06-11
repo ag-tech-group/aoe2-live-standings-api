@@ -19,8 +19,10 @@ from app.models import (
     MatchState,
     Player,
     PlayerRating,
+    PlayerRatingSnapshot,
 )
 from app.poller.upserts import (
+    insert_rating_snapshots,
     replace_live_match_players,
     upsert_civilization,
     upsert_match_from_live,
@@ -108,6 +110,64 @@ class TestUpsertPlayerRating:
 
         loaded = (await session.execute(select(PlayerRating))).scalar_one()
         assert loaded.current_rating == 1800
+
+
+class TestInsertRatingSnapshots:
+    """Append-only metric history (#271): one row per max_rating change."""
+
+    async def test_first_poll_and_changes_snapshot_unchanged_polls_dont(
+        self, session: AsyncSession
+    ):
+        session.add(Player(**_player_data(profile_id=1)))
+        await session.commit()
+
+        # First-ever rating: snapshots (no stored row yet to match).
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1500)]) == 1
+        await upsert_player_rating(session, _rating_data(max_rating=1500))
+        await session.commit()
+
+        # Same max on the next poll: no new observation.
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1500)]) == 0
+
+        # A new high: snapshots again, with the current rating as context.
+        assert (
+            await insert_rating_snapshots(
+                session, [_rating_data(max_rating=1600, current_rating=1600)]
+            )
+            == 1
+        )
+        await upsert_player_rating(session, _rating_data(max_rating=1600, current_rating=1600))
+        await session.commit()
+
+        snapshots = (
+            (await session.execute(select(PlayerRatingSnapshot).order_by(PlayerRatingSnapshot.id)))
+            .scalars()
+            .all()
+        )
+        assert [(s.max_rating, s.current_rating) for s in snapshots] == [
+            (1500, 1500),
+            (1600, 1600),
+        ]
+        assert all(s.observed_at is not None for s in snapshots)
+
+    async def test_diff_is_per_leaderboard(self, session: AsyncSession):
+        session.add(Player(**_player_data(profile_id=1)))
+        await session.commit()
+        await upsert_player_rating(session, _rating_data(leaderboard_id=3, max_rating=1500))
+        await session.commit()
+
+        # Same profile, different ladder: its first observation snapshots even
+        # though leaderboard 3 is unchanged.
+        appended = await insert_rating_snapshots(
+            session,
+            [
+                _rating_data(leaderboard_id=3, max_rating=1500),
+                _rating_data(leaderboard_id=4, max_rating=2200),
+            ],
+        )
+        assert appended == 1
+        snapshot = (await session.execute(select(PlayerRatingSnapshot))).scalar_one()
+        assert (snapshot.leaderboard_id, snapshot.max_rating) == (4, 2200)
 
 
 class TestUpsertMatchFromRecent:

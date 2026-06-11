@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +40,7 @@ from app.models import (
     MatchPlayer,
     Player,
     PlayerRating,
+    PlayerRatingSnapshot,
     ProfileAlias,
 )
 from app.poller.broadcast import LiveStreamMeta
@@ -128,6 +129,48 @@ async def upsert_player_rating(session: AsyncSession, data: dict[str, Any]) -> N
         },
     )
     await session.execute(stmt)
+
+
+async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str, Any]]) -> int:
+    """Append a ``PlayerRatingSnapshot`` for every changed ``max_rating``.
+
+    Must run *before* ``upsert_player_rating`` overwrites the stored rows —
+    the diff against the previous poll is what detects a change. A profile's
+    first-ever rating on a leaderboard also snapshots (its entry baseline for
+    future events). ``observed_at`` defaults to ``now()`` server-side.
+
+    This is the recorded history of the ranking metric: upstream's
+    ``highestrating`` is rebased/placement-filtered and cannot be
+    reconstructed from the match log (#271), so ``/standings/history``
+    prefers these observations. Returns the number of rows appended.
+    """
+    if not ratings:
+        return 0
+    stored = {
+        (profile_id, leaderboard_id): max_rating
+        for profile_id, leaderboard_id, max_rating in (
+            await session.execute(
+                select(
+                    PlayerRating.profile_id,
+                    PlayerRating.leaderboard_id,
+                    PlayerRating.max_rating,
+                ).where(PlayerRating.profile_id.in_({r["profile_id"] for r in ratings}))
+            )
+        ).all()
+    }
+    rows = [
+        {
+            "profile_id": r["profile_id"],
+            "leaderboard_id": r["leaderboard_id"],
+            "max_rating": r["max_rating"],
+            "current_rating": r.get("current_rating"),
+        }
+        for r in ratings
+        if stored.get((r["profile_id"], r["leaderboard_id"])) != r["max_rating"]
+    ]
+    if rows:
+        await session.execute(insert(PlayerRatingSnapshot), rows)
+    return len(rows)
 
 
 async def upsert_profile_alias(session: AsyncSession, data: dict[str, Any]) -> None:

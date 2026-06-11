@@ -37,6 +37,7 @@ from app.models import (
     MatchState,
     Player,
     PlayerRating,
+    PlayerRatingSnapshot,
     ProfileAlias,
     Team,
     TeamMember,
@@ -1625,21 +1626,31 @@ async def get_standings_history(
     entity set and the chart never carries a phantom the FE can't label.
 
     Peak elo is carried in and only rises on a new all-time high, so an
-    entity's ``peak_rating`` as of a bucket is ``max(pre-event baseline,
-    in-window peak-so-far)`` — flat at their lifetime peak unless they set a
-    new high mid-event. The baseline is the current ``max_rating`` when it tops
-    every in-window rating (peak set pre-event — the common case, exact); when
-    the all-time peak was instead first reached *in-event*, the baseline is the
-    pre-event peak from the match log, so the line climbs into that peak rather
-    than teleporting to it before it was earned (#357). The in-window series
-    comes from the immutable match log (same source as ``/progression``),
-    windowed to the tournament dates. Either log-derived side may exceed the
-    live ``max_rating`` — upstream rebases ``highestrating`` and ignores
-    placement games, so old log rows can outscore today's reported peak — and
-    is clamped to it (#271), keeping every bucket on the metric the live table
-    ranks on. So the latest bucket equals the live ``/standings`` order and
-    past buckets stay stable. Teams (``teams[].points``) rank by combined peak
-    (sum of members' as-of-bucket ``max_rating``), matching the Teams page.
+    entity's ``peak_rating`` as of a bucket is the max of three sources
+    (#226, #357, #271), clamped to the live ``max_rating``:
+
+    - **Recorded metric observations** (``player_rating_snapshots``) — the
+      poller's append-only history of upstream's reported peak. Wherever
+      these exist they beat reconstruction: the latest pre-start observation
+      is the exact carried-in baseline (earliest in-window observation
+      carried back when there's no pre-start one), and in-window
+      observations ratchet the peak at their observed times.
+    - **The carried-in log baseline** (fallback, no observations): the live
+      ``max_rating`` when it tops every in-window rating (peak set
+      pre-event — exact), else the rebase-aware pre-event peak from the
+      match log so the line climbs into an in-event all-time high rather
+      than teleporting to it (#357). The rating held entering the window
+      floors the baseline in all cases.
+    - **The in-window log peak-so-far** (same source as ``/progression``),
+      windowed to the tournament dates.
+
+    The clamp exists because the match log is not the metric (#271):
+    upstream rebases ``highestrating`` and ignores placement games, so log
+    rows can outscore today's reported peak — those are rebased-away noise.
+    The latest bucket therefore always equals the live ``/standings`` order
+    and past buckets stay stable. Teams (``teams[].points``) rank by
+    combined peak (sum of members' as-of-bucket ``max_rating``), matching
+    the Teams page.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -1690,12 +1701,19 @@ async def get_standings_history(
     cur_rating_by_tp = {r.id: r.current_rating for r in roster}
     tp_by_profile = {r.profile_id: r.id for r in roster if r.profile_id is not None}
 
-    # In-event rating series per entrant (windowed), oldest-first — the only
-    # thing that moves a peak during the event (a new all-time high).
+    # In-event rating series per entrant (windowed), oldest-first. The first
+    # row's ``old_rating`` is the rating the entrant *held entering the
+    # window* — a provable floor on their peak metric at the start (#271).
     points_by_tp: dict[int, list[tuple[datetime, int]]] = {}
+    entry_old_by_tp: dict[int, int] = {}
     if tp_by_profile:
         pts_stmt = (
-            select(MatchPlayer.profile_id, Match.completed_at, MatchPlayer.new_rating)
+            select(
+                MatchPlayer.profile_id,
+                Match.completed_at,
+                MatchPlayer.new_rating,
+                MatchPlayer.old_rating,
+            )
             .join(Match, Match.match_id == MatchPlayer.match_id)
             .where(
                 Match.leaderboard_id == tournament.leaderboard_id,
@@ -1709,39 +1727,96 @@ async def get_standings_history(
             pts_stmt = pts_stmt.where(Match.started_at >= tournament.start_date)
         if tournament.grand_finals_date is not None:
             pts_stmt = pts_stmt.where(Match.started_at <= tournament.grand_finals_date)
-        for profile_id, completed_at, new_rating in (await session.execute(pts_stmt)).all():
-            points_by_tp.setdefault(tp_by_profile[profile_id], []).append(
-                (_to_utc(completed_at), new_rating)
-            )
+        for profile_id, completed_at, new_rating, old_rating in (
+            await session.execute(pts_stmt)
+        ).all():
+            tp_id = tp_by_profile[profile_id]
+            if tp_id not in points_by_tp and old_rating is not None:
+                entry_old_by_tp[tp_id] = old_rating
+            points_by_tp.setdefault(tp_id, []).append((_to_utc(completed_at), new_rating))
 
     # Carried-in pre-event peak per entrant from the immutable match log: the
-    # highest post-match rating on this leaderboard *before* the window opened.
+    # highest rating held on this leaderboard *before* the window opened.
     # It's the baseline a Case-B entrant — one whose all-time peak was first
     # reached *during* the event — climbs from, so the series rises into that
     # peak instead of teleporting to it before it was earned (#357). A null
     # ``start_date`` means there's no pre-event period, so nothing to carry in.
+    #
+    # The fold is rebase-aware (#271): upstream rebases ``highestrating``, so
+    # a log rating above today's reported peak proves that match predates a
+    # rebase — its whole era is on a dead scale. Any such row resets the fold;
+    # only the trailing current-scale run contributes (e.g. 2021 games at 1832
+    # against a live peak of 1735 are dropped, while a May game at 1720
+    # survives and anchors the start). ``old_rating`` counts too — it's a
+    # rating the entrant provably held, and it extends one game past the log's
+    # capture horizon.
     pre_event_peak_by_tp: dict[int, int] = {}
     if tp_by_profile and tournament.start_date is not None:
         pre_stmt = (
-            select(MatchPlayer.profile_id, func.max(MatchPlayer.new_rating))
+            select(MatchPlayer.profile_id, MatchPlayer.old_rating, MatchPlayer.new_rating)
             .join(Match, Match.match_id == MatchPlayer.match_id)
             .where(
                 Match.leaderboard_id == tournament.leaderboard_id,
                 MatchPlayer.profile_id.in_(list(tp_by_profile)),
                 MatchPlayer.new_rating.is_not(None),
+                Match.completed_at.is_not(None),
                 Match.started_at < tournament.start_date,
             )
-            .group_by(MatchPlayer.profile_id)
+            .order_by(Match.completed_at, Match.match_id)
         )
-        for profile_id, pre_peak in (await session.execute(pre_stmt)).all():
-            pre_event_peak_by_tp[tp_by_profile[profile_id]] = pre_peak
+        for profile_id, old_rating, new_rating in (await session.execute(pre_stmt)).all():
+            tp_id = tp_by_profile[profile_id]
+            cur_max = cur_max_by_tp[tp_id]
+            held = max(old_rating or 0, new_rating)
+            if cur_max is not None and held > cur_max:
+                pre_event_peak_by_tp.pop(tp_id, None)
+                continue
+            prev = pre_event_peak_by_tp.get(tp_id)
+            pre_event_peak_by_tp[tp_id] = held if prev is None else max(prev, held)
+
+    # Recorded observations of the metric itself (#271): the stats poller
+    # appends a ``PlayerRatingSnapshot`` whenever upstream's reported
+    # ``max_rating`` changes, so wherever observations exist they beat any
+    # log reconstruction. The latest pre-start observation is the exact
+    # carried-in baseline; in-window observations ratchet the peak during the
+    # sweep, catching metric rises the match log missed entirely (an active
+    # player's pre-polling peak — the Grubby case — or a poll-gap game).
+    snap_baseline_by_tp: dict[int, int] = {}
+    snap_points_by_tp: dict[int, list[tuple[datetime, int]]] = {}
+    if tp_by_profile:
+        snap_stmt = (
+            select(
+                PlayerRatingSnapshot.profile_id,
+                PlayerRatingSnapshot.observed_at,
+                PlayerRatingSnapshot.max_rating,
+            )
+            .where(
+                PlayerRatingSnapshot.leaderboard_id == tournament.leaderboard_id,
+                PlayerRatingSnapshot.profile_id.in_(list(tp_by_profile)),
+            )
+            .order_by(PlayerRatingSnapshot.observed_at, PlayerRatingSnapshot.id)
+        )
+        if tournament.grand_finals_date is not None:
+            snap_stmt = snap_stmt.where(
+                PlayerRatingSnapshot.observed_at <= tournament.grand_finals_date
+            )
+        start_utc = _to_utc(tournament.start_date) if tournament.start_date is not None else None
+        for profile_id, observed_at, max_rating in (await session.execute(snap_stmt)).all():
+            tp_id = tp_by_profile[profile_id]
+            observed_at = _to_utc(observed_at)
+            if start_utc is not None and observed_at <= start_utc:
+                # Ordered scan ⇒ the latest pre-start observation wins.
+                snap_baseline_by_tp[tp_id] = max_rating
+            else:
+                snap_points_by_tp.setdefault(tp_id, []).append((observed_at, max_rating))
 
     # Time axis: a daily anchor at each midnight in the window + a marker at
-    # every match completion (a potential reorder). Each bucket is "as of" its
-    # timestamp (matches with completed_at <= it); a bucket is emitted at a
-    # daily anchor, whenever the order changes, or at the final time — so quiet
-    # days still show a point and every shift gets one (#226).
+    # every match completion and every in-window metric observation (each a
+    # potential reorder). Each bucket is "as of" its timestamp; a bucket is
+    # emitted at a daily anchor, whenever the order changes, or at the final
+    # time — so quiet days still show a point and every shift gets one (#226).
     in_event_times = [pt[0] for pts in points_by_tp.values() for pt in pts]
+    in_event_times += [pt[0] for pts in snap_points_by_tp.values() for pt in pts]
     if tournament.start_date is not None:
         start_anchor = _to_utc(tournament.start_date)
     elif in_event_times:
@@ -1775,76 +1850,107 @@ async def get_standings_history(
     # max(baseline, in-window peak-so-far), so it only ever rises (#226, #357):
     #   - Unrated (no PlayerRating on this leaderboard): None — the entrant
     #     holds the name-sorted tail until an in-window rating appears.
-    #   - All-time peak set strictly before the event (cur_max tops every
-    #     in-window rating, or there are no in-window games): cur_max is the
-    #     exact carried-in peak — a flat line, and it pins the final bucket to
-    #     the live max_rating.
-    #   - All-time peak first reached *in-event* (an in-window rating ties
-    #     cur_max): carry in the pre-event peak from the match log so the line
-    #     climbs from there up to cur_max rather than teleporting to cur_max
-    #     before it was earned (#357). None when the log has no pre-event
-    #     coverage — the entrant simply enters at their first in-window rating.
-    #     This baseline can exceed cur_max (the log keeps ratings upstream has
-    #     since rebased away, #271); the per-bucket clamp below caps it.
+    #   - Recorded observations exist (#271): the snapshot is the metric — it
+    #     beats any log reconstruction. Latest pre-start observation when we
+    #     have one; otherwise the earliest in-window observation carried back
+    #     across the gap (the metric is non-decreasing, so the error is
+    #     bounded by whatever it gained inside that gap — zero once the
+    #     poller snapshots continuously).
+    #   - No observations, all-time peak set strictly before the event
+    #     (cur_max tops every in-window rating, or no in-window games):
+    #     cur_max is the exact carried-in peak — a flat line that pins the
+    #     final bucket to the live max_rating.
+    #   - No observations, all-time peak first reached *in-event* (an
+    #     in-window rating ties cur_max): carry in the rebase-aware pre-event
+    #     peak from the match log so the line climbs from there up to cur_max
+    #     rather than teleporting to it before it was earned (#357).
+    # Whatever the source, the rating held entering the window
+    # (``entry_old_by_tp``) floors the baseline — the metric can never have
+    # been below it — and the per-bucket clamp below caps everything at the
+    # live ``max_rating`` (#271).
     baseline_by_tp: dict[int, int | None] = {}
     for tp_id in name_by_tp:
         cur_max = cur_max_by_tp[tp_id]
-        in_event_total = max((r for _, r in points_by_tp.get(tp_id, [])), default=None)
         if cur_max is None:
             baseline_by_tp[tp_id] = None
-        elif in_event_total is None or cur_max > in_event_total:
-            baseline_by_tp[tp_id] = cur_max
+            continue
+        snap_base = snap_baseline_by_tp.get(tp_id)
+        if snap_base is None and tp_id in snap_points_by_tp:
+            snap_base = snap_points_by_tp[tp_id][0][1]
+        if snap_base is not None:
+            baseline = snap_base
         else:
-            baseline_by_tp[tp_id] = pre_event_peak_by_tp.get(tp_id)
+            in_event_total = max((r for _, r in points_by_tp.get(tp_id, [])), default=None)
+            if in_event_total is None or cur_max > in_event_total:
+                baseline = cur_max
+            else:
+                baseline = pre_event_peak_by_tp.get(tp_id)
+        entry = entry_old_by_tp.get(tp_id)
+        if entry is not None:
+            baseline = entry if baseline is None else max(baseline, entry)
+        baseline_by_tp[tp_id] = baseline
 
-    # Sweep the candidate times once, advancing each entrant's in-event points,
-    # ranking the full roster (and teams) at each, and emitting on order change.
+    # Sweep the candidate times once, advancing each entrant's in-event points
+    # and metric observations, ranking the full roster (and teams) at each,
+    # and emitting on order change.
     idx_by_tp = dict.fromkeys(name_by_tp, 0)
+    snap_idx_by_tp = dict.fromkeys(name_by_tp, 0)
     run_peak: dict[int, int | None] = dict.fromkeys(name_by_tp)
     run_cur: dict[int, int | None] = dict.fromkeys(name_by_tp)
+    snap_run: dict[int, int | None] = dict.fromkeys(name_by_tp)
     buckets: list[datetime] = []
     player_points: dict[int, list[StandingHistoryPoint]] = {tp_id: [] for tp_id in name_by_tp}
     team_points: dict[int, list[TeamStandingHistoryPoint]] = {tid: [] for tid in members_by_team}
     last_vector: tuple | None = None
-    for position_index, snapshot_time in enumerate(candidate_times):
+    for position_index, bucket_time in enumerate(candidate_times):
         for tp_id in name_by_tp:
             points = points_by_tp.get(tp_id, [])
             cursor = idx_by_tp[tp_id]
-            while cursor < len(points) and points[cursor][0] <= snapshot_time:
+            while cursor < len(points) and points[cursor][0] <= bucket_time:
                 run_cur[tp_id] = points[cursor][1]
                 rp = run_peak[tp_id]
                 run_peak[tp_id] = run_cur[tp_id] if rp is None else max(rp, run_cur[tp_id])
                 cursor += 1
             idx_by_tp[tp_id] = cursor
+            # Observed metric so-far. Ratcheted (running max): a raw
+            # observation can wobble down for a placement account — our
+            # parser floors a missing ``highestrating`` at the falling
+            # current rating — but the charted peak only ever rises.
+            snaps = snap_points_by_tp.get(tp_id, [])
+            cursor = snap_idx_by_tp[tp_id]
+            while cursor < len(snaps) and snaps[cursor][0] <= bucket_time:
+                sr = snap_run[tp_id]
+                observed = snaps[cursor][1]
+                snap_run[tp_id] = observed if sr is None else max(sr, observed)
+                cursor += 1
+            snap_idx_by_tp[tp_id] = cursor
         # peak/current as-of this time for every entrant.
         peak_at: dict[int, int | None] = {}
         cur_at: dict[int, int | None] = {}
         for tp_id in name_by_tp:
-            rp = run_peak[tp_id]
-            baseline = baseline_by_tp[tp_id]
-            # As-of-bucket peak = max(carried-in baseline, in-window
-            # peak-so-far); either side may be absent. Both None (unrated with
-            # no in-window rating yet) → null peak, sorted to the name tail.
-            if baseline is None:
-                peak_at[tp_id] = rp
-            elif rp is None:
-                peak_at[tp_id] = baseline
-            else:
-                peak_at[tp_id] = max(baseline, rp)
+            # As-of-bucket peak = max(carried-in baseline, observed metric
+            # so-far, in-window log peak-so-far); any side may be absent. All
+            # None (unrated with no in-window data yet) → null peak, sorted
+            # to the name tail.
+            sources = [
+                v
+                for v in (baseline_by_tp[tp_id], snap_run[tp_id], run_peak[tp_id])
+                if v is not None
+            ]
+            peak = max(sources) if sources else None
             # Clamp to the live metric (#271): upstream's ``highestrating`` is
             # NOT a max over the match log — Relic rebases it (recalibrations)
             # and ignores placement games, so the log can carry post-match
             # ratings above today's reported peak (2021 ratings up to 1832 vs
-            # a live ``max_rating`` of 1735). Both clamp inputs are tainted:
-            # the pre-event baseline (old games) and the in-window running
-            # peak (placement games). A log value above ``max_rating`` is
-            # rebased-away noise, not a higher peak — cap it so every bucket
-            # ranks on the same metric the live table does and the final
-            # bucket always equals ``/standings``.
+            # a live ``max_rating`` of 1735), and backfilled observations of a
+            # placement account inherit the same wobble. A value above
+            # ``max_rating`` is rebased-away noise, not a higher peak — cap it
+            # so every bucket ranks on the same metric the live table does and
+            # the final bucket always equals ``/standings``.
             cur_max = cur_max_by_tp[tp_id]
-            peak = peak_at[tp_id]
             if cur_max is not None and peak is not None and peak > cur_max:
-                peak_at[tp_id] = cur_max
+                peak = cur_max
+            peak_at[tp_id] = peak
             cur_at[tp_id] = (
                 run_cur[tp_id] if run_cur[tp_id] is not None else cur_rating_by_tp[tp_id]
             )
@@ -1872,8 +1978,8 @@ async def get_standings_history(
             tuple(team_pos[tid] for tid in sorted(members_by_team)),
         )
         is_last = position_index == len(candidate_times) - 1
-        if snapshot_time in daily_anchors or vector != last_vector or is_last:
-            buckets.append(snapshot_time)
+        if bucket_time in daily_anchors or vector != last_vector or is_last:
+            buckets.append(bucket_time)
             for tp_id in name_by_tp:
                 player_points[tp_id].append(
                     StandingHistoryPoint(position=player_pos[tp_id], peak_rating=peak_at[tp_id])

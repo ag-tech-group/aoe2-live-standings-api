@@ -20,6 +20,7 @@ from app.models import (
     MatchState,
     Player,
     PlayerRating,
+    PlayerRatingSnapshot,
     Team,
     TeamMember,
     Tournament,
@@ -226,6 +227,21 @@ def make_player_rating(profile_id: int, leaderboard_id: int, **overrides: Any) -
     }
     defaults.update(overrides)
     return PlayerRating(**defaults)
+
+
+def make_player_rating_snapshot(
+    profile_id: int, leaderboard_id: int, **overrides: Any
+) -> PlayerRatingSnapshot:
+    """Build a PlayerRatingSnapshot (a recorded max_rating observation)."""
+    defaults: dict[str, Any] = {
+        "profile_id": profile_id,
+        "leaderboard_id": leaderboard_id,
+        "max_rating": 1500,
+        "current_rating": None,
+        "observed_at": datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+    }
+    defaults.update(overrides)
+    return PlayerRatingSnapshot(**defaults)
 
 
 def make_match(match_id: int, **overrides: Any) -> Match:
