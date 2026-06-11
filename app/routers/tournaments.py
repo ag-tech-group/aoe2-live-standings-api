@@ -1633,10 +1633,13 @@ async def get_standings_history(
     pre-event peak from the match log, so the line climbs into that peak rather
     than teleporting to it before it was earned (#357). The in-window series
     comes from the immutable match log (same source as ``/progression``),
-    windowed to the tournament dates. So the latest bucket equals the live
-    ``/standings`` order and past buckets stay stable. Teams (``teams[].points``)
-    rank by combined peak (sum of members' as-of-bucket ``max_rating``),
-    matching the Teams page.
+    windowed to the tournament dates. Either log-derived side may exceed the
+    live ``max_rating`` — upstream rebases ``highestrating`` and ignores
+    placement games, so old log rows can outscore today's reported peak — and
+    is clamped to it (#271), keeping every bucket on the metric the live table
+    ranks on. So the latest bucket equals the live ``/standings`` order and
+    past buckets stay stable. Teams (``teams[].points``) rank by combined peak
+    (sum of members' as-of-bucket ``max_rating``), matching the Teams page.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -1781,6 +1784,8 @@ async def get_standings_history(
     #     climbs from there up to cur_max rather than teleporting to cur_max
     #     before it was earned (#357). None when the log has no pre-event
     #     coverage — the entrant simply enters at their first in-window rating.
+    #     This baseline can exceed cur_max (the log keeps ratings upstream has
+    #     since rebased away, #271); the per-bucket clamp below caps it.
     baseline_by_tp: dict[int, int | None] = {}
     for tp_id in name_by_tp:
         cur_max = cur_max_by_tp[tp_id]
@@ -1826,6 +1831,20 @@ async def get_standings_history(
                 peak_at[tp_id] = baseline
             else:
                 peak_at[tp_id] = max(baseline, rp)
+            # Clamp to the live metric (#271): upstream's ``highestrating`` is
+            # NOT a max over the match log — Relic rebases it (recalibrations)
+            # and ignores placement games, so the log can carry post-match
+            # ratings above today's reported peak (2021 ratings up to 1832 vs
+            # a live ``max_rating`` of 1735). Both clamp inputs are tainted:
+            # the pre-event baseline (old games) and the in-window running
+            # peak (placement games). A log value above ``max_rating`` is
+            # rebased-away noise, not a higher peak — cap it so every bucket
+            # ranks on the same metric the live table does and the final
+            # bucket always equals ``/standings``.
+            cur_max = cur_max_by_tp[tp_id]
+            peak = peak_at[tp_id]
+            if cur_max is not None and peak is not None and peak > cur_max:
+                peak_at[tp_id] = cur_max
             cur_at[tp_id] = (
                 run_cur[tp_id] if run_cur[tp_id] is not None else cur_rating_by_tp[tp_id]
             )
