@@ -14,7 +14,7 @@ set -euo pipefail
 
 ACCOUNT="amr@agtechgroup.solutions"
 PROJECT="aoe2-live-standings-api"
-INSTANCE_CONN="${PROJECT}:us-central1:aoe2-standings-db"
+INSTANCE_CONN="${PROJECT}:us-central1:aoe2-standings-db-v2"
 DB_USER="aoe2_app"
 DB_NAME="aoe2_live_standings"
 PORT=15432

@@ -29,7 +29,7 @@ These are constant for this repo. Every `gcloud` command stamps `--account` and 
 
 - gcloud account: `amr@agtechgroup.solutions`
 - GCP project: `aoe2-live-standings-api`
-- Cloud SQL instance conn: `aoe2-live-standings-api:us-central1:aoe2-standings-db`
+- Cloud SQL instance conn: `aoe2-live-standings-api:us-central1:aoe2-standings-db-v2`
 - DB user / database: `aoe2_app` / `aoe2_live_standings`
 - Local proxy port (convention): `15432`
 
