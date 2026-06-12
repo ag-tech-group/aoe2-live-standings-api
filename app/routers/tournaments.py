@@ -193,14 +193,21 @@ async def create_tournament(
     consumer URLs route to the right tournament). A competition window
     whose start falls after its grand finals is rejected with 422.
     """
+    # The canonical window end; the deprecated alias feeds it for legacy
+    # clients (the schema already 422'd a body where the two disagree).
+    # Both columns are written with the resolved value — the expand-phase
+    # sync invariant.
+    window_end = (
+        payload.end_date if "end_date" in payload.model_fields_set else payload.grand_finals_date
+    )
     if (
         payload.start_date is not None
-        and payload.grand_finals_date is not None
-        and payload.start_date > payload.grand_finals_date
+        and window_end is not None
+        and payload.start_date > window_end
     ):
         raise HTTPException(
             status_code=422,
-            detail="start_date must not be after grand_finals_date",
+            detail="start_date must not be after end_date",
         )
 
     existing = (
@@ -214,7 +221,8 @@ async def create_tournament(
         name=payload.name,
         leaderboard_id=payload.leaderboard_id,
         start_date=payload.start_date,
-        grand_finals_date=payload.grand_finals_date,
+        end_date=window_end,
+        grand_finals_date=window_end,
         prize_pool_cents=payload.prize_pool_cents,
         host_stream_urls=payload.host_stream_urls,
         presentation=payload.presentation,
@@ -264,17 +272,24 @@ async def update_tournament(
     immutable — it is the key consumer URLs are built on.
     """
     changes = payload.model_dump(exclude_unset=True)
+    if "end_date" in changes or "grand_finals_date" in changes:
+        # Setting either window-end alias sets both columns — the expand-
+        # phase sync invariant. The schema already 422'd a body where the
+        # two disagree; end_date wins when both are present (same value).
+        window_end = changes.get("end_date", changes.get("grand_finals_date"))
+        changes["end_date"] = window_end
+        changes["grand_finals_date"] = window_end
     for field, value in changes.items():
         setattr(tournament, field, value)
 
     if (
         tournament.start_date is not None
-        and tournament.grand_finals_date is not None
-        and tournament.start_date > tournament.grand_finals_date
+        and tournament.end_date is not None
+        and tournament.start_date > tournament.end_date
     ):
         raise HTTPException(
             status_code=422,
-            detail="start_date must not be after grand_finals_date",
+            detail="start_date must not be after end_date",
         )
 
     await session.commit()

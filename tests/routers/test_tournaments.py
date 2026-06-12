@@ -2064,6 +2064,187 @@ class TestUpdateTournament:
         assert response.status_code == 422
 
 
+class TestEndDateRenameExpandPhase:
+    """`end_date` is the canonical window end; `grand_finals_date` is its
+    deprecated alias mid-rename. Reads return both (same value); writes
+    accept either and set both; a body where they disagree 422s."""
+
+    async def test_reads_surface_both_aliases_with_the_same_value(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add(make_tournament("cup", grand_finals_date=datetime(2026, 6, 16, 18, tzinfo=UTC)))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup")).json()
+        assert body["end_date"].startswith("2026-06-16T18")
+        assert body["end_date"] == body["grand_finals_date"]
+
+    async def test_create_with_end_date_sets_both(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                "slug": "cup",
+                "name": "Cup",
+                "leaderboard_id": 3,
+                "end_date": "2026-06-16T18:00:00Z",
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["end_date"].startswith("2026-06-16T18")
+        assert body["grand_finals_date"] == body["end_date"]
+
+    async def test_create_with_legacy_alias_sets_both(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                "slug": "cup",
+                "name": "Cup",
+                "leaderboard_id": 3,
+                "grand_finals_date": "2026-06-16T18:00:00Z",
+            },
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["end_date"].startswith("2026-06-16T18")
+        assert body["grand_finals_date"] == body["end_date"]
+
+    async def test_create_with_disagreeing_aliases_is_rejected(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                "slug": "cup",
+                "name": "Cup",
+                "leaderboard_id": 3,
+                "end_date": "2026-06-16T18:00:00Z",
+                "grand_finals_date": "2026-06-21T18:00:00Z",
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_create_with_agreeing_aliases_is_accepted(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # A freshly regenerated client may echo both fields back.
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                "slug": "cup",
+                "name": "Cup",
+                "leaderboard_id": 3,
+                "end_date": "2026-06-16T18:00:00Z",
+                "grand_finals_date": "2026-06-16T18:00:00Z",
+            },
+        )
+        assert response.status_code == 201
+
+    async def test_patch_end_date_moves_both(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                grand_finals_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup", json={"end_date": "2026-06-17T18:00:00Z"}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["end_date"].startswith("2026-06-17T18")
+        assert body["grand_finals_date"] == body["end_date"]
+
+    async def test_patch_legacy_alias_moves_both(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # An old client (or the pre-rename admin UI) keeps working and
+        # cannot desync the pair.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                end_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup", json={"grand_finals_date": "2026-06-17T18:00:00Z"}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["end_date"].startswith("2026-06-17T18")
+        assert body["grand_finals_date"] == body["end_date"]
+
+    async def test_patch_disagreeing_aliases_is_rejected(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup",
+            json={
+                "end_date": "2026-06-16T18:00:00Z",
+                "grand_finals_date": "2026-06-21T18:00:00Z",
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_patch_null_end_date_clears_both(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                grand_finals_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"end_date": None})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["end_date"] is None
+        assert body["grand_finals_date"] is None
+
+    async def test_window_validation_uses_end_date(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                "slug": "cup",
+                "name": "Cup",
+                "leaderboard_id": 3,
+                "start_date": "2026-06-20T00:00:00Z",
+                "end_date": "2026-06-16T18:00:00Z",
+            },
+        )
+        assert response.status_code == 422
+        assert "end_date" in response.json()["detail"]
+
+
 class TestTournamentPresentationBag:
     """The tournament-level opaque display bag: stored verbatim, replaced
     whole on PATCH, surfaced on the list/detail reads. The FE defines the

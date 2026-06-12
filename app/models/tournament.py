@@ -36,13 +36,24 @@ class Tournament(Base):
     # The leaderboard whose ratings this tournament's standings track
     # (e.g. 3 for 1v1 RM Ranked). One ladder per tournament.
     leaderboard_id: Mapped[int]
-    # The competition window. Nullable so a tournament can be created
+    # The competition window — the bounds for "what matches count for
+    # this tournament" filters. Nullable so a tournament can be created
     # before its schedule is fixed; tournament-scoped queries treat a
-    # null bound as open-ended. `grand_finals_date` is both the hero-
-    # countdown target the frontend surfaces *and* the terminating
-    # bound for "what matches count for this tournament" filters —
-    # there's no separate `end_date` anymore (dropped in #76).
+    # null bound as open-ended.
+    #
+    # `end_date` is the canonical end bound; `grand_finals_date` is its
+    # deprecated alias, mid-rename (the reverse of #76, which merged the
+    # old `end_date` into the countdown field when the two concepts
+    # coincided — The King's Gauntlet's playoffs proved they don't: the
+    # rated window closes at the race end, days before the actual grand
+    # finals, whose date is display schedule and belongs in the
+    # `presentation` bag). Expand→contract: every write path sets BOTH
+    # columns (migration 61eb825d1551 backfilled), reads may use either
+    # until the post-event contract phase drops `grand_finals_date`.
+    # Do NOT move this bound to the real grand-finals date — that would
+    # silently pour post-race ladder games into the record and peaks.
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     grand_finals_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Tournament's prize pool in **minor currency units** (e.g. cents) — a
     # mutable owner-edited amount the consumer renders. Integer to avoid
