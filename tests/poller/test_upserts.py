@@ -153,7 +153,8 @@ class TestInsertRatingSnapshots:
     async def test_diff_is_per_leaderboard(self, session: AsyncSession):
         session.add(Player(**_player_data(profile_id=1)))
         await session.commit()
-        await upsert_player_rating(session, _rating_data(leaderboard_id=3, max_rating=1500))
+        # Leaderboard 3 already observed at this value.
+        assert await insert_rating_snapshots(session, [_rating_data(leaderboard_id=3)]) == 1
         await session.commit()
 
         # Same profile, different ladder: its first observation snapshots even
@@ -166,8 +167,51 @@ class TestInsertRatingSnapshots:
             ],
         )
         assert appended == 1
+        snapshots = (
+            (await session.execute(select(PlayerRatingSnapshot).order_by(PlayerRatingSnapshot.id)))
+            .scalars()
+            .all()
+        )
+        assert [(s.leaderboard_id, s.max_rating) for s in snapshots] == [(3, 1500), (4, 2200)]
+
+    async def test_self_seeds_pair_that_predates_the_snapshot_table(self, session: AsyncSession):
+        # The live row exists at this exact value but has never been
+        # observed — the pair predates the snapshot table (#271 shipped
+        # mid-event). The diff runs against the latest *snapshot*, not the
+        # live row, so an unchanged poll still appends the baseline the
+        # post-window standings freeze relies on.
+        session.add(Player(**_player_data(profile_id=1)))
+        await session.commit()
+        await upsert_player_rating(session, _rating_data(max_rating=1500))
+        await session.commit()
+
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1500)]) == 1
         snapshot = (await session.execute(select(PlayerRatingSnapshot))).scalar_one()
-        assert (snapshot.leaderboard_id, snapshot.max_rating) == (4, 2200)
+        assert snapshot.max_rating == 1500
+
+        # Seeded once: the next unchanged poll is quiet.
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1500)]) == 0
+
+    async def test_rebase_down_records_once_then_quiet(self, session: AsyncSession):
+        # Upstream rebases peaks DOWN (recalibrations, #271). The lower value
+        # must record exactly once — diffing against the historical *max*
+        # instead of the latest observation would see "1550 != 1600" forever
+        # and append a row every poll.
+        session.add(Player(**_player_data(profile_id=1)))
+        await session.commit()
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1600)]) == 1
+        await session.commit()
+
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1550)]) == 1
+        await session.commit()
+        assert await insert_rating_snapshots(session, [_rating_data(max_rating=1550)]) == 0
+
+        snapshots = (
+            (await session.execute(select(PlayerRatingSnapshot).order_by(PlayerRatingSnapshot.id)))
+            .scalars()
+            .all()
+        )
+        assert [s.max_rating for s in snapshots] == [1600, 1550]
 
 
 class TestUpsertMatchFromRecent:

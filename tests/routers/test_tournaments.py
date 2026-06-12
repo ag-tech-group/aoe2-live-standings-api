@@ -488,6 +488,186 @@ class TestTournamentStandings:
         assert rows[2]["alias"] == "handle2"
 
 
+class TestStandingsFreezeAtWindowEnd:
+    """Past ``grand_finals_date`` the table is final: rank and the surfaced
+    peak switch to the as-of-window-end metric (max recorded snapshot at-or-
+    before the bound, live fallback, live clamp) so post-window ladder play
+    can't reorder a result the playoff seeding derived from."""
+
+    _BOUND = datetime(2026, 5, 20, 18, 0, 0, tzinfo=UTC)
+    _IN_WINDOW = datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC)
+    _POST_WINDOW = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+
+    async def test_post_window_ath_does_not_reorder_final_table(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A peaked 1800 in-window, then hit 2000 grinding after the race; B
+        # held 1900 throughout. Live lifetime order would now say A > B —
+        # the frozen table must keep B > A and surface the frozen peaks.
+        for profile_id, alias, live_max in ((1, "A", 2000), (2, "B", 1900)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=2000, observed_at=self._POST_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                2, leaderboard_id=3, max_rating=1900, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_tournament(
+                "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+            )
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["B", "A"]
+        assert [row["max_rating"] for row in items] == [1900, 1800]
+        # current_rating is labelled current — it stays live.
+        assert [row["current_rating"] for row in items] == [1500, 1500]
+
+    async def test_window_still_open_ranks_on_live_lifetime_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Same data, but the window hasn't closed: live lifetime max_rating
+        # ranks, snapshots are not consulted.
+        for profile_id, alias, live_max in ((1, "A", 2000), (2, "B", 1900)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                leaderboard_id=3,
+                grand_finals_date=datetime(2030, 1, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["A", "B"]
+        assert [row["max_rating"] for row in items] == [2000, 1900]
+
+    async def test_pair_with_no_snapshots_falls_back_to_live_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # C has no observations at all — the recorder appends on every
+        # change including the first observation, so no rows means the live
+        # value never moved since recording began: it IS the as-of-bound
+        # value. C's 1850 must outrank A's frozen 1800 even though A's live
+        # lifetime peak (2000) is higher.
+        for profile_id, alias, live_max in ((1, "A", 2000), (3, "C", 1850)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=2000, observed_at=self._POST_WINDOW
+            )
+        )
+        session.add(
+            make_tournament(
+                "cup", profile_ids=[1, 3], leaderboard_id=3, grand_finals_date=self._BOUND
+            )
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["C", "A"]
+        assert [row["max_rating"] for row in items] == [1850, 1800]
+
+    async def test_frozen_peak_clamps_to_live_max(self, client: AsyncClient, session: AsyncSession):
+        # Upstream rebased D's peak down after the window: the recorded
+        # 1900 outscores today's reported 1700, which makes it rebased-away
+        # noise — clamp to the live metric, exactly like /standings/history.
+        player = make_player(4, alias="D")
+        player.ratings.append(
+            make_player_rating(4, leaderboard_id=3, current_rating=1500, max_rating=1700)
+        )
+        session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                4, leaderboard_id=3, max_rating=1900, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_tournament("cup", profile_ids=[4], leaderboard_id=3, grand_finals_date=self._BOUND)
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert items[0]["max_rating"] == 1700
+
+    async def test_summary_peak_card_freezes_with_the_table(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The highest_peak_rating card reads the same frozen metric: B's
+        # as-of-window-end 1900 leads A's frozen 1800, despite A's live
+        # lifetime 2000.
+        for profile_id, alias, live_max in ((1, "A", 2000), (2, "B", 1900)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                2, leaderboard_id=3, max_rating=1900, observed_at=self._IN_WINDOW
+            )
+        )
+        tournament = make_tournament(
+            "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+        )
+        for tracked in tournament.tracked_players:
+            tracked.name = f"name{tracked.profile_id}"
+        session.add(tournament)
+        await session.commit()
+
+        card = (await client.get("/v1/tournaments/cup/summary")).json()["highest_peak_rating"]
+        assert card["profile_id"] == 2
+        assert card["value"] == 1900
+
+
 class TestStandingsUnratedRoster:
     """Roster members without a rating on the tournament's leaderboard still surface."""
 

@@ -21,6 +21,7 @@ from tests.conftest import (
     make_match_player,
     make_player,
     make_player_rating,
+    make_player_rating_snapshot,
     make_team,
     make_tournament,
 )
@@ -297,6 +298,102 @@ class TestTeamStandings:
         response = await client.get("/v1/tournaments/cup/teams/standings")
         assert response.headers["Cache-Control"] == "private, no-store"
         assert "Cookie" not in response.headers.get("Vary", "")
+
+
+class TestTeamStandingsFreezeAtWindowEnd:
+    """Past ``grand_finals_date`` member peaks freeze at the as-of-window-end
+    metric, so the combined sums, member order, and team order all hold even
+    when the roster keeps laddering — the playoff seeding came from this
+    table (mirrors ``/standings``)."""
+
+    _BOUND = datetime(2026, 5, 20, 18, 0, 0, tzinfo=UTC)
+    _IN_WINDOW = datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC)
+    _POST_WINDOW = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+
+    async def test_post_window_ath_does_not_reorder_teams(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Red's player 1 peaked 1800 in-window then hit 2000 after the race;
+        # Blue's player 2 held 1900 throughout. Live sums would say
+        # Red (2000) > Blue (1900); the frozen table keeps Blue > Red.
+        for profile_id, live_max in ((1, 2000), (2, 1900)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=2000, observed_at=self._POST_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                2, leaderboard_id=3, max_rating=1900, observed_at=self._IN_WINDOW
+            )
+        )
+        tournament = make_tournament(
+            "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+        )
+        tournament.teams = [
+            make_team(tournament, "Red", profile_ids=[1]),
+            make_team(tournament, "Blue", profile_ids=[2]),
+        ]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"]
+        assert [row["name"] for row in items] == ["Blue", "Red"]
+        assert [row["combined_rating_sum"] for row in items] == [1900, 1800]
+        # The surfaced member peak is the frozen metric too.
+        assert items[1]["members"][0]["max_rating"] == 1800
+
+    async def test_member_order_within_team_uses_frozen_peaks(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Within one team: player 1's live lifetime peak (2000) tops player
+        # 2's (1900), but as of the bound it was 1800 — frozen order is 2, 1.
+        for profile_id, live_max in ((1, 2000), (2, 1900)):
+            player = make_player(profile_id)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=2000, observed_at=self._POST_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                2, leaderboard_id=3, max_rating=1900, observed_at=self._IN_WINDOW
+            )
+        )
+        tournament = make_tournament(
+            "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+        )
+        tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        row = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"][0]
+        assert [m["profile_id"] for m in row["members"]] == [2, 1]
+        assert [m["max_rating"] for m in row["members"]] == [1900, 1800]
+        assert row["combined_rating_sum"] == 3700
 
 
 class TestTeamMemberIdentityAndLiveStatus:

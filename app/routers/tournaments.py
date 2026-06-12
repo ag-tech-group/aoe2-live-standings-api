@@ -781,22 +781,101 @@ async def _net_rating_change_by_profile(
     return changes
 
 
-async def _max_rating_by_profile(
+async def _frozen_peak_by_profile(
+    session: AsyncSession,
+    tournament: Tournament,
+    profile_ids: list[int],
+) -> dict[int, int | None] | None:
+    """As-of-window-end peak per profile once the window has closed, else ``None``.
+
+    ``None`` while ``grand_finals_date`` is unset or still ahead: the live
+    ``PlayerRating.max_rating`` *is* the ranking metric mid-event (lifetime
+    peak and as-of-now peak are the same value), so callers keep their
+    joined-row reads and this costs nothing on the hot in-event path.
+
+    Once the window closes the final table must stop moving: the roster
+    keeps laddering after the race, and a post-window all-time high would
+    reorder a result the playoff seeding was derived from. The frozen
+    metric per profile is:
+
+    - the highest recorded observation at-or-before the bound
+      (``player_rating_snapshots``, #271) — the same ratcheted source the
+      ``/standings/history`` sweep replays, so the live table and the
+      chart's final bucket keep agreeing after the race;
+    - else the live ``max_rating``: a pair with no snapshots at all has had
+      no metric change since snapshot recording began (the recorder appends
+      on every change *including the first observation*), so the live value
+      provably equals the as-of-bound value;
+    - clamped to the live ``max_rating`` either way — a recorded value
+      above today's reported peak is rebased-away noise, the same clamp
+      the history sweep applies (#271).
+    """
+    if tournament.grand_finals_date is None or datetime.now(UTC) < _to_utc(
+        tournament.grand_finals_date
+    ):
+        return None
+    peaks: dict[int, int | None] = dict.fromkeys(profile_ids)
+    if not profile_ids:
+        return peaks
+    live = dict(
+        (
+            await session.execute(
+                select(PlayerRating.profile_id, PlayerRating.max_rating).where(
+                    PlayerRating.leaderboard_id == tournament.leaderboard_id,
+                    PlayerRating.profile_id.in_(profile_ids),
+                )
+            )
+        ).all()
+    )
+    snapshots = dict(
+        (
+            await session.execute(
+                select(
+                    PlayerRatingSnapshot.profile_id,
+                    func.max(PlayerRatingSnapshot.max_rating),
+                )
+                .where(
+                    PlayerRatingSnapshot.leaderboard_id == tournament.leaderboard_id,
+                    PlayerRatingSnapshot.profile_id.in_(profile_ids),
+                    PlayerRatingSnapshot.observed_at <= tournament.grand_finals_date,
+                )
+                .group_by(PlayerRatingSnapshot.profile_id)
+            )
+        ).all()
+    )
+    for profile_id in profile_ids:
+        live_max = live.get(profile_id)
+        peak = snapshots.get(profile_id)
+        if peak is None:
+            peak = live_max
+        if live_max is not None and peak is not None and peak > live_max:
+            peak = live_max
+        peaks[profile_id] = peak
+    return peaks
+
+
+async def _peak_rating_by_profile(
     session: AsyncSession,
     tournament: Tournament,
     profile_ids: list[int],
 ) -> dict[int, int | None]:
-    """Map each profile to its all-time peak rating on the tournament's leaderboard.
+    """Map each profile to the peak rating the tournament ranks on.
 
-    ``PlayerRating.max_rating`` — the immutable lifetime peak the standings PEAK
-    column shows (the host's all-time-peak decision), the same source
-    ``get_standings`` / ``get_standings_history`` read. ``None`` for a profile
-    with no rating row on this leaderboard yet. Backs the summary
-    ``highest_peak_rating`` card — the **one lifetime read**; every other card
-    is window-scoped. (Corrects #244, which ranked this card by the in-window
-    ``tournament_record.peak_rating`` and so could name the wrong entrant and
-    value when an all-time peak predates the window.)
+    While the window is open: ``PlayerRating.max_rating`` — the lifetime
+    peak the standings PEAK column shows (the host's all-time-peak
+    decision), the same source ``get_standings`` / ``get_standings_history``
+    read. Once ``grand_finals_date`` passes, the as-of-window-end peak via
+    ``_frozen_peak_by_profile`` — the lifetime value keeps moving with
+    post-window play, the result must not. ``None`` for a profile with no
+    rating row on this leaderboard yet. Backs the summary
+    ``highest_peak_rating`` card — the **one lifetime read**; every other
+    card is window-scoped. (Corrects #244, which ranked this card by the
+    in-window ``tournament_record.peak_rating`` and so could name the wrong
+    entrant and value when an all-time peak predates the window.)
     """
+    frozen = await _frozen_peak_by_profile(session, tournament, profile_ids)
+    if frozen is not None:
+        return frozen
     ratings: dict[int, int | None] = dict.fromkeys(profile_ids)
     if not profile_ids:
         return ratings
@@ -902,6 +981,12 @@ async def get_standings(
     returned, so a tournament can rank on either. (#187 unified the old
     three-tier sort; #226 switched the rank key from current_rating to peak.)
 
+    Once ``grand_finals_date`` passes, the table is **final**: rank and the
+    surfaced ``max_rating`` switch to the as-of-window-end peak
+    (``_frozen_peak_by_profile``), so post-window ladder grinding — the
+    roster keeps playing — can't reorder a result the playoff seeding came
+    from. ``current_rating`` stays live; it's labelled current.
+
     The leaderboard filter lives in the join condition, not the WHERE
     clause — putting it in WHERE would re-filter the outer-join right
     back to inner-join behaviour. The outer filter keeps a linked entry
@@ -943,6 +1028,19 @@ async def get_standings(
 
     profile_ids = [entry.profile_id for entry, _, _ in rows if entry.profile_id is not None]
     roster_row_ids = [entry.id for entry, _, _ in rows]
+    frozen_peaks = await _frozen_peak_by_profile(session, tournament, profile_ids)
+    if frozen_peaks is not None:
+        # The window has closed: re-rank on the frozen metric (the SQL ORDER
+        # BY above ranked on the live one). Same tiers as the SQL sort and
+        # the history sweep — peak desc nulls last, current desc nulls last,
+        # name asc; name is unique per tournament, so the order is total.
+        def _frozen_order(row: Row) -> tuple:
+            entry, _, rating = row
+            peak = frozen_peaks.get(entry.profile_id) if entry.profile_id is not None else None
+            current = rating.current_rating if rating else None
+            return (peak is None, -(peak or 0), current is None, -(current or 0), entry.name)
+
+        rows = sorted(rows, key=_frozen_order)
     recent_results = await _recent_results_by_profile(
         session, tournament.leaderboard_id, profile_ids
     )
@@ -969,7 +1067,13 @@ async def get_standings(
                     team=teams_by_tournament_player.get(entry.id),
                     presentation=entry.presentation,
                     current_rating=rating.current_rating if rating else None,
-                    max_rating=rating.max_rating if rating else None,
+                    # Post-window the surfaced peak is the frozen metric the
+                    # row ranks on, not the still-moving lifetime value.
+                    max_rating=(
+                        frozen_peaks.get(player.profile_id)
+                        if frozen_peaks is not None
+                        else (rating.max_rating if rating else None)
+                    ),
                     wins=rating.wins if rating else 0,
                     losses=rating.losses if rating else 0,
                     streak=rating.streak if rating else 0,
@@ -1303,7 +1407,8 @@ async def get_summary(
     best win rate, longest win streak, biggest climber, most games played —
     each naming the leading linked entrant and their value. ``highest_peak_rating``
     is the **one lifetime read**: it ranks by all-time ``PlayerRating.max_rating``
-    (the host's all-time-peak decision, same as ``StandingRow.max_rating``). The
+    (the host's all-time-peak decision, same as ``StandingRow.max_rating``),
+    frozen at the as-of-window-end value once ``grand_finals_date`` passes. The
     other four are computed in-window (the same ``[start_date, grand_finals_date]``
     bounds as ``tournament_record``) over the tournament players' matches on its
     leaderboard. ``biggest_climber`` is the greatest **signed** in-window net
@@ -1353,7 +1458,7 @@ async def get_summary(
     names = await _civilization_names(session)
     records = await _tournament_record_by_profile(session, tournament, profile_ids, names)
     net_changes = await _net_rating_change_by_profile(session, tournament, profile_ids)
-    max_ratings = await _max_rating_by_profile(session, tournament, profile_ids)
+    max_ratings = await _peak_rating_by_profile(session, tournament, profile_ids)
     candidates = [
         _SummaryCandidate(
             tournament_player_id,
@@ -1391,7 +1496,9 @@ async def get_summary(
         last_polled_at=compute_last_polled_at(r.last_match_at for r in records.values()),
         # The one lifetime card: ranks by all-time max_rating (the host's
         # all-time-peak decision, same as StandingRow.max_rating), NOT the
-        # in-window record.peak_rating. Corrects #244.
+        # in-window record.peak_rating. Corrects #244. Frozen at the
+        # as-of-window-end value once grand_finals_date passes, like the
+        # standings PEAK column.
         highest_peak_rating=_summary_card(_pick_leader(candidates, lambda c: c.max_rating)),
         best_win_rate=_summary_card(
             _pick_leader(
@@ -2049,6 +2156,12 @@ async def get_team_standings(
     members' ``tournament_record`` W/L, plus a server-computed ``win_pct``)
     and a per-team civ pick/win aggregate, with the same per-member figures on
     each ``TeamMemberRead`` (#220).
+
+    Once ``grand_finals_date`` passes, member peaks — and therefore the
+    combined sums, the member order, and the team order — freeze at the
+    as-of-window-end metric (``_frozen_peak_by_profile``), mirroring
+    ``/standings``: the playoff seeding derives from this table, so
+    post-window ladder play must not reorder it.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -2099,6 +2212,7 @@ async def get_team_standings(
     # read from the same snapshot. Unlinked rows (no profile_id) can't
     # be in a live match yet.
     member_profile_ids = [row.profile_id for row in member_rows if row.profile_id is not None]
+    frozen_peaks = await _frozen_peak_by_profile(session, tournament, member_profile_ids)
     live_match_ids = await _live_match_by_profile(session, member_profile_ids)
     # In-window win/loss per member — reuse the per-player record helper so a
     # team's W/L is exactly the sum of its members' ``tournament_record`` W/L —
@@ -2123,6 +2237,10 @@ async def get_team_standings(
         updated_at,
         is_captain,
     ) in member_rows:
+        # Post-window the member peak — the input to the combined sums and
+        # both sort orders below — is the frozen metric, not the live one.
+        if frozen_peaks is not None:
+            max_rating = frozen_peaks.get(profile_id) if profile_id is not None else None
         members_by_team.setdefault(team_id, []).append(
             TeamMemberRead(
                 tournament_player_id=tournament_player_id,
