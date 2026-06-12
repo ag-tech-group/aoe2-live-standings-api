@@ -217,6 +217,7 @@ async def create_tournament(
         grand_finals_date=payload.grand_finals_date,
         prize_pool_cents=payload.prize_pool_cents,
         host_stream_urls=payload.host_stream_urls,
+        presentation=payload.presentation,
     )
     tournament.owners = [TournamentOwner(user_id=user_id)]
     session.add(tournament)
@@ -258,8 +259,9 @@ async def update_tournament(
     PATCH semantics: only the fields present in the request body change.
     ``start_date`` / ``grand_finals_date`` accept ``null`` to clear a
     bound; a competition window whose start falls after its grand finals
-    is rejected with 422. ``slug`` is immutable — it is the key consumer
-    URLs are built on.
+    is rejected with 422. ``presentation`` replaces the whole bag
+    (read-modify-write, mirroring the roster rows' bag). ``slug`` is
+    immutable — it is the key consumer URLs are built on.
     """
     changes = payload.model_dump(exclude_unset=True)
     for field, value in changes.items():
@@ -276,12 +278,17 @@ async def update_tournament(
         )
 
     await session.commit()
+    audit_changes = dict(changes)
+    if "presentation" in audit_changes:
+        # The bag can be kilobytes (bracket JSON); the log only needs which
+        # keys changed — mirrors the roster PATCH's ``presentation_keys``.
+        audit_changes["presentation"] = sorted(audit_changes["presentation"])
     audit(
         AuditAction.TOURNAMENT_UPDATE,
         actor_user_id=user_id,
         tournament_slug=tournament.slug,
         tournament_id=tournament.id,
-        changes=changes,
+        changes=audit_changes,
     )
     live_hosts = await _host_stream_live_tournaments(session, [tournament.id])
     return _serialize_tournament(tournament, live_hosts)

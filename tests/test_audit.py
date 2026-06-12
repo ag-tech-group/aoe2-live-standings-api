@@ -50,6 +50,24 @@ class TestTournamentAudits:
         assert e["action"] == AuditAction.TOURNAMENT_UPDATE
         assert e["changes"] == {"name": "Renamed"}
 
+    async def test_update_audits_presentation_keys_not_contents(
+        self, client: AsyncClient, session: AsyncSession, auth_as, audit_events
+    ):
+        # The bag can be kilobytes of bracket JSON; the log records which
+        # keys changed, never the contents (mirrors the roster PATCH's
+        # presentation_keys).
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+        auth_as(DEFAULT_TEST_USER_ID)
+
+        await client.patch(
+            "/v1/tournaments/cup",
+            json={"presentation": {"schedule": [], "bracket": {"rounds": []}}},
+        )
+        e = audit_events[0]
+        assert e["action"] == AuditAction.TOURNAMENT_UPDATE
+        assert e["changes"] == {"presentation": ["bracket", "schedule"]}
+
     async def test_delete_emits_tournament_delete(
         self, client: AsyncClient, session: AsyncSession, auth_as, audit_events
     ):
