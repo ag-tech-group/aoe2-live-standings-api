@@ -93,7 +93,7 @@ class TestTournamentAudits:
             "/v1/tournaments/cup",
             json={
                 "start_date": "2026-07-01T00:00:00Z",
-                "grand_finals_date": "2026-06-01T00:00:00Z",
+                "end_date": "2026-06-01T00:00:00Z",
             },
         )
         assert response.status_code == 422

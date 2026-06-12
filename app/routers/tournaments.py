@@ -191,19 +191,12 @@ async def create_tournament(
     metadata, manage the roster + teams, and ``DELETE`` the tournament.
     409 if the slug is taken (it is unique across the deployment and how
     consumer URLs route to the right tournament). A competition window
-    whose start falls after its grand finals is rejected with 422.
+    whose start falls after its end is rejected with 422.
     """
-    # The canonical window end; the deprecated alias feeds it for legacy
-    # clients (the schema already 422'd a body where the two disagree).
-    # Both columns are written with the resolved value — the expand-phase
-    # sync invariant.
-    window_end = (
-        payload.end_date if "end_date" in payload.model_fields_set else payload.grand_finals_date
-    )
     if (
         payload.start_date is not None
-        and window_end is not None
-        and payload.start_date > window_end
+        and payload.end_date is not None
+        and payload.start_date > payload.end_date
     ):
         raise HTTPException(
             status_code=422,
@@ -221,8 +214,7 @@ async def create_tournament(
         name=payload.name,
         leaderboard_id=payload.leaderboard_id,
         start_date=payload.start_date,
-        end_date=window_end,
-        grand_finals_date=window_end,
+        end_date=payload.end_date,
         prize_pool_cents=payload.prize_pool_cents,
         host_stream_urls=payload.host_stream_urls,
         presentation=payload.presentation,
@@ -265,20 +257,13 @@ async def update_tournament(
     """Edit a tournament's metadata — owner-gated.
 
     PATCH semantics: only the fields present in the request body change.
-    ``start_date`` / ``grand_finals_date`` accept ``null`` to clear a
-    bound; a competition window whose start falls after its grand finals
-    is rejected with 422. ``presentation`` replaces the whole bag
-    (read-modify-write, mirroring the roster rows' bag). ``slug`` is
-    immutable — it is the key consumer URLs are built on.
+    ``start_date`` / ``end_date`` accept ``null`` to clear a bound; a
+    competition window whose start falls after its end is rejected with
+    422. ``presentation`` replaces the whole bag (read-modify-write,
+    mirroring the roster rows' bag). ``slug`` is immutable — it is the
+    key consumer URLs are built on.
     """
     changes = payload.model_dump(exclude_unset=True)
-    if "end_date" in changes or "grand_finals_date" in changes:
-        # Setting either window-end alias sets both columns — the expand-
-        # phase sync invariant. The schema already 422'd a body where the
-        # two disagree; end_date wins when both are present (same value).
-        window_end = changes.get("end_date", changes.get("grand_finals_date"))
-        changes["end_date"] = window_end
-        changes["grand_finals_date"] = window_end
     for field, value in changes.items():
         setattr(tournament, field, value)
 
@@ -570,7 +555,7 @@ async def _tournament_record_by_profile(
     """Map each profile to its stats within the tournament window.
 
     Pulls every completed match on the tournament's leaderboard whose
-    ``started_at`` falls inside ``[start_date, grand_finals_date]`` — a
+    ``started_at`` falls inside ``[start_date, end_date]`` — a
     null bound is treated as open — and folds it into one ``TournamentRecord``
     per profile: counts, current streak, longest win streak, peak rating,
     latest-match timestamp, a capped recent-results list, and the matching
@@ -645,8 +630,8 @@ async def _tournament_record_by_profile(
     )
     if tournament.start_date is not None:
         stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    if tournament.end_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.end_date)
 
     rows_by_profile: dict[int, list[Row]] = {}
     for row in (await session.execute(stmt)).all():
@@ -749,8 +734,8 @@ async def _longest_win_streak_run(
     )
     if tournament.start_date is not None:
         stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    if tournament.end_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.end_date)
     rows = (await session.execute(stmt)).all()
     return _longest_win_run([(r.outcome, r.completed_at) for r in rows])
 
@@ -791,8 +776,8 @@ async def _net_rating_change_by_profile(
     )
     if tournament.start_date is not None:
         stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    if tournament.end_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.end_date)
 
     ratings_by_profile: dict[int, list[int]] = {}
     for profile_id, new_rating in (await session.execute(stmt)).all():
@@ -810,7 +795,7 @@ async def _frozen_peak_by_profile(
 ) -> dict[int, int | None] | None:
     """As-of-window-end peak per profile once the window has closed, else ``None``.
 
-    ``None`` while ``grand_finals_date`` is unset or still ahead: the live
+    ``None`` while ``end_date`` is unset or still ahead: the live
     ``PlayerRating.max_rating`` *is* the ranking metric mid-event (lifetime
     peak and as-of-now peak are the same value), so callers keep their
     joined-row reads and this costs nothing on the hot in-event path.
@@ -841,9 +826,7 @@ async def _frozen_peak_by_profile(
     reachable for a window that closes while polling is live, since the
     baseline observation lands pre-bound.
     """
-    if tournament.grand_finals_date is None or datetime.now(UTC) < _to_utc(
-        tournament.grand_finals_date
-    ):
+    if tournament.end_date is None or datetime.now(UTC) < _to_utc(tournament.end_date):
         return None
     peaks: dict[int, int | None] = dict.fromkeys(profile_ids)
     if not profile_ids:
@@ -868,7 +851,7 @@ async def _frozen_peak_by_profile(
                 .where(
                     PlayerRatingSnapshot.leaderboard_id == tournament.leaderboard_id,
                     PlayerRatingSnapshot.profile_id.in_(profile_ids),
-                    PlayerRatingSnapshot.observed_at <= tournament.grand_finals_date,
+                    PlayerRatingSnapshot.observed_at <= tournament.end_date,
                 )
                 .group_by(PlayerRatingSnapshot.profile_id)
             )
@@ -895,7 +878,7 @@ async def _peak_rating_by_profile(
     While the window is open: ``PlayerRating.max_rating`` — the lifetime
     peak the standings PEAK column shows (the host's all-time-peak
     decision), the same source ``get_standings`` / ``get_standings_history``
-    read. Once ``grand_finals_date`` passes, the as-of-window-end peak via
+    read. Once ``end_date`` passes, the as-of-window-end peak via
     ``_frozen_peak_by_profile`` — the lifetime value keeps moving with
     post-window play, the result must not. ``None`` for a profile with no
     rating row on this leaderboard yet. Backs the summary
@@ -1012,7 +995,7 @@ async def get_standings(
     returned, so a tournament can rank on either. (#187 unified the old
     three-tier sort; #226 switched the rank key from current_rating to peak.)
 
-    Once ``grand_finals_date`` passes, the table is **final**: rank and the
+    Once ``end_date`` passes, the table is **final**: rank and the
     surfaced ``max_rating`` switch to the as-of-window-end peak
     (``_frozen_peak_by_profile``), so post-window ladder grinding — the
     roster keeps playing — can't reorder a result the playoff seeding came
@@ -1270,8 +1253,8 @@ async def _civ_counts_by_profile(
     )
     if tournament.start_date is not None:
         stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    if tournament.end_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.end_date)
 
     counts: dict[int, dict[int, list[int]]] = {}
     timestamps: list[datetime | None] = []
@@ -1291,7 +1274,7 @@ async def get_civ_stats(
     """Civilization pick/win aggregation for the tournament's entrants.
 
     Counts only the tournament players' completed matches on the tournament's
-    leaderboard, windowed to ``[start_date, grand_finals_date]`` (a null bound
+    leaderboard, windowed to ``[start_date, end_date]`` (a null bound
     is open) — their ladder opponents' civ rows are excluded. ``overall``
     aggregates across all entrants; ``by_player`` breaks the same counts down
     per roster row. ``picks`` is the completed games on a civ, ``wins`` the
@@ -1439,8 +1422,8 @@ async def get_summary(
     each naming the leading linked entrant and their value. ``highest_peak_rating``
     is the **one lifetime read**: it ranks by all-time ``PlayerRating.max_rating``
     (the host's all-time-peak decision, same as ``StandingRow.max_rating``),
-    frozen at the as-of-window-end value once ``grand_finals_date`` passes. The
-    other four are computed in-window (the same ``[start_date, grand_finals_date]``
+    frozen at the as-of-window-end value once ``end_date`` passes. The
+    other four are computed in-window (the same ``[start_date, end_date]``
     bounds as ``tournament_record``) over the tournament players' matches on its
     leaderboard. ``biggest_climber`` is the greatest **signed** in-window net
     rating change (last − first rated point), so it can be negative when the
@@ -1528,7 +1511,7 @@ async def get_summary(
         # The one lifetime card: ranks by all-time max_rating (the host's
         # all-time-peak decision, same as StandingRow.max_rating), NOT the
         # in-window record.peak_rating. Corrects #244. Frozen at the
-        # as-of-window-end value once grand_finals_date passes, like the
+        # as-of-window-end value once end_date passes, like the
         # standings PEAK column.
         highest_peak_rating=_summary_card(_pick_leader(candidates, lambda c: c.max_rating)),
         best_win_rate=_summary_card(
@@ -1570,7 +1553,7 @@ async def get_head_to_head(
 
     Each entry carries the matchup, map, each entrant's civ + elo-going-in +
     result, and the game's duration; the consumer builds the external match
-    link from ``match_id``. Window is the same ``[start_date, grand_finals_date]``
+    link from ``match_id``. Window is the same ``[start_date, end_date]``
     bounds as ``tournament_record`` (a null bound is open). Newest game first.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
@@ -1593,10 +1576,8 @@ async def get_head_to_head(
     )
     if tournament.start_date is not None:
         candidate_match_ids = candidate_match_ids.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        candidate_match_ids = candidate_match_ids.where(
-            Match.started_at <= tournament.grand_finals_date
-        )
+    if tournament.end_date is not None:
+        candidate_match_ids = candidate_match_ids.where(Match.started_at <= tournament.end_date)
     candidate_match_ids = candidate_match_ids.group_by(MatchPlayer.match_id).having(
         func.count(func.distinct(MatchPlayer.profile_id)) >= 2
     )
@@ -1667,7 +1648,7 @@ async def get_progression(
     plots rating against ``completed_at`` for a by-date view, or against
     point index for a by-games-played view. Players with no such history
     are omitted. Points are bounded by the tournament's date window
-    (``[start_date, grand_finals_date]``; a null bound is open), mirroring
+    (``[start_date, end_date]``; a null bound is open), mirroring
     ``tournament_record`` — so the chart reflects in-event rating movement,
     not a player's whole tracked history.
     """
@@ -1706,8 +1687,8 @@ async def get_progression(
     # history (which can reach back years). A null bound is treated as open.
     if tournament.start_date is not None:
         stmt = stmt.where(Match.started_at >= tournament.start_date)
-    if tournament.grand_finals_date is not None:
-        stmt = stmt.where(Match.started_at <= tournament.grand_finals_date)
+    if tournament.end_date is not None:
+        stmt = stmt.where(Match.started_at <= tournament.end_date)
     rows = (await session.execute(stmt)).all()
 
     series: dict[int, PlayerProgression] = {}
@@ -1863,8 +1844,8 @@ async def get_standings_history(
         )
         if tournament.start_date is not None:
             pts_stmt = pts_stmt.where(Match.started_at >= tournament.start_date)
-        if tournament.grand_finals_date is not None:
-            pts_stmt = pts_stmt.where(Match.started_at <= tournament.grand_finals_date)
+        if tournament.end_date is not None:
+            pts_stmt = pts_stmt.where(Match.started_at <= tournament.end_date)
         for profile_id, completed_at, new_rating, old_rating in (
             await session.execute(pts_stmt)
         ).all():
@@ -1934,10 +1915,8 @@ async def get_standings_history(
             )
             .order_by(PlayerRatingSnapshot.observed_at, PlayerRatingSnapshot.id)
         )
-        if tournament.grand_finals_date is not None:
-            snap_stmt = snap_stmt.where(
-                PlayerRatingSnapshot.observed_at <= tournament.grand_finals_date
-            )
+        if tournament.end_date is not None:
+            snap_stmt = snap_stmt.where(PlayerRatingSnapshot.observed_at <= tournament.end_date)
         start_utc = _to_utc(tournament.start_date) if tournament.start_date is not None else None
         for profile_id, observed_at, max_rating in (await session.execute(snap_stmt)).all():
             tp_id = tp_by_profile[profile_id]
@@ -2188,7 +2167,7 @@ async def get_team_standings(
     and a per-team civ pick/win aggregate, with the same per-member figures on
     each ``TeamMemberRead`` (#220).
 
-    Once ``grand_finals_date`` passes, member peaks — and therefore the
+    Once ``end_date`` passes, member peaks — and therefore the
     combined sums, the member order, and the team order — freeze at the
     as-of-window-end metric (``_frozen_peak_by_profile``), mirroring
     ``/standings``: the playoff seeding derives from this table, so

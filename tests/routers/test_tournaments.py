@@ -104,12 +104,12 @@ class TestGetTournamentDetail:
         assert body["leaderboard_id"] == 3
         assert body["start_date"].startswith("2026-06-01")
 
-    async def test_grand_finals_date_round_trips(self, client: AsyncClient, session: AsyncSession):
-        session.add(make_tournament("cup", grand_finals_date=datetime(2026, 6, 15, 18, tzinfo=UTC)))
+    async def test_end_date_round_trips(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup", end_date=datetime(2026, 6, 15, 18, tzinfo=UTC)))
         await session.commit()
 
         body = (await client.get("/v1/tournaments/cup")).json()
-        assert body["grand_finals_date"].startswith("2026-06-15T18")
+        assert body["end_date"].startswith("2026-06-15T18")
 
     async def test_prize_pool_cents_round_trips(self, client: AsyncClient, session: AsyncSession):
         session.add(make_tournament("cup", prize_pool_cents=512750))
@@ -489,7 +489,7 @@ class TestTournamentStandings:
 
 
 class TestStandingsFreezeAtWindowEnd:
-    """Past ``grand_finals_date`` the table is final: rank and the surfaced
+    """Past ``end_date`` the table is final: rank and the surfaced
     peak switch to the as-of-window-end metric (max recorded snapshot at-or-
     before the bound, live fallback, live clamp) so post-window ladder play
     can't reorder a result the playoff seeding derived from."""
@@ -528,9 +528,7 @@ class TestStandingsFreezeAtWindowEnd:
             )
         )
         session.add(
-            make_tournament(
-                "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
-            )
+            make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3, end_date=self._BOUND)
         )
         await session.commit()
 
@@ -563,7 +561,7 @@ class TestStandingsFreezeAtWindowEnd:
                 "cup",
                 profile_ids=[1, 2],
                 leaderboard_id=3,
-                grand_finals_date=datetime(2030, 1, 1, tzinfo=UTC),
+                end_date=datetime(2030, 1, 1, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -599,9 +597,7 @@ class TestStandingsFreezeAtWindowEnd:
             )
         )
         session.add(
-            make_tournament(
-                "cup", profile_ids=[1, 3], leaderboard_id=3, grand_finals_date=self._BOUND
-            )
+            make_tournament("cup", profile_ids=[1, 3], leaderboard_id=3, end_date=self._BOUND)
         )
         await session.commit()
 
@@ -623,9 +619,7 @@ class TestStandingsFreezeAtWindowEnd:
                 4, leaderboard_id=3, max_rating=1900, observed_at=self._IN_WINDOW
             )
         )
-        session.add(
-            make_tournament("cup", profile_ids=[4], leaderboard_id=3, grand_finals_date=self._BOUND)
-        )
+        session.add(make_tournament("cup", profile_ids=[4], leaderboard_id=3, end_date=self._BOUND))
         await session.commit()
 
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
@@ -656,7 +650,7 @@ class TestStandingsFreezeAtWindowEnd:
             )
         )
         tournament = make_tournament(
-            "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+            "cup", profile_ids=[1, 2], leaderboard_id=3, end_date=self._BOUND
         )
         for tracked in tournament.tracked_players:
             tracked.name = f"name{tracked.profile_id}"
@@ -1258,7 +1252,7 @@ class TestStandingsTournamentRecord:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
+                end_date=datetime(2026, 5, 10, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -1358,7 +1352,7 @@ class TestStandingsTournamentRecord:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
+                end_date=datetime(2026, 5, 10, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -1411,7 +1405,7 @@ class TestStandingsTournamentRecord:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 10, tzinfo=UTC),
+                end_date=datetime(2026, 5, 10, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -1760,7 +1754,7 @@ class TestHeadToHead:
                 profile_ids=[1, 2],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 20, tzinfo=UTC),
+                end_date=datetime(2026, 5, 20, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -1816,7 +1810,7 @@ class TestHeadToHead:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 1, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 31, tzinfo=UTC),
+                end_date=datetime(2026, 5, 31, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -1882,36 +1876,59 @@ class TestUpdateTournament:
         assert response.status_code == 200
         assert response.json()["start_date"] is None
 
-    async def test_can_set_grand_finals_date(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
+    async def test_can_set_end_date(self, client: AsyncClient, session: AsyncSession, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
         response = await client.patch(
             "/v1/tournaments/cup",
-            json={"grand_finals_date": "2026-06-15T18:00:00Z"},
+            json={"end_date": "2026-06-15T18:00:00Z"},
         )
         assert response.status_code == 200
-        assert response.json()["grand_finals_date"].startswith("2026-06-15T18")
+        assert response.json()["end_date"].startswith("2026-06-15T18")
 
-    async def test_can_clear_grand_finals_date_with_null(
+    async def test_can_clear_end_date_with_null(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         session.add(
             make_tournament(
                 "cup",
-                grand_finals_date=datetime(2026, 6, 15, 18, tzinfo=UTC),
+                end_date=datetime(2026, 6, 15, 18, tzinfo=UTC),
                 owner_ids=[DEFAULT_TEST_USER_ID],
             )
         )
         await session.commit()
 
-        response = await client.patch("/v1/tournaments/cup", json={"grand_finals_date": None})
+        response = await client.patch("/v1/tournaments/cup", json={"end_date": None})
         assert response.status_code == 200
-        assert response.json()["grand_finals_date"] is None
+        assert response.json()["end_date"] is None
+
+    async def test_legacy_grand_finals_date_key_gets_unknown_field_treatment(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The rename's contract phase removed the alias. A stale client
+        # sending it gets standard unknown-field treatment — ignored, no
+        # 500, and crucially no silent change to the real window bound —
+        # and the field no longer appears in responses.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(
+            make_tournament(
+                "cup",
+                end_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
+                owner_ids=[DEFAULT_TEST_USER_ID],
+            )
+        )
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup", json={"grand_finals_date": "2026-06-21T18:00:00Z"}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["end_date"].startswith("2026-06-16T18")
+        assert "grand_finals_date" not in body
 
     async def test_can_set_prize_pool_cents(
         self, client: AsyncClient, session: AsyncSession, auth_as
@@ -2048,7 +2065,7 @@ class TestUpdateTournament:
             "/v1/tournaments/cup",
             json={
                 "start_date": "2026-07-01T00:00:00Z",
-                "grand_finals_date": "2026-06-01T00:00:00Z",
+                "end_date": "2026-06-01T00:00:00Z",
             },
         )
         assert response.status_code == 422
@@ -2062,187 +2079,6 @@ class TestUpdateTournament:
 
         response = await client.patch("/v1/tournaments/cup", json={"name": None})
         assert response.status_code == 422
-
-
-class TestEndDateRenameExpandPhase:
-    """`end_date` is the canonical window end; `grand_finals_date` is its
-    deprecated alias mid-rename. Reads return both (same value); writes
-    accept either and set both; a body where they disagree 422s."""
-
-    async def test_reads_surface_both_aliases_with_the_same_value(
-        self, client: AsyncClient, session: AsyncSession
-    ):
-        session.add(make_tournament("cup", grand_finals_date=datetime(2026, 6, 16, 18, tzinfo=UTC)))
-        await session.commit()
-
-        body = (await client.get("/v1/tournaments/cup")).json()
-        assert body["end_date"].startswith("2026-06-16T18")
-        assert body["end_date"] == body["grand_finals_date"]
-
-    async def test_create_with_end_date_sets_both(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        response = await client.post(
-            "/v1/tournaments",
-            json={
-                "slug": "cup",
-                "name": "Cup",
-                "leaderboard_id": 3,
-                "end_date": "2026-06-16T18:00:00Z",
-            },
-        )
-        assert response.status_code == 201
-        body = response.json()
-        assert body["end_date"].startswith("2026-06-16T18")
-        assert body["grand_finals_date"] == body["end_date"]
-
-    async def test_create_with_legacy_alias_sets_both(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        response = await client.post(
-            "/v1/tournaments",
-            json={
-                "slug": "cup",
-                "name": "Cup",
-                "leaderboard_id": 3,
-                "grand_finals_date": "2026-06-16T18:00:00Z",
-            },
-        )
-        assert response.status_code == 201
-        body = response.json()
-        assert body["end_date"].startswith("2026-06-16T18")
-        assert body["grand_finals_date"] == body["end_date"]
-
-    async def test_create_with_disagreeing_aliases_is_rejected(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        response = await client.post(
-            "/v1/tournaments",
-            json={
-                "slug": "cup",
-                "name": "Cup",
-                "leaderboard_id": 3,
-                "end_date": "2026-06-16T18:00:00Z",
-                "grand_finals_date": "2026-06-21T18:00:00Z",
-            },
-        )
-        assert response.status_code == 422
-
-    async def test_create_with_agreeing_aliases_is_accepted(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        # A freshly regenerated client may echo both fields back.
-        auth_as(DEFAULT_TEST_USER_ID)
-        response = await client.post(
-            "/v1/tournaments",
-            json={
-                "slug": "cup",
-                "name": "Cup",
-                "leaderboard_id": 3,
-                "end_date": "2026-06-16T18:00:00Z",
-                "grand_finals_date": "2026-06-16T18:00:00Z",
-            },
-        )
-        assert response.status_code == 201
-
-    async def test_patch_end_date_moves_both(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        session.add(
-            make_tournament(
-                "cup",
-                grand_finals_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
-                owner_ids=[DEFAULT_TEST_USER_ID],
-            )
-        )
-        await session.commit()
-
-        response = await client.patch(
-            "/v1/tournaments/cup", json={"end_date": "2026-06-17T18:00:00Z"}
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["end_date"].startswith("2026-06-17T18")
-        assert body["grand_finals_date"] == body["end_date"]
-
-    async def test_patch_legacy_alias_moves_both(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        # An old client (or the pre-rename admin UI) keeps working and
-        # cannot desync the pair.
-        auth_as(DEFAULT_TEST_USER_ID)
-        session.add(
-            make_tournament(
-                "cup",
-                end_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
-                owner_ids=[DEFAULT_TEST_USER_ID],
-            )
-        )
-        await session.commit()
-
-        response = await client.patch(
-            "/v1/tournaments/cup", json={"grand_finals_date": "2026-06-17T18:00:00Z"}
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["end_date"].startswith("2026-06-17T18")
-        assert body["grand_finals_date"] == body["end_date"]
-
-    async def test_patch_disagreeing_aliases_is_rejected(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
-        await session.commit()
-
-        response = await client.patch(
-            "/v1/tournaments/cup",
-            json={
-                "end_date": "2026-06-16T18:00:00Z",
-                "grand_finals_date": "2026-06-21T18:00:00Z",
-            },
-        )
-        assert response.status_code == 422
-
-    async def test_patch_null_end_date_clears_both(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        session.add(
-            make_tournament(
-                "cup",
-                grand_finals_date=datetime(2026, 6, 16, 18, tzinfo=UTC),
-                owner_ids=[DEFAULT_TEST_USER_ID],
-            )
-        )
-        await session.commit()
-
-        response = await client.patch("/v1/tournaments/cup", json={"end_date": None})
-        assert response.status_code == 200
-        body = response.json()
-        assert body["end_date"] is None
-        assert body["grand_finals_date"] is None
-
-    async def test_window_validation_uses_end_date(
-        self, client: AsyncClient, session: AsyncSession, auth_as
-    ):
-        auth_as(DEFAULT_TEST_USER_ID)
-        response = await client.post(
-            "/v1/tournaments",
-            json={
-                "slug": "cup",
-                "name": "Cup",
-                "leaderboard_id": 3,
-                "start_date": "2026-06-20T00:00:00Z",
-                "end_date": "2026-06-16T18:00:00Z",
-            },
-        )
-        assert response.status_code == 422
-        assert "end_date" in response.json()["detail"]
 
 
 class TestTournamentPresentationBag:
@@ -2387,13 +2223,13 @@ class TestCreateTournament:
             json={
                 **self._BODY,
                 "start_date": "2026-06-01T00:00:00Z",
-                "grand_finals_date": "2026-06-15T18:00:00Z",
+                "end_date": "2026-06-15T18:00:00Z",
             },
         )
         assert response.status_code == 201
         body = response.json()
         assert body["start_date"].startswith("2026-06-01")
-        assert body["grand_finals_date"].startswith("2026-06-15T18")
+        assert body["end_date"].startswith("2026-06-15T18")
 
     async def test_optional_prize_pool_cents_round_trips(
         self, client: AsyncClient, session: AsyncSession, auth_as
@@ -2488,7 +2324,7 @@ class TestCreateTournament:
             json={
                 **self._BODY,
                 "start_date": "2026-07-01T00:00:00Z",
-                "grand_finals_date": "2026-06-01T00:00:00Z",
+                "end_date": "2026-06-01T00:00:00Z",
             },
         )
         assert response.status_code == 422
@@ -2592,7 +2428,7 @@ class TestProgression:
         assert body["last_polled_at"] is not None
 
     async def test_windowed_to_tournament_dates(self, client: AsyncClient, session: AsyncSession):
-        # Only matches whose started_at falls inside [start_date, grand_finals_date]
+        # Only matches whose started_at falls inside [start_date, end_date]
         # contribute points — a years-old match and one past the window are dropped,
         # mirroring tournament_record so the chart reflects in-event movement, not a
         # player's whole tracked history.
@@ -2639,7 +2475,7 @@ class TestProgression:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 6, 1, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 6, 30, tzinfo=UTC),
+                end_date=datetime(2026, 6, 30, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -2809,7 +2645,7 @@ class TestCivStats:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 15, tzinfo=UTC),
+                end_date=datetime(2026, 5, 15, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -3335,7 +3171,7 @@ class TestTournamentSummary:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 15, tzinfo=UTC),
+                end_date=datetime(2026, 5, 15, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -3482,7 +3318,7 @@ class TestTournamentSummary:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 5, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 5, 15, tzinfo=UTC),
+                end_date=datetime(2026, 5, 15, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -3572,7 +3408,7 @@ class TestStandingsHistory:
                 profile_ids=[1, 2],
                 leaderboard_id=3,
                 start_date=datetime(2026, 6, 1, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 6, 30, tzinfo=UTC),
+                end_date=datetime(2026, 6, 30, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -3729,7 +3565,7 @@ class TestStandingsHistory:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 6, 5, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 6, 10, tzinfo=UTC),
+                end_date=datetime(2026, 6, 10, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -3904,7 +3740,7 @@ class TestStandingsHistory:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=start,
-                grand_finals_date=datetime(2026, 6, 16, 18, 0, tzinfo=UTC),
+                end_date=datetime(2026, 6, 16, 18, 0, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -3987,7 +3823,7 @@ class TestStandingsHistory:
                 profile_ids=[1],
                 leaderboard_id=3,
                 start_date=datetime(2026, 6, 1, tzinfo=UTC),
-                grand_finals_date=datetime(2026, 6, 16, 18, 0, tzinfo=UTC),
+                end_date=datetime(2026, 6, 16, 18, 0, tzinfo=UTC),
             )
         )
         await session.commit()

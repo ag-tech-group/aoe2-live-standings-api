@@ -301,7 +301,7 @@ class TestTeamStandings:
 
 
 class TestTeamStandingsFreezeAtWindowEnd:
-    """Past ``grand_finals_date`` member peaks freeze at the as-of-window-end
+    """Past ``end_date`` member peaks freeze at the as-of-window-end
     metric, so the combined sums, member order, and team order all hold even
     when the roster keeps laddering — the playoff seeding came from this
     table (mirrors ``/standings``)."""
@@ -340,7 +340,7 @@ class TestTeamStandingsFreezeAtWindowEnd:
             )
         )
         tournament = make_tournament(
-            "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+            "cup", profile_ids=[1, 2], leaderboard_id=3, end_date=self._BOUND
         )
         tournament.teams = [
             make_team(tournament, "Red", profile_ids=[1]),
@@ -384,7 +384,7 @@ class TestTeamStandingsFreezeAtWindowEnd:
             )
         )
         tournament = make_tournament(
-            "cup", profile_ids=[1, 2], leaderboard_id=3, grand_finals_date=self._BOUND
+            "cup", profile_ids=[1, 2], leaderboard_id=3, end_date=self._BOUND
         )
         tournament.teams = [make_team(tournament, "Red", profile_ids=[1, 2])]
         session.add(tournament)
@@ -1009,7 +1009,7 @@ class TestTeamStandingsAggregates:
             profile_ids=[1],
             leaderboard_id=3,
             start_date=datetime(2026, 6, 5, tzinfo=UTC),
-            grand_finals_date=datetime(2026, 6, 30, tzinfo=UTC),
+            end_date=datetime(2026, 6, 30, tzinfo=UTC),
         )
         tournament.teams = [make_team(tournament, "Red", profile_ids=[1])]
         session.add(tournament)

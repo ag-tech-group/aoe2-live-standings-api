@@ -92,8 +92,8 @@ class TestGetMe:
         assert cup["name"] == "The Cup"
         assert cup["leaderboard_id"] == 3
         assert cup["start_date"].startswith("2026-06-01")
-        # grand_finals_date is part of TournamentRead (post-#44).
-        assert "grand_finals_date" in cup
+        # end_date is part of TournamentRead (post-#44).
+        assert "end_date" in cup
 
     async def test_owned_tournament_carries_host_stream_live(
         self, client: AsyncClient, session: AsyncSession, auth_as
