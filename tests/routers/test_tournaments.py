@@ -2064,6 +2064,102 @@ class TestUpdateTournament:
         assert response.status_code == 422
 
 
+class TestTournamentPresentationBag:
+    """The tournament-level opaque display bag: stored verbatim, replaced
+    whole on PATCH, surfaced on the list/detail reads. The FE defines the
+    keys (phase schedule, bracket, showmatch billing); the API never
+    interprets them."""
+
+    async def test_defaults_to_empty_bag(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup"))
+        await session.commit()
+        assert (await client.get("/v1/tournaments/cup")).json()["presentation"] == {}
+
+    async def test_owner_sets_bag_and_reads_round_trip(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        bag = {
+            "phase": "playoffs",
+            "schedule": [{"label": "Preliminary Round", "startsAt": "2026-06-18T16:00:00Z"}],
+            "bracket": {"rounds": []},
+        }
+        response = await client.patch("/v1/tournaments/cup", json={"presentation": bag})
+        assert response.status_code == 200
+        assert response.json()["presentation"] == bag
+        # Persisted and surfaced on both config reads, verbatim.
+        assert (await client.get("/v1/tournaments/cup")).json()["presentation"] == bag
+        items = (await client.get("/v1/tournaments")).json()
+        assert items[0]["presentation"] == bag
+
+    async def test_patch_replaces_the_whole_bag(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        await client.patch("/v1/tournaments/cup", json={"presentation": {"phase": "race"}})
+        response = await client.patch(
+            "/v1/tournaments/cup", json={"presentation": {"bracket": {"rounds": []}}}
+        )
+        # Replace, not merge — read-modify-write like the roster rows' bag.
+        assert response.json()["presentation"] == {"bracket": {"rounds": []}}
+
+    async def test_explicit_null_is_rejected(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"presentation": None})
+        assert response.status_code == 422
+
+    async def test_oversized_bag_is_rejected(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup", json={"presentation": {"blob": "x" * 16385}}
+        )
+        assert response.status_code == 422
+
+    async def test_non_owner_cannot_set_bag(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=["00000000-0000-0000-0000-0000000000bb"]))
+        await session.commit()
+
+        response = await client.patch(
+            "/v1/tournaments/cup", json={"presentation": {"phase": "playoffs"}}
+        )
+        assert response.status_code == 403
+
+    async def test_create_accepts_initial_bag(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments",
+            json={
+                "slug": "autumn-cup",
+                "name": "Autumn Cup",
+                "leaderboard_id": 3,
+                "presentation": {"phase": "announced"},
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["presentation"] == {"phase": "announced"}
+
+
 class TestCreateTournament:
     """POST /v1/tournaments — self-serve create, caller becomes owner."""
 

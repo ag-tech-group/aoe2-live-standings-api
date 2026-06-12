@@ -57,6 +57,15 @@ class Tournament(Base):
     # An empty list (the default) means host-live detection is off and
     # `host_stream_live` always reports false.
     host_stream_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Opaque tournament-level presentation data — phase schedule, bracket
+    # state, showmatch billing, announcement copy, whatever the frontend
+    # defines — set by an owner via PATCH and rendered by the consumer.
+    # The API stores it but never interprets it (a pass-through bag), so
+    # new display fields never need a migration. The tournament-level
+    # mirror of ``TournamentPlayer.presentation``: it's what lets an event
+    # transform for its post-window phases (playoffs, grand finals)
+    # without tournament-format concepts leaking into the API contract.
+    presentation: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

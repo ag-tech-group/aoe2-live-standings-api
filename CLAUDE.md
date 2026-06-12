@@ -51,10 +51,11 @@ The polling worker lives in `app/poller/`. It runs as the same Python process bu
 - Linking (was "promotion"): `PATCH {profile_id}` links an unlinked row to a polled identity — additive, the `name` is **kept** (no longer cleared). The link is immutable once set; 409 if the profile is already rostered.
 - `GET /players/{tournament_player_id}` returns the unified detail; an unlinked (or not-yet-polled) row carries empty polled enrichment rather than a 404.
 
-**The `presentation` bag** (a `dict` on `TournamentPlayer`):
+**The `presentation` bag** (a `dict` on `TournamentPlayer` *and*, tournament-level, on `Tournament`):
 - Opaque to the API. The FE defines the keys.
-- Current convention (FE consumes): `displayName`, `flag`, `streamUrls`, `bio`. Avoid changing key shape without coordinating with hera-streamer-invitational-2026-web#152.
-- The PATCH endpoint replaces the whole bag (read-modify-write). 8 KB size cap.
+- Per-player convention (FE consumes): `displayName`, `flag`, `streamUrls`, `bio`. Avoid changing key shape without coordinating with hera-streamer-invitational-2026-web#152.
+- The tournament-level bag carries event-wide display state — phase schedule, bracket, showmatch billing — so an event can transform for its post-window phases without API contract changes. Set via `PATCH /tournaments/{slug}`, returned on the tournament list/detail reads.
+- Both PATCH endpoints replace the whole bag (read-modify-write). Size caps: 8 KB per player, 16 KB per tournament. Audit logs record changed keys only, never bag contents.
 
 **Audit actions** (`AuditAction` in `app/audit.py`) are stable strings — downstream log queries pin to them. Never rename or remove a variant; only add. Targets carried in the payload: `target_user_id`, `target_profile_id`, `target_team_id`, `target_placeholder_name`, plus action-specific keys via `**extra`.
 

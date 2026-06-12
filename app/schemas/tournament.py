@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,6 +15,18 @@ _MAX_HOST_STREAM_URLS = 5
 # Enough for typical Twitch / YouTube URLs (vanity + handle paths);
 # keeps the JSON payload tight.
 _MAX_HOST_STREAM_URL_LENGTH = 256
+# Twice the per-player bag's 8 KB: the tournament-level bag carries the
+# whole event's display state (phase schedule + a full bracket + showmatch
+# billing), and a 422 on a mid-broadcast series-result PATCH is the
+# failure mode the headroom buys out of. Still small enough that the
+# config endpoints' CDN payload stays tight.
+_MAX_PRESENTATION_BYTES = 16384
+
+
+def _presentation_within_size_limit(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if value is not None and len(json.dumps(value).encode()) > _MAX_PRESENTATION_BYTES:
+        raise ValueError(f"presentation must serialize to <= {_MAX_PRESENTATION_BYTES} bytes")
+    return value
 
 
 def _validated_host_stream_urls(urls: list[str]) -> list[str]:
@@ -55,6 +69,11 @@ class TournamentRead(BaseModel):
     grand_finals_date: datetime | None
     prize_pool_cents: int | None
     host_stream_urls: list[str]
+    # Opaque tournament-level display bag (phase schedule, bracket state,
+    # showmatch billing — the consumer defines the keys, the API stores
+    # them verbatim). The tournament-level mirror of the roster rows'
+    # ``presentation``.
+    presentation: dict = Field(default_factory=dict)
     # Derived: any host channel currently broadcasting on any platform.
     # False when no host URLs are configured.
     host_stream_live: bool = False
@@ -86,6 +105,12 @@ class TournamentCreate(BaseModel):
         default_factory=list,
         max_length=_MAX_HOST_STREAM_URLS,
     )
+    presentation: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("presentation")
+    @classmethod
+    def _presentation_within_size_limit(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _presentation_within_size_limit(value)
 
     @field_validator("slug")
     @classmethod
@@ -109,9 +134,12 @@ class TournamentUpdate(BaseModel):
 
     Every field is optional; only the fields present in the request body
     are applied. ``start_date`` / ``grand_finals_date`` may be set to
-    ``null`` to clear them. ``name`` and ``leaderboard_id`` back non-
-    nullable columns, so an explicit ``null`` for either is rejected
-    with 422.
+    ``null`` to clear them. ``name``, ``leaderboard_id``, and
+    ``presentation`` back non-nullable columns, so an explicit ``null``
+    for any of them is rejected with 422.
+
+    ``presentation`` replaces the whole bag (read-modify-write, like the
+    roster rows' bag) — send ``{}`` to clear it.
 
     ``slug`` is intentionally not updatable — it is the routing key
     consumers' URLs are built from.
@@ -123,8 +151,9 @@ class TournamentUpdate(BaseModel):
     grand_finals_date: datetime | None = None
     prize_pool_cents: int | None = Field(default=None, ge=0)
     host_stream_urls: list[str] | None = Field(default=None, max_length=_MAX_HOST_STREAM_URLS)
+    presentation: dict[str, Any] | None = None
 
-    @field_validator("name", "leaderboard_id", "host_stream_urls")
+    @field_validator("name", "leaderboard_id", "host_stream_urls", "presentation")
     @classmethod
     def _reject_explicit_null(cls, value: object) -> object:
         # A field-validator runs only for fields actually present in the
@@ -133,6 +162,11 @@ class TournamentUpdate(BaseModel):
         if value is None:
             raise ValueError("may not be null")
         return value
+
+    @field_validator("presentation")
+    @classmethod
+    def _presentation_within_size_limit(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _presentation_within_size_limit(value)
 
     @field_validator("host_stream_urls")
     @classmethod
