@@ -88,7 +88,7 @@ class TournamentRecord(BaseModel):
     """A player's stats within a tournament's date window.
 
     Counts only completed matches on the tournament's leaderboard between
-    its ``start_date`` and ``grand_finals_date`` (a null bound is treated as open).
+    its ``start_date`` and ``end_date`` (a null bound is treated as open).
     Distinct from the lifetime-ladder ``wins`` / ``losses`` / ``streak`` /
     ``max_rating`` / ``last_match_at`` / ``recent_results`` on ``StandingRow``;
     every field here is in-window only.
@@ -320,7 +320,7 @@ class CivStats(BaseModel):
     ``overall`` sums each civ's picks/wins across all entrants; ``by_player``
     breaks the same counts down per roster row. Counts cover only the
     tournament players' completed matches on the tournament's leaderboard,
-    windowed to ``[start_date, grand_finals_date]`` (a null bound is open) —
+    windowed to ``[start_date, end_date]`` (a null bound is open) —
     their ladder opponents' rows are excluded. Civs with no entrant picks
     are absent from both lists. ``overall`` is ordered by picks desc then
     civ id; ``by_player`` by ``tournament_player_id``.
@@ -375,7 +375,7 @@ class TournamentSummary(BaseModel):
     ``highest_peak_rating``, ``best_win_rate``, ``longest_win_streak``,
     ``biggest_climber``, ``most_games_played``. Each names the leading roster
     entrant for one metric, computed in-window (the same
-    ``[start_date, grand_finals_date]`` bounds as ``tournament_record``) over
+    ``[start_date, end_date]`` bounds as ``tournament_record``) over
     linked entrants only — their ladder opponents' rows are excluded. (Peak
     rating is the one lifetime read; everything else, ``biggest_climber``
     included, is window-scoped.)

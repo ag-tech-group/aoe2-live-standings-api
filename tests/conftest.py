@@ -293,16 +293,9 @@ def make_tournament(
         "name": f"Tournament {slug}",
         "leaderboard_id": 3,
         "start_date": None,
-        "grand_finals_date": None,
+        "end_date": None,
     }
     defaults.update(overrides)
-    # Mirror the expand-phase sync invariant (every prod write path sets
-    # both window-end aliases; the migration backfilled existing rows):
-    # a test that seeds one alias gets the other for free.
-    if "end_date" not in overrides:
-        defaults["end_date"] = defaults["grand_finals_date"]
-    elif "grand_finals_date" not in overrides:
-        defaults["grand_finals_date"] = defaults["end_date"]
     tournament = Tournament(**defaults)
     # name is NOT NULL (#187); polled rows get a deterministic display label
     # mirroring prod, where Phase 1 backfilled name from the polled alias.

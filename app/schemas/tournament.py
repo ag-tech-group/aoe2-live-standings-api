@@ -6,36 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-_GRAND_FINALS_DEPRECATION = (
-    "Deprecated alias of end_date (mid-rename, expand phase). Reads return "
-    "both with the same value; writes accept either. Will be removed after "
-    "the current event ends."
-)
-
-
-def _window_end_aliases_agree(model: BaseModel) -> BaseModel:
-    """422 when one body carries both window-end aliases with different values.
-
-    During the rename's expand phase ``end_date`` and ``grand_finals_date``
-    are the same column pair kept in sync by every write path — a body
-    that sets them to two different values is a client bug, and silently
-    letting one win would mask it. Same-value duplication is tolerated
-    (a freshly regenerated client echoing both fields back).
-    """
-    fields_set = model.model_fields_set
-    if (
-        "end_date" in fields_set
-        and "grand_finals_date" in fields_set
-        and model.end_date != model.grand_finals_date  # type: ignore[attr-defined]
-    ):
-        raise ValueError(
-            "end_date and grand_finals_date are aliases during the rename; "
-            "send one (or the same value in both)"
-        )
-    return model
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # A handful of URLs is plenty for a real host (typically one Twitch
 # + one YouTube); the cap keeps the broadcast-live poller's quota
@@ -99,7 +70,6 @@ class TournamentRead(BaseModel):
     # matches count). The event's human schedule — playoffs, the actual
     # grand-finals date — is display data and lives in ``presentation``.
     end_date: datetime | None
-    grand_finals_date: datetime | None = Field(deprecated=_GRAND_FINALS_DEPRECATION)
     prize_pool_cents: int | None
     host_stream_urls: list[str]
     # Opaque tournament-level display bag (phase schedule, bracket state,
@@ -133,15 +103,12 @@ class TournamentCreate(BaseModel):
     leaderboard_id: int = Field(gt=0)
     start_date: datetime | None = None
     end_date: datetime | None = None
-    grand_finals_date: datetime | None = Field(default=None, deprecated=_GRAND_FINALS_DEPRECATION)
     prize_pool_cents: int | None = Field(default=None, ge=0)
     host_stream_urls: list[str] = Field(
         default_factory=list,
         max_length=_MAX_HOST_STREAM_URLS,
     )
     presentation: dict[str, Any] = Field(default_factory=dict)
-
-    _window_end_aliases_agree = model_validator(mode="after")(_window_end_aliases_agree)
 
     @field_validator("presentation")
     @classmethod
@@ -170,10 +137,9 @@ class TournamentUpdate(BaseModel):
 
     Every field is optional; only the fields present in the request body
     are applied. ``start_date`` / ``end_date`` may be set to ``null`` to
-    clear them (``grand_finals_date`` is ``end_date``'s deprecated alias —
-    setting either sets both). ``name``, ``leaderboard_id``, and
-    ``presentation`` back non-nullable columns, so an explicit ``null``
-    for any of them is rejected with 422.
+    clear them. ``name``, ``leaderboard_id``, and ``presentation`` back
+    non-nullable columns, so an explicit ``null`` for any of them is
+    rejected with 422.
 
     ``presentation`` replaces the whole bag (read-modify-write, like the
     roster rows' bag) — send ``{}`` to clear it.
@@ -186,12 +152,9 @@ class TournamentUpdate(BaseModel):
     leaderboard_id: int | None = Field(default=None, gt=0)
     start_date: datetime | None = None
     end_date: datetime | None = None
-    grand_finals_date: datetime | None = Field(default=None, deprecated=_GRAND_FINALS_DEPRECATION)
     prize_pool_cents: int | None = Field(default=None, ge=0)
     host_stream_urls: list[str] | None = Field(default=None, max_length=_MAX_HOST_STREAM_URLS)
     presentation: dict[str, Any] | None = None
-
-    _window_end_aliases_agree = model_validator(mode="after")(_window_end_aliases_agree)
 
     @field_validator("name", "leaderboard_id", "host_stream_urls", "presentation")
     @classmethod
