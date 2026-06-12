@@ -134,27 +134,53 @@ async def upsert_player_rating(session: AsyncSession, data: dict[str, Any]) -> N
 async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str, Any]]) -> int:
     """Append a ``PlayerRatingSnapshot`` for every changed ``max_rating``.
 
-    Must run *before* ``upsert_player_rating`` overwrites the stored rows —
-    the diff against the previous poll is what detects a change. A profile's
-    first-ever rating on a leaderboard also snapshots (its entry baseline for
-    future events). ``observed_at`` defaults to ``now()`` server-side.
+    The diff is against the **latest recorded snapshot** per
+    (profile, leaderboard) — not the live ``PlayerRating`` row — so the log
+    is self-seeding: a pair whose live row predates the snapshot table
+    (it shipped mid-event, #271) gets a baseline observation on its next
+    poll even though the value didn't change. That baseline is what lets
+    the post-window standings freeze treat "no snapshot at-or-before the
+    bound" as "the value never changed since recording began". Diffing
+    against the *latest* observation (not the max) keeps a rebase **down**
+    from re-appending forever: the lower value records once, then the next
+    poll's diff is clean.
 
     This is the recorded history of the ranking metric: upstream's
     ``highestrating`` is rebased/placement-filtered and cannot be
     reconstructed from the match log (#271), so ``/standings/history``
-    prefers these observations. Returns the number of rows appended.
+    prefers these observations. ``observed_at`` defaults to ``now()``
+    server-side. Returns the number of rows appended.
     """
     if not ratings:
         return 0
+    latest = (
+        select(
+            PlayerRatingSnapshot.profile_id,
+            PlayerRatingSnapshot.leaderboard_id,
+            PlayerRatingSnapshot.max_rating,
+            func.row_number()
+            .over(
+                partition_by=(
+                    PlayerRatingSnapshot.profile_id,
+                    PlayerRatingSnapshot.leaderboard_id,
+                ),
+                order_by=(
+                    PlayerRatingSnapshot.observed_at.desc(),
+                    PlayerRatingSnapshot.id.desc(),
+                ),
+            )
+            .label("rn"),
+        )
+        .where(PlayerRatingSnapshot.profile_id.in_({r["profile_id"] for r in ratings}))
+        .subquery()
+    )
     stored = {
         (profile_id, leaderboard_id): max_rating
         for profile_id, leaderboard_id, max_rating in (
             await session.execute(
-                select(
-                    PlayerRating.profile_id,
-                    PlayerRating.leaderboard_id,
-                    PlayerRating.max_rating,
-                ).where(PlayerRating.profile_id.in_({r["profile_id"] for r in ratings}))
+                select(latest.c.profile_id, latest.c.leaderboard_id, latest.c.max_rating).where(
+                    latest.c.rn == 1
+                )
             )
         ).all()
     }

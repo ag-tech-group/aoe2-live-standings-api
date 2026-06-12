@@ -53,9 +53,10 @@ async def tick_player_stats(
     async with session_maker() as session:
         for row in players:
             await upsert_player(session, row)
-        # Record max_rating changes BEFORE the upsert overwrites the stored
-        # value — the recorded metric history /standings/history replays
-        # (#271). After the players loop so the snapshot FK target exists.
+        # Record max_rating changes — the recorded metric history
+        # /standings/history replays (#271). The diff runs against the
+        # snapshot log itself, so ordering vs upsert_player_rating doesn't
+        # matter; after the players loop so the snapshot FK target exists.
         snapshots = await insert_rating_snapshots(session, ratings)
         for row in ratings:
             await upsert_player_rating(session, row)
