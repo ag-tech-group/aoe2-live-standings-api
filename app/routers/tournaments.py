@@ -809,6 +809,15 @@ async def _frozen_peak_by_profile(
     - clamped to the live ``max_rating`` either way — a recorded value
       above today's reported peak is rebased-away noise, the same clamp
       the history sweep applies (#271).
+
+    Known edge: a pair whose snapshots all postdate the bound also hits
+    the live fallback (the windowed query returns nothing), and live is
+    NOT provably the as-of-bound value there — that history is simply
+    unrecorded. Only reachable when recording starts after a window has
+    already closed: a tournament that ended before the self-seeding
+    recorder deployed, or a profile first linked/polled post-window. Not
+    reachable for a window that closes while polling is live, since the
+    baseline observation lands pre-bound.
     """
     if tournament.grand_finals_date is None or datetime.now(UTC) < _to_utc(
         tournament.grand_finals_date
