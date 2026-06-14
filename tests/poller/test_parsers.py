@@ -540,6 +540,90 @@ class TestParseMatchPlayerCiv:
         _, players, _ = parse_recent_matches(payload)
         assert players[0]["civilization_id"] == UNKNOWN_CIVILIZATION_ID
 
+    def test_civ_prefers_member_over_report_zero_default(self):
+        # `matchhistoryreportresults.civilization_id` silently falls back to 0
+        # (Armenians) for some random-civ games that never resolved upstream;
+        # `matchhistorymember.civilization_id` carries the real assignment.
+        # Real case: match 485296798 — PiG ("pigrandom") played Bohemians (4)
+        # but the report array said 0, so we rendered Armenians. Prefer the
+        # member value. Ground truth verified against aoe2insights.
+        payload = {
+            "matchHistoryStats": [
+                {
+                    "id": 485296798,
+                    "mapname": "Marketplace.rms",
+                    "matchtype_id": 6,
+                    "startgametime": 100,
+                    "completiontime": 200,
+                    "matchhistoryreportresults": [
+                        {
+                            "profile_id": 5735770,
+                            "civilization_id": 0,
+                            "teamid": 1,
+                            "resulttype": 1,
+                            "xpgained": 1,
+                        },
+                        {
+                            "profile_id": 1434678,
+                            "civilization_id": 34,
+                            "teamid": 0,
+                            "resulttype": 0,
+                            "xpgained": 1,
+                        },
+                    ],
+                    "matchhistorymember": [
+                        {
+                            "profile_id": 5735770,
+                            "civilization_id": 4,
+                            "oldrating": 1671,
+                            "newrating": 1690,
+                        },
+                        {
+                            "profile_id": 1434678,
+                            "civilization_id": 34,
+                            "oldrating": 1671,
+                            "newrating": 1652,
+                        },
+                    ],
+                }
+            ]
+        }
+        _, players, _ = parse_recent_matches(payload)
+        pig = next(p for p in players if p["profile_id"] == 5735770)
+        opponent = next(p for p in players if p["profile_id"] == 1434678)
+        assert pig["civilization_id"] == 4  # Bohemians, not 0/Armenians
+        assert opponent["civilization_id"] == 34  # Portuguese (arrays agree)
+
+    def test_civ_falls_back_to_report_when_member_lacks_civ(self):
+        # A member row without a `civilization_id` (older payloads) must not
+        # blank the civ — keep the report array's value rather than dropping
+        # to the sentinel.
+        payload = {
+            "matchHistoryStats": [
+                {
+                    "id": 2,
+                    "mapname": "Arabia.rms",
+                    "matchtype_id": 6,
+                    "startgametime": 100,
+                    "completiontime": 200,
+                    "matchhistoryreportresults": [
+                        {
+                            "profile_id": 1,
+                            "civilization_id": 16,
+                            "teamid": 0,
+                            "resulttype": 1,
+                            "xpgained": 5,
+                        },
+                    ],
+                    "matchhistorymember": [
+                        {"profile_id": 1, "oldrating": 1000, "newrating": 1010},
+                    ],
+                }
+            ]
+        }
+        _, players, _ = parse_recent_matches(payload)
+        assert players[0]["civilization_id"] == 16
+
 
 class TestMatchtypeToLeaderboardMap:
     def test_flattens_int_matchtype_lists(self):
