@@ -175,8 +175,19 @@ def parse_recent_matches(
         )
 
         # Two parallel per-player arrays — `matchhistoryreportresults` for
-        # outcome/civ/team/xp, `matchhistorymember` for Elo deltas. Merge
-        # them by profile_id so each MatchPlayer row carries the full set.
+        # outcome/team/xp, `matchhistorymember` for the civ and Elo deltas.
+        # Merge them by profile_id so each MatchPlayer row carries the full
+        # set.
+        #
+        # Civ comes from `matchhistorymember`, NOT `matchhistoryreportresults`:
+        # the report array's `civilization_id` silently falls back to 0 for
+        # some games — random-civ picks that never resolved upstream — which
+        # masquerades as a real Armenians pick (id 0). The member array carries
+        # the actually-assigned civ (verified vs aoe2insights + replays; e.g.
+        # match 485296798, PiG played Bohemians/4 but the report said 0). Same
+        # lie/truth split as `mapname` vs the options blob (#265). Fall back to
+        # the report value, then the sentinel, when the member row is absent
+        # (older payloads / surfaces without a member array).
         members_by_profile: dict[int, dict[str, Any]] = {
             m["profile_id"]: m for m in raw.get("matchhistorymember", [])
         }
@@ -187,7 +198,10 @@ def parse_recent_matches(
                 {
                     "match_id": match_id,
                     "profile_id": profile_id,
-                    "civilization_id": result.get("civilization_id", UNKNOWN_CIVILIZATION_ID),
+                    "civilization_id": member.get(
+                        "civilization_id",
+                        result.get("civilization_id", UNKNOWN_CIVILIZATION_ID),
+                    ),
                     "team_id": result.get("teamid", 0),
                     "outcome": _parse_outcome(result.get("resulttype")),
                     "old_rating": member.get("oldrating"),

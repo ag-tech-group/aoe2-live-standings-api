@@ -54,7 +54,8 @@ The Relic / World's Edge community backend returns rich JSON on simple GET reque
   - `leaderboardStats[]` — one row per leaderboard the player has touched, with `leaderboard_id`, `rating` (current Elo), `highestrating` (peak), `wins`, `losses`, `streak`, `drops`, `rank`, `ranktotal`, `regionrank`, `regionranktotal`, `lastmatchdate` (unix epoch seconds)
 
 - `GET /community/leaderboard/getRecentMatchHistory?title=age2&profile_ids=[199325]`
-  Up to N recent finished matches. Each match carries `id`, `mapname`, `matchtype_id`, `startgametime`, `completiontime`, plus two per-player arrays: `matchhistoryreportresults` (outcome, `civilization_id`, `xpgained`) and `matchhistorymember` (`oldrating` → `newrating`, snapshot of `wins`/`losses`/`streak` at the time of the match).
+  Up to N recent finished matches. Each match carries `id`, `mapname`, `matchtype_id`, `startgametime`, `completiontime`, plus two per-player arrays: `matchhistoryreportresults` (outcome, `xpgained`) and `matchhistorymember` (`civilization_id`, `oldrating` → `newrating`, snapshot of `wins`/`losses`/`streak` at the time of the match).
+  - **Read civ from `matchhistorymember`, not `matchhistoryreportresults`.** Both arrays carry a `civilization_id`, but the report array's value silently falls back to `0` (Armenians) for some random-civ games that never resolved upstream — masquerading as a real Armenians pick. The member array carries the actually-assigned civ. Same kind of lie as `mapname` (#265); verified against aoe2insights + replays (e.g. match `485296798`: report said `0`, member said `4`/Bohemians, which is what the player actually played).
 
 **Auth posture:** none observed. No login token, no API key, no rate-limit headers in tested responses. Rate-limit cadence still needs empirical probing.
 
