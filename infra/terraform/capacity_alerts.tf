@@ -153,23 +153,23 @@ resource "google_monitoring_alert_policy" "sql_connections_high" {
 
 # --- Cloud Run per-instance concurrent requests --------------------------
 #
-# Each api instance is sized for 800 concurrent requests
-# (`max_instance_request_concurrency = 800`). We alert on the active-instance
-# count climbing to 80% of the maxScale=40 ceiling (#195) — 32 instances. Above
-# this, Cloud Run keeps autoscaling toward 40, but the headroom is shrinking.
+# Each api instance is sized for 1000 concurrent requests
+# (`max_instance_request_concurrency = 1000`, #197). We alert on the active-
+# instance count climbing to 80% of the maxScale=100 ceiling — 80 instances.
+# Above this, Cloud Run keeps autoscaling toward 100, but the headroom shrinks.
 # Post-MCP the DB is no longer the constraint on scaling (the pooler decouples
 # num_backends from instance count), so the lever here is raising `maxScale` /
 # `max_instance_request_concurrency`, not a DB change.
 
 resource "google_monitoring_alert_policy" "run_concurrency_high" {
-  display_name = "Cloud Run api active instances > 32 (80% of maxScale=40)"
+  display_name = "Cloud Run api active instances > 80 (80% of maxScale=100)"
   combiner     = "OR"
   severity     = "WARNING"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
   conditions {
-    display_name = "max(active instances) > 32 sustained 5 minutes"
+    display_name = "max(active instances) > 80 sustained 5 minutes"
     condition_threshold {
       filter = join(" AND ", [
         "metric.type=\"run.googleapis.com/container/instance_count\"",
@@ -177,10 +177,10 @@ resource "google_monitoring_alert_policy" "run_concurrency_high" {
         "resource.labels.service_name=\"${google_cloud_run_v2_service.api.name}\"",
       ])
       # instance_count is per-state (idle/active); we alert on active-instance
-      # count reaching 32 — 80% of the 40-instance maxScale ceiling (#195).
+      # count reaching 80 — 80% of the 100-instance maxScale ceiling.
       duration        = "300s"
       comparison      = "COMPARISON_GT"
-      threshold_value = 32
+      threshold_value = 80
 
       aggregations {
         alignment_period   = "60s"
@@ -190,7 +190,7 @@ resource "google_monitoring_alert_policy" "run_concurrency_high" {
   }
 
   documentation {
-    content   = "The api service has more than 32 active Cloud Run instances (80% of the maxScale=40 ceiling, #195). At 800 concurrent requests/instance that's roughly 25,000+ concurrent SSE streams. If this fires, check (a) is real traffic this high (genuine host-live / finals ramp) or is something looping/retrying, (b) SSE seat utilization on the Cloud Run console. Since MCP decoupled DB connections from instance count, the next levers are raising `max_instance_count` or `max_instance_request_concurrency` — the DB pooler is no longer the blocker it was pre-#196."
+    content   = "The api service has more than 80 active Cloud Run instances (80% of the maxScale=100 ceiling). At 1000 concurrent requests/instance that's roughly 80,000+ concurrent SSE streams. If this fires, check (a) is real traffic this high (genuine host-live / finals ramp) or is something looping/retrying, (b) SSE seat utilization on the Cloud Run console. Since MCP decoupled DB connections from instance count, the next levers are the pooler's `max_pool_size` (sql.tf, currently 50 — the query-concurrency ceiling) or `max_instance_request_concurrency` — the DB pooler is no longer the blocker it was pre-#196."
     mime_type = "text/markdown"
   }
 }

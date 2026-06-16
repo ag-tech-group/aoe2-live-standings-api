@@ -63,20 +63,27 @@ resource "google_cloud_run_v2_service" "api" {
     max_instance_request_concurrency = 1000
 
     scaling {
-      # min=1 keeps a warm instance for the nudge poll loop. max=40 (#195)
-      # with concurrency=1000 gives 40,000 concurrent SSE seats' worth of
-      # capacity (~2.5x the saturated launch peak).
+      # min=1 keeps a warm instance for the nudge poll loop. max=100 (raised
+      # from 40 on 2026-06-16) with concurrency=1000 gives 100,000 concurrent
+      # SSE seats' worth of capacity. Rationale: the 2026-06-16 ladder-race
+      # close (Phase 1) peaked ONE revision at 35/40 instances (~88% of the old
+      # ceiling) carrying all traffic; the Phase 2 finals (Jun 18-21) — a live
+      # grand-finals cast, typically a bigger draw than a ladder grind — left
+      # too little headroom at 40. 100 covers well over 2x that observed peak
+      # (~2.8x), the conservative choice for an unpredictable finals draw.
       #
-      # Safe at 40 now that all DB access goes through Managed Connection
-      # Pooling (#196): num_backends is bounded by the pooler's server pool
-      # (tens), not instances x pool, so it no longer scales with maxScale or
-      # with deploy-flurry revision overlap. Nudges are polled via
-      # nudge_versions (no LISTEN), so there's no per-instance direct
-      # connection either. (Pre-pooling this was capped at 22 — peak backends
-      # ~= 8*maxScale + 6 would have blown past the 200 cap at 40; that ceiling
-      # is gone.) Supersedes the maxScale=22 connection-budget cap.
+      # DB-safe regardless of instance count: all api DB access goes through
+      # Managed Connection Pooling (#196), so num_backends is bounded by the
+      # pooler's server pool (max_pool_size=50, sql.tf), NOT instances x pool —
+      # it does not scale with maxScale or with deploy-flurry revision overlap.
+      # Nudges are polled via nudge_versions (no LISTEN), so there's no per-
+      # instance direct connection either. (Pre-pooling this was capped at 22 —
+      # peak backends ~= 8*maxScale + 6 would have blown past the old cap; that
+      # ceiling is gone, and max_connections is now 400.) NOTE: the pooler's
+      # max_pool_size=50 is the next axis to validate for 2x finals load — the
+      # query-concurrency ceiling, distinct from this instance/connection one.
       min_instance_count = 1
-      max_instance_count = 40
+      max_instance_count = 100
     }
 
     volumes {
