@@ -803,28 +803,37 @@ async def _frozen_peak_by_profile(
     Once the window closes the final table must stop moving: the roster
     keeps laddering after the race, and a post-window all-time high would
     reorder a result the playoff seeding was derived from. The frozen
-    metric per profile is:
+    metric per profile is the greatest of:
 
     - the highest recorded observation at-or-before the bound
-      (``player_rating_snapshots``, #271) — the same ratcheted source the
-      ``/standings/history`` sweep replays, so the live table and the
-      chart's final bucket keep agreeing after the race;
-    - else the live ``max_rating``: a pair with no snapshots at all has had
-      no metric change since snapshot recording began (the recorder appends
-      on every change *including the first observation*), so the live value
-      provably equals the as-of-bound value;
-    - clamped to the live ``max_rating`` either way — a recorded value
-      above today's reported peak is rebased-away noise, the same clamp
-      the history sweep applies (#271).
+      (``player_rating_snapshots``, #271) — the ratcheted source the
+      ``/standings/history`` sweep also replays;
+    - the highest settled rating from a game that had *started* by the
+      bound (``match_players`` joined on ``matches.started_at <=
+      end_date``): a game in progress at the buzzer still counts when it
+      finishes, but its snapshot is observed too late (poll time ~= finish
+      time) for the bullet above to catch it. This is the lone source that
+      can lift the frozen table above the ``/standings/history`` final
+      bucket, which is capped at the bound by construction — an in-flight
+      game has no pre-bound data point to chart;
 
-    Known edge: a pair whose snapshots all postdate the bound also hits
-    the live fallback (the windowed query returns nothing), and live is
-    NOT provably the as-of-bound value there — that history is simply
-    unrecorded. Only reachable when recording starts after a window has
-    already closed: a tournament that ended before the self-seeding
-    recorder deployed, or a profile first linked/polled post-window. Not
-    reachable for a window that closes while polling is live, since the
-    baseline observation lands pre-bound.
+    falling back to the live ``max_rating`` when neither source has a value
+    (a pair with no recorded history has had no metric change since
+    recording began — the recorder appends on every change *including the
+    first observation* — so live provably equals the as-of-bound value),
+    and clamped to the live ``max_rating`` regardless — a value above
+    today's reported peak is rebased-away noise, the same clamp the history
+    sweep applies (#271).
+
+    Known edge: a pair whose snapshots all postdate the bound and that
+    played no started-by-bound game also hits the live fallback (both
+    windowed queries return nothing), and live is NOT provably the
+    as-of-bound value there — that history is simply unrecorded. Only
+    reachable when recording starts after a window has already closed: a
+    tournament that ended before the self-seeding recorder deployed, or a
+    profile first linked/polled post-window. Not reachable for a window
+    that closes while polling is live, since the baseline observation lands
+    pre-bound.
     """
     if tournament.end_date is None or datetime.now(UTC) < _to_utc(tournament.end_date):
         return None
@@ -857,9 +866,41 @@ async def _frozen_peak_by_profile(
             )
         ).all()
     )
+    # A game already underway at the bound still counts when it settles: the
+    # buzzer caps which games *start*, not which finish. Such a game's
+    # settled rating lands in `match_players` windowed on `started_at <=
+    # end_date` — the same start-time bound the record uses
+    # (`_tournament_record_by_profile`) — but its `player_rating_snapshots`
+    # row is observed *after* the bound (poll time ~= finish time), so the
+    # snapshot query above can't see it. Fold the highest settled rating from
+    # any started-by-bound game into the peak to recover it. Reading the
+    # durable `matches` table makes this correct retroactively: the gain
+    # surfaces the moment the recent-matches poller records the finished
+    # game, even when that lands after the bound.
+    in_flight = dict(
+        (
+            await session.execute(
+                select(
+                    MatchPlayer.profile_id,
+                    func.max(MatchPlayer.new_rating),
+                )
+                .join(Match, Match.match_id == MatchPlayer.match_id)
+                .where(
+                    Match.leaderboard_id == tournament.leaderboard_id,
+                    MatchPlayer.profile_id.in_(profile_ids),
+                    MatchPlayer.new_rating.is_not(None),
+                    Match.started_at <= tournament.end_date,
+                )
+                .group_by(MatchPlayer.profile_id)
+            )
+        ).all()
+    )
     for profile_id in profile_ids:
         live_max = live.get(profile_id)
         peak = snapshots.get(profile_id)
+        started_by_bound = in_flight.get(profile_id)
+        if started_by_bound is not None and (peak is None or started_by_bound > peak):
+            peak = started_by_bound
         if peak is None:
             peak = live_max
         if live_max is not None and peak is not None and peak > live_max:

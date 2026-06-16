@@ -625,6 +625,78 @@ class TestStandingsFreezeAtWindowEnd:
         items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
         assert items[0]["max_rating"] == 1700
 
+    async def test_in_flight_game_at_bound_counts_when_it_settles(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A was mid-game at the buzzer: started 17:55 (pre-bound), settled
+        # 18:10 (post-bound) at a fresh 1900. Its snapshot is stamped
+        # post-bound, so the snapshot query alone would freeze A at its
+        # pre-bound 1800 and rank it under B's 1850. The game had started by
+        # the bound, so it counts when it finishes: A freezes at 1900, leads.
+        for profile_id, alias, live_max in ((1, "A", 1900), (2, "B", 1850)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=1500, max_rating=live_max
+                )
+            )
+            session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        session.add(
+            make_player_rating_snapshot(
+                2, leaderboard_id=3, max_rating=1850, observed_at=self._IN_WINDOW
+            )
+        )
+        match = make_match(
+            1,
+            started_at=datetime(2026, 5, 20, 17, 55, tzinfo=UTC),
+            completed_at=datetime(2026, 5, 20, 18, 10, tzinfo=UTC),
+        )
+        match.players.append(make_match_player(1, profile_id=1, new_rating=1900))
+        session.add(match)
+        session.add(
+            make_tournament("cup", profile_ids=[1, 2], leaderboard_id=3, end_date=self._BOUND)
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["A", "B"]
+        assert [row["max_rating"] for row in items] == [1900, 1850]
+
+    async def test_game_started_after_bound_is_excluded(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # The mirror of the buzzer-beater: a game that *started* after the
+        # bound must not leak its settled rating into the frozen peak. A
+        # peaked 1800 in-window, then started AND won a 1900 game well after
+        # the race — A freezes at 1800, not 1900.
+        player = make_player(1, alias="A")
+        player.ratings.append(
+            make_player_rating(1, leaderboard_id=3, current_rating=1500, max_rating=1900)
+        )
+        session.add(player)
+        session.add(
+            make_player_rating_snapshot(
+                1, leaderboard_id=3, max_rating=1800, observed_at=self._IN_WINDOW
+            )
+        )
+        match = make_match(
+            1,
+            started_at=self._POST_WINDOW,
+            completed_at=datetime(2026, 5, 25, 12, 30, tzinfo=UTC),
+        )
+        match.players.append(make_match_player(1, profile_id=1, new_rating=1900))
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3, end_date=self._BOUND))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert items[0]["max_rating"] == 1800
+
     async def test_summary_peak_card_freezes_with_the_table(
         self, client: AsyncClient, session: AsyncSession
     ):
