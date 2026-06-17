@@ -74,8 +74,10 @@ resource "google_sql_database_instance" "main_v2" {
     # client connections onto them — so api instance count no longer drives
     # num_backends. Reserve >=15 server conns/vCPU for the pooler (>=30 here);
     # max_connections=400 leaves ample room for the pooler pool + the per-
-    # instance direct LISTEN connections + the worker. Tune max_pool_size from
-    # the validation run (clone/staged) before raising maxScale (#195).
+    # instance direct LISTEN connections + the worker. Raised 50->100 on
+    # 2026-06-16 from observed prod peak (not a staged run): the ladder-race
+    # close ran 27 active server conns / 50 with ~0 client wait, so a 2x finals
+    # (~54 active) would exceed 50; 100 leaves clean headroom, still << 400.
     connection_pool_config {
       connection_pooling_enabled = true
       flags {
@@ -84,7 +86,7 @@ resource "google_sql_database_instance" "main_v2" {
       }
       flags {
         name  = "max_pool_size"
-        value = "50"
+        value = "100"
       }
     }
 
