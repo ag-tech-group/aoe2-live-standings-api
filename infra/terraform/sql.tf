@@ -45,10 +45,14 @@ resource "google_sql_database_instance" "main_v2" {
     tier      = "db-perf-optimized-N-2"
     disk_type = "PD_SSD"
     disk_size = 10
-    # REGIONAL: synchronous standby in a second zone for HA (~2x DB cost),
-    # chosen for finals uptime insurance. Combined with EP's near-zero-downtime
-    # maintenance, planned ops and zonal failures stay invisible to viewers.
-    availability_type = "REGIONAL"
+    # ZONAL for the post-event dormant period. REGIONAL's synchronous standby
+    # in a second zone (~2x DB compute) was finals uptime insurance; with the
+    # King's Gauntlet rated window closed (2026-06-16), the poller paused, and
+    # the instance serving only frozen-standings reads (~600 visitors/day, <5%
+    # CPU), HA buys nothing. This is an in-place update (no recreate, EP +
+    # Managed Connection Pooling preserved); apply triggers a brief failover
+    # blip. Restore "REGIONAL" before the next event's finals.
+    availability_type = "ZONAL"
 
     # Enterprise Plus data cache: extends the buffer pool onto local SSD. A
     # read-latency win for this read-heavy workload, included with EP.

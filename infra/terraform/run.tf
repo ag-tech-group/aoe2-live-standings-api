@@ -257,11 +257,18 @@ resource "google_cloud_run_v2_service" "worker" {
     service_account = google_service_account.cloud_run.email
 
     scaling {
-      # min=max=1 keeps the poller a strict singleton. A second instance
-      # would duplicate every upstream call and double-write to the same
-      # DB rows. Multi-instance polling needs leader-election / cron we
-      # haven't built (and may never need at this scale).
-      min_instance_count = 1
+      # POLLER PAUSED (min=0) for the post-event dormant period. The only
+      # tournament (King's Gauntlet) closed its rated window 2026-06-16 and
+      # standings freeze at window-end, so there is nothing live to poll. The
+      # worker has no public invoker, so min=0 lets Cloud Run scale the
+      # singleton to zero and nothing wakes it — the always-on worker cost
+      # (1 vCPU, cpu_idle=false) drops to ~$0. Polled tables refill from
+      # upstream within one poll cycle on re-enable.
+      #
+      # To resume for the next event: set min_instance_count = 1 (max stays 1 —
+      # the pollers must remain a strict singleton; a second instance would
+      # duplicate every upstream call and double-write the same DB rows).
+      min_instance_count = 0
       max_instance_count = 1
     }
 
