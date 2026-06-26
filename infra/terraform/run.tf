@@ -27,6 +27,14 @@ resource "google_cloud_run_v2_service" "api" {
   name     = var.service_name
   location = var.region
 
+  # Dormant: internal-only ingress rejects every external caller (uptime probes,
+  # stale browser tabs, bots) at the infrastructure layer, before any container
+  # starts. Combined with min=0 and no internal callers, the api holds at zero
+  # instances — Cloud Run's equivalent of "off". This stops both the cold-start
+  # churn and the Sentry error flood the idled-but-reachable api produced against
+  # the stopped DB. Restore "INGRESS_TRAFFIC_ALL" for the next event.
+  ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+
   template {
     service_account = google_service_account.cloud_run.email
 
