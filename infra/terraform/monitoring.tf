@@ -241,6 +241,14 @@ resource "google_monitoring_alert_policy" "poller_stalled" {
   combiner     = "OR"
   severity     = "CRITICAL"
 
+  # DISABLED for the post-event dormant period (2026-06-26, #285). The worker
+  # is intentionally paused (run.tf worker min=0), so the pollers emit no
+  # `poll_<task>_ok` heartbeats and this `condition_absent` policy would fire
+  # continuously to Sentry — false alarms by construction, not a real stall.
+  # Re-enable (set true / delete this line) when the poller is restored for the
+  # next event, alongside run.tf min=1 and sql.tf REGIONAL.
+  enabled = false
+
   depends_on = [time_sleep.wait_for_metric_propagation]
 
   # Routed to Sentry Pub/Sub since the 2026-06-01 outage: the worker
