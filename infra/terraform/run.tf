@@ -82,7 +82,9 @@ resource "google_cloud_run_v2_service" "api" {
       # ceiling is gone, and max_connections is now 400.) NOTE: the pooler's
       # max_pool_size=50 is the next axis to validate for 2x finals load — the
       # query-concurrency ceiling, distinct from this instance/connection one.
-      min_instance_count = 1
+      # Dormant (post-event): idled to 0 — the FE is fully static, so the api
+      # takes no live reads. Restore to 1 for the next event.
+      min_instance_count = 0
       max_instance_count = 100
     }
 

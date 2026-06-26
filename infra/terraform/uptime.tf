@@ -105,6 +105,11 @@ resource "google_monitoring_alert_policy" "uptime" {
   combiner     = "OR"
   severity     = "CRITICAL"
 
+  # DISABLED for the dormant period: the DB is stopped and the api idled, so the
+  # read endpoints intentionally error — this policy would otherwise email a
+  # "site down" alert every minute. Re-enable with the backend for the next event.
+  enabled = false
+
   notification_channels = [google_monitoring_notification_channel.email.id]
 
   dynamic "conditions" {
