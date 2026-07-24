@@ -9,10 +9,64 @@
 # and the built-in Auth Proxy Unix socket at /cloudsql/<connection_name> (the
 # Alembic migrate job).
 
+locals {
+  # DELETED for the post-event dormant period (2026-07-23, follow-up to the
+  # PR #289 cost cleanup): a *stopped* instance still bills ~$9-10/mo —
+  # storage (~$2) plus the public IP at the idle rate ($0.01/h ≈ $7/mo) —
+  # which floored the dormant bill. The final state was exported to
+  # gs://aoe2-live-standings-api-db-archive/final/ (verified before deletion)
+  # and the gcloud deletion retained a final backup as a second copy.
+  #
+  # Resurrection for the next event:
+  #   1. Flip this to false and `tofu apply` — recreates instance + database +
+  #      user with the same names and the same password (random_password.db_user
+  #      persists in state, and the database-url / db-app-password secrets were
+  #      never touched). NOTE: Cloud SQL blocks reusing a deleted instance's
+  #      name for ~1 week after deletion; resurrect later than that (or bump
+  #      the -vN suffix and the locals below).
+  #   2. Import the archive dump (schema + data, incl. alembic_version, so
+  #      deploys/migrations resume cleanly):
+  #        gcloud sql import sql aoe2-standings-db-v2 \
+  #          gs://aoe2-live-standings-api-db-archive/final/<dump>.sql.gz \
+  #          --database=aoe2_live_standings
+  #   3. Restore the rest of the stack per #285-#288 in reverse (worker min=1,
+  #      ingress, REGIONAL if finals-grade) and re-enable the dormant-disabled
+  #      alert policies + uptime checks (capacity_alerts.tf, monitoring.tf,
+  #      uptime.tf).
+  sql_instance_deleted = true
+
+  # Literal identity of main_v2. Consumers (run.tf, jobs.tf, secrets.tf,
+  # outputs.tf, dashboard.tf, capacity_alerts.tf) reference these locals
+  # rather than resource attributes so the dormant deletion of the instance
+  # resource doesn't cascade into them — every string is deterministic from
+  # project/region/name. `database_id` metric labels are "project:instance"
+  # (no region); the connection name is "project:region:instance".
+  sql_instance_name_v2   = "${var.db_instance_name}-v2"
+  sql_connection_name_v2 = "${var.project_id}:${var.region}:${local.sql_instance_name_v2}"
+}
+
+# Long-term archive for database exports — currently the final pre-deletion
+# dump (the resurrection artifact). Regional + versioned-off + tiny (~one
+# compressed dump): effectively $0/mo.
+resource "google_storage_bucket" "db_archive" {
+  name                        = "${var.project_id}-db-archive"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  # The dump is the only low-friction path back to the event's data — don't
+  # let a careless destroy eat it.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 # Random app-user password, persisted to Terraform state (encrypted at rest in
 # the GCS backend) and shared by main_v2's app user and both DB secrets
 # (database-url, db-app-password). Rotating requires
 # `tofu taint random_password.db_user` + apply + redeploy.
+# Survives the dormant instance deletion on purpose: the recreated user gets
+# the same password, so the untouched secrets stay correct.
 resource "random_password" "db_user" {
   length  = 32
   special = false # asyncpg URL-quoting is easier without symbols
@@ -35,7 +89,10 @@ resource "random_password" "db_user" {
 # few server backends. The Alembic migrate job stays on the DIRECT unix socket
 # (transaction pooling drops advisory locks) — see secrets.tf (database-url).
 resource "google_sql_database_instance" "main_v2" {
-  name             = "${var.db_instance_name}-v2"
+  # Gated by the dormant deletion — see the sql_instance_deleted local above.
+  count = local.sql_instance_deleted ? 0 : 1
+
+  name             = local.sql_instance_name_v2
   database_version = "POSTGRES_16"
   region           = var.region
 
@@ -119,15 +176,19 @@ resource "google_sql_database_instance" "main_v2" {
 }
 
 resource "google_sql_database" "app_v2" {
+  count = local.sql_instance_deleted ? 0 : 1
+
   name     = var.db_name
-  instance = google_sql_database_instance.main_v2.name
+  instance = google_sql_database_instance.main_v2[0].name
 }
 
 # Reuse the same generated app password (random_password.db_user, formerly also
 # the retired `main`'s user) so the DATABASE_URL secret format and the connector
 # path share one credential.
 resource "google_sql_user" "app_v2" {
+  count = local.sql_instance_deleted ? 0 : 1
+
   name     = var.db_user
-  instance = google_sql_database_instance.main_v2.name
+  instance = google_sql_database_instance.main_v2[0].name
   password = random_password.db_user.result
 }

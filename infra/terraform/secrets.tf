@@ -38,12 +38,16 @@ resource "google_secret_manager_secret_version" "database_url" {
   # DSN is the Alembic migrate job. ROLLBACK: change the four refs back to
   # `.app` / `.main` and re-apply (Cloud Run picks up the new "latest" version
   # on the next revision roll); both sockets stay mounted, so no re-mount.
+  # Composed from vars/locals (identical strings to the old resource-attribute
+  # references) so the dormant SQL instance deletion doesn't cascade here —
+  # the stored version stays byte-identical and the idle services'
+  # secret_key_ref stays valid.
   secret_data = format(
     "postgresql+asyncpg://%s:%s@/%s?host=/cloudsql/%s",
-    google_sql_user.app_v2.name,
+    var.db_user,
     random_password.db_user.result,
-    google_sql_database.app_v2.name,
-    google_sql_database_instance.main_v2.connection_name,
+    var.db_name,
+    local.sql_connection_name_v2,
   )
 }
 

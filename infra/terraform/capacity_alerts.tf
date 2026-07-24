@@ -52,7 +52,7 @@ resource "google_monitoring_alert_policy" "sql_cpu_high" {
       filter = join(" AND ", [
         "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\"",
         "resource.type=\"cloudsql_database\"",
-        "resource.labels.database_id=\"${var.project_id}:${google_sql_database_instance.main_v2.name}\"",
+        "resource.labels.database_id=\"${var.project_id}:${local.sql_instance_name_v2}\"",
       ])
       duration        = "300s" # 5 minutes (whole-minute required)
       comparison      = "COMPARISON_GT"
@@ -112,7 +112,7 @@ resource "google_monitoring_alert_policy" "sql_connections_climbing" {
       filter = join(" AND ", [
         "metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\"",
         "resource.type=\"cloudsql_database\"",
-        "resource.labels.database_id=\"${var.project_id}:${google_sql_database_instance.main_v2.name}\"",
+        "resource.labels.database_id=\"${var.project_id}:${local.sql_instance_name_v2}\"",
       ])
       duration        = "60s"
       comparison      = "COMPARISON_GT"
@@ -147,7 +147,7 @@ resource "google_monitoring_alert_policy" "sql_connections_high" {
       filter = join(" AND ", [
         "metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\"",
         "resource.type=\"cloudsql_database\"",
-        "resource.labels.database_id=\"${var.project_id}:${google_sql_database_instance.main_v2.name}\"",
+        "resource.labels.database_id=\"${var.project_id}:${local.sql_instance_name_v2}\"",
       ])
       duration        = "300s"
       comparison      = "COMPARISON_GT"
