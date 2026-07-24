@@ -160,6 +160,12 @@ resource "google_monitoring_alert_policy" "sse_seat_leak" {
   combiner     = "OR"
   severity     = "WARNING"
 
+  # DISABLED for the post-event dormant period (2026-07-23): the api is pinned
+  # to zero instances so there are no SSE seats to leak, and enabled policies
+  # bill per metric reference. Re-enable for the next event (cf. poller_stalled
+  # below and capacity_alerts.tf).
+  enabled = false
+
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
   conditions {
@@ -305,6 +311,11 @@ resource "google_monitoring_alert_policy" "upstream_rate_limited" {
   combiner     = "OR"
   severity     = "WARNING"
 
+  # DISABLED for the post-event dormant period (2026-07-23): the worker is
+  # paused (min=0) so no upstream calls happen, and enabled policies bill per
+  # metric reference. Re-enable for the next event (cf. poller_stalled).
+  enabled = false
+
   depends_on = [time_sleep.wait_for_metric_propagation]
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
@@ -354,6 +365,11 @@ resource "google_monitoring_alert_policy" "api_429_storm" {
   display_name = "API 429 rate-limit storm (viewers being rejected)"
   combiner     = "OR"
   severity     = "CRITICAL"
+
+  # DISABLED for the post-event dormant period (2026-07-23): the api is
+  # internal-only at zero instances — no viewers to reject — and enabled
+  # policies bill per metric reference. Re-enable for the next event.
+  enabled = false
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 

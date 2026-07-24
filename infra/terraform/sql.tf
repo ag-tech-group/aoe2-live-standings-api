@@ -56,8 +56,13 @@ resource "google_sql_database_instance" "main_v2" {
 
     # STOPPED for the dormant period: the FE now serves the frozen event fully
     # static (hera-streamer-invitational-2026-web#375), so nothing reads this
-    # DB. "NEVER" halts compute billing — only storage (~$2/mo) remains, and all
-    # data is preserved on disk. Restart for the next event: set "ALWAYS".
+    # DB. "NEVER" halts compute billing but NOT everything: storage (~$2/mo),
+    # retained backups, and — the big one — the public IP, which bills at the
+    # idle rate ($0.01/h ≈ $7/mo) the whole time the instance is stopped. A
+    # stopped instance therefore floors at ~$9-10/mo; the only lower state is
+    # deleting it (with a retained final backup + GCS export) and restoring
+    # for the next event. All data is preserved on disk while stopped.
+    # Restart for the next event: set "ALWAYS".
     activation_policy = "NEVER"
 
     # Enterprise Plus data cache: extends the buffer pool onto local SSD. A

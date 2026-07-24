@@ -20,6 +20,12 @@
 #   - The Cloud Run concurrency policy was rescaled for the maxScale 20→40 bump
 #     (#195).
 # Thresholds are tuned for "warning, look at it," not "page someone."
+#
+# DORMANT (2026-07-23): all four policies below are `enabled = false` for the
+# post-event freeze — the DB is stopped and the api pinned to zero instances,
+# so there is no capacity to watch, and enabled policies bill $0.35/month per
+# metric reference. The definitions stay (they are the permanent set); flip
+# them back on with the stack for the next event.
 
 # --- Cloud SQL CPU pressure ----------------------------------------------
 #
@@ -34,6 +40,9 @@ resource "google_monitoring_alert_policy" "sql_cpu_high" {
   display_name = "Cloud SQL CPU > 70% (main_v2)"
   combiner     = "OR"
   severity     = "WARNING"
+
+  # DISABLED for the dormant period (2026-07-23) — see file header.
+  enabled = false
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
@@ -92,6 +101,9 @@ resource "google_monitoring_alert_policy" "sql_connections_climbing" {
   combiner     = "OR"
   severity     = "WARNING"
 
+  # DISABLED for the dormant period (2026-07-23) — see file header.
+  enabled = false
+
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
   conditions {
@@ -123,6 +135,9 @@ resource "google_monitoring_alert_policy" "sql_connections_high" {
   display_name = "Cloud SQL active connections > 80 (leak / pooler bypass)"
   combiner     = "OR"
   severity     = "CRITICAL"
+
+  # DISABLED for the dormant period (2026-07-23) — see file header.
+  enabled = false
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
@@ -165,6 +180,9 @@ resource "google_monitoring_alert_policy" "run_concurrency_high" {
   display_name = "Cloud Run api active instances > 80 (80% of maxScale=100)"
   combiner     = "OR"
   severity     = "WARNING"
+
+  # DISABLED for the dormant period (2026-07-23) — see file header.
+  enabled = false
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
