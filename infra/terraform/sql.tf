@@ -11,9 +11,13 @@
 
 locals {
   # DELETED for the post-event dormant period (2026-07-23, follow-up to the
-  # PR #289 cost cleanup): a *stopped* instance still bills ~$9-10/mo —
-  # storage (~$2) plus the public IP at the idle rate ($0.01/h ≈ $7/mo) —
-  # which floored the dormant bill. The final state was exported to
+  # PR #289 cost cleanup): a *stopped* instance of this shape still bills
+  # ~$70/mo — dominated by the EP data cache, whose tier-fixed 375 GiB of
+  # local SSD keeps billing while stopped ($0.000219178/GiB-h ≈ $60/mo),
+  # plus the idle public IP ($0.01/h ≈ $7/mo), disk, and retained backups.
+  # This WAS the July 2026 dormant bill: $50.77 for Jul 1-23,
+  # "predominantly Cloud SQL" per billing support. The final state was
+  # exported to
   # gs://aoe2-live-standings-api-db-archive/final/ (verified before deletion)
   # and the gcloud deletion retained a final backup as a second copy.
   #
@@ -113,19 +117,26 @@ resource "google_sql_database_instance" "main_v2" {
 
     # STOPPED for the dormant period: the FE now serves the frozen event fully
     # static (hera-streamer-invitational-2026-web#375), so nothing reads this
-    # DB. "NEVER" halts compute billing but NOT everything: storage (~$2/mo),
-    # retained backups, and — the big one — the public IP, which bills at the
-    # idle rate ($0.01/h ≈ $7/mo) the whole time the instance is stopped. A
-    # stopped instance therefore floors at ~$9-10/mo; the only lower state is
-    # deleting it (with a retained final backup + GCS export) and restoring
-    # for the next event. All data is preserved on disk while stopped.
+    # DB. "NEVER" halts compute (vCPU/RAM) billing but NOT everything — and
+    # the remainder is dominated by the EP data cache below: its tier-fixed
+    # 375 GiB of local SSD keeps billing while stopped ($0.000219178/GiB-h
+    # ≈ $60/mo), plus the public IP at the idle rate ($0.01/h ≈ $7/mo),
+    # disk (~$2/mo) and retained backups. A stopped instance of this shape
+    # therefore floors at ~$70/mo (July 2026 actual: $50.77 for Jul 1-23,
+    # "predominantly Cloud SQL" per billing support) — deleting it is the
+    # only lower state. All data is preserved on disk while stopped.
     # Restart for the next event: set "ALWAYS".
     activation_policy = "NEVER"
 
-    # Enterprise Plus data cache: extends the buffer pool onto local SSD. A
-    # read-latency win for this read-heavy workload, included with EP.
+    # Enterprise Plus data cache: extends the buffer pool onto local SSD
+    # (tier-fixed 375 GiB on N-2). NOT "included with EP" as previously
+    # claimed here — it bills separately ($0.000219178/GiB-h ≈ $60/mo) and
+    # keeps billing while the instance is STOPPED; it was the bulk of the
+    # July 2026 dormant bill. Managed Connection Pooling does not need it.
+    # Default OFF: enable deliberately for finals-grade read latency, and
+    # disable again as part of the post-event scale-down.
     data_cache_config {
-      data_cache_enabled = true
+      data_cache_enabled = false
     }
 
     backup_configuration {

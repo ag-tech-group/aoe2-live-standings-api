@@ -13,24 +13,25 @@
 # regions report a failure for ≥2 minutes. Routed to the same email
 # channel the polling-worker alerts and budget notifications use.
 #
-# COST MODEL — measured, not the naive one (July 2026 budget incident):
-# each selected region executes ~6 probes per period (multiple static-IP
-# checkers per region probe independently), so billable executions ≈
-# checks × regions × 6 × periods. At the original 60s period that was
-# 4 × 3 × 6 × 43,200 ≈ 3.2M executions/month against a free allotment of
-# 1M/project/month, with overage billed at $0.30/1k ≈ $660/month — this
-# dominated the June and July 2026 bills (July was ~97% uptime checks,
-# probing a deliberately-dead endpoint). The 300s period below keeps the
-# full four-check set at ~640k/month ≈ $0. After changing check shape,
-# verify real volume with ALIGN_COUNT on `uptime_check/check_passed`.
+# COST MODEL (corrected 2026-07-24 against billing actuals): billing
+# counts SCHEDULED executions — checks × regions × (seconds/period) — so
+# this set is 4 × 3 × 43,200 ≈ 518k/month at the 60s period, inside the
+# 1M-executions/project/month free allotment; billing support confirmed
+# the July 2026 SKU at $0.00. Do NOT size cost from ALIGN_COUNT on
+# `uptime_check/check_passed`: the metric records ~6 samples per period
+# per region (multiple checker IPs), ~6× the billable count — reading it
+# as billable volume produced a false "$660/month" attribution during
+# the July 2026 dormant-cost investigation. The actual driver was the
+# stopped Cloud SQL instance's data cache + idle IP (see sql.tf).
 
 locals {
   # PAUSED for the post-event dormant period (2026-07-23): the api is
-  # internal-only at zero instances, the alert policy below was already
-  # disabled (#287), and uptime checks have no off switch — deleting the
-  # configs is the only way to stop per-execution billing (~$28/day at
-  # the 60s period; see cost model above). Set false to recreate the
-  # checks + alert policy for the next event.
+  # internal-only at zero instances and the alert policy was already
+  # disabled (#287), so the probes exercised a deliberately-dead endpoint
+  # and fed nothing. At this shape they bill $0 (see cost model), so this
+  # is hygiene rather than savings; uptime checks have no off switch,
+  # hence deletion. Set false to recreate the checks + alert policy for
+  # the next event.
   uptime_checks_paused = true
 }
 
@@ -79,10 +80,9 @@ resource "google_monitoring_uptime_check_config" "endpoint" {
   display_name = "aoe2 — ${each.key}"
 
   timeout = "10s"
-  # 300s (not 60s) keeps all four checks inside the 1M/month free
-  # allotment (~640k executions/month — see cost model in the header).
-  # Worst-case detection latency rises to ~5-8 minutes, acceptable here.
-  period = "300s"
+  # 60s is already inside the free allotment at this check count (see
+  # cost model) — no reason to trade detection latency for cost.
+  period = "60s"
   selected_regions = [
     "USA_OREGON",
     "USA_IOWA",
