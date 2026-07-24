@@ -86,7 +86,7 @@ resource "google_cloud_run_v2_job" "migrate" {
           # main_v2's socket only — the migrate job's DATABASE_URL targets
           # main_v2. `main` was dropped here when it was retired (#254).
           instances = [
-            google_sql_database_instance.main_v2.connection_name,
+            local.sql_connection_name_v2,
           ]
         }
       }

@@ -103,7 +103,7 @@ resource "google_cloud_run_v2_service" "api" {
         # was retired (#254) — it had been kept only as a no-re-mount rollback
         # target during the #196 cutover soak.
         instances = [
-          google_sql_database_instance.main_v2.connection_name,
+          local.sql_connection_name_v2,
         ]
       }
     }
@@ -177,7 +177,7 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "DB_INSTANCE_CONNECTION_NAME"
-        value = google_sql_database_instance.main_v2.connection_name
+        value = local.sql_connection_name_v2
       }
       env {
         name  = "DB_USER"
@@ -289,7 +289,7 @@ resource "google_cloud_run_v2_service" "worker" {
         # was retired (#254) — it had been kept only as a no-re-mount rollback
         # target during the #196 cutover soak.
         instances = [
-          google_sql_database_instance.main_v2.connection_name,
+          local.sql_connection_name_v2,
         ]
       }
     }
@@ -351,7 +351,7 @@ resource "google_cloud_run_v2_service" "worker" {
       }
       env {
         name  = "DB_INSTANCE_CONNECTION_NAME"
-        value = google_sql_database_instance.main_v2.connection_name
+        value = local.sql_connection_name_v2
       }
       env {
         name  = "DB_USER"

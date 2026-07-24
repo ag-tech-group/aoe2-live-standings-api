@@ -4,8 +4,8 @@ output "service_url" {
 }
 
 output "db_connection_name" {
-  description = "Cloud SQL instance connection name (project:region:instance). Pass to Cloud SQL Auth Proxy for local migration runs."
-  value       = google_sql_database_instance.main_v2.connection_name
+  description = "Cloud SQL instance connection name (project:region:instance). Pass to Cloud SQL Auth Proxy for local migration runs. NOTE: during the dormant period the instance is deleted (sql.tf, sql_instance_deleted) — the name is still emitted for reference but nothing answers on it."
+  value       = local.sql_connection_name_v2
 }
 
 output "artifact_registry_repo" {

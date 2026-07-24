@@ -8,13 +8,32 @@
 # uptime checks close that gap by hitting the real read paths from
 # outside the deployment.
 #
-# Four checks cover the critical-path reads. Each runs every minute
-# from multiple Google-managed regions; the policy alerts when 2+
+# Four checks cover the critical-path reads. Each runs on a shared
+# period from three Google-managed regions; the policy alerts when 2+
 # regions report a failure for ≥2 minutes. Routed to the same email
 # channel the polling-worker alerts and budget notifications use.
 #
-# Volume sits well inside Cloud Monitoring's free tier (4 checks ×
-# 60/hr × 6 regions ≈ 1500 calls/hr against a >1M/month limit).
+# COST MODEL (corrected 2026-07-24 against billing actuals): billing
+# counts SCHEDULED executions — checks × regions × (seconds/period) — so
+# this set is 4 × 3 × 43,200 ≈ 518k/month at the 60s period, inside the
+# 1M-executions/project/month free allotment; billing support confirmed
+# the July 2026 SKU at $0.00. Do NOT size cost from ALIGN_COUNT on
+# `uptime_check/check_passed`: the metric records ~6 samples per period
+# per region (multiple checker IPs), ~6× the billable count — reading it
+# as billable volume produced a false "$660/month" attribution during
+# the July 2026 dormant-cost investigation. The actual driver was the
+# stopped Cloud SQL instance's data cache + idle IP (see sql.tf).
+
+locals {
+  # PAUSED for the post-event dormant period (2026-07-23): the api is
+  # internal-only at zero instances and the alert policy was already
+  # disabled (#287), so the probes exercised a deliberately-dead endpoint
+  # and fed nothing. At this shape they bill $0 (see cost model), so this
+  # is hygiene rather than savings; uptime checks have no off switch,
+  # hence deletion. Set false to recreate the checks + alert policy for
+  # the next event.
+  uptime_checks_paused = true
+}
 
 locals {
   # Each check: a probed path and the substring the response body
@@ -56,12 +75,14 @@ locals {
 }
 
 resource "google_monitoring_uptime_check_config" "endpoint" {
-  for_each = local.uptime_endpoints
+  for_each = local.uptime_checks_paused ? {} : local.uptime_endpoints
 
   display_name = "aoe2 — ${each.key}"
 
   timeout = "10s"
-  period  = "60s"
+  # 60s is already inside the free allotment at this check count (see
+  # cost model) — no reason to trade detection latency for cost.
+  period = "60s"
   selected_regions = [
     "USA_OREGON",
     "USA_IOWA",
@@ -101,14 +122,14 @@ resource "google_monitoring_uptime_check_config" "endpoint" {
 # enough to absorb a single-region transient blip, tight enough to
 # catch a real outage within a couple of minutes.
 resource "google_monitoring_alert_policy" "uptime" {
+  # Paused together with the checks its conditions reference; comes back
+  # enabled when `uptime_checks_paused` flips false (this supersedes the
+  # #287-era `enabled = false` dormant edit).
+  count = local.uptime_checks_paused ? 0 : 1
+
   display_name = "Uptime checks — read surface"
   combiner     = "OR"
   severity     = "CRITICAL"
-
-  # DISABLED for the dormant period: the DB is stopped and the api idled, so the
-  # read endpoints intentionally error — this policy would otherwise email a
-  # "site down" alert every minute. Re-enable with the backend for the next event.
-  enabled = false
 
   notification_channels = [google_monitoring_notification_channel.email.id]
 
