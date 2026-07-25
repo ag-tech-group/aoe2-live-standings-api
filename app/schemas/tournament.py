@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models import RankBy
+
 # A handful of URLs is plenty for a real host (typically one Twitch
 # + one YouTube); the cap keeps the broadcast-live poller's quota
 # footprint per tournament bounded.
@@ -65,6 +67,10 @@ class TournamentRead(BaseModel):
     slug: str
     name: str
     leaderboard_id: int
+    # Which rating metric positions rank on (#290): ``peak_rating`` (the
+    # default — lifetime max, the launch format) or ``current_rating``.
+    # Consumers label the rank column off this.
+    rank_by: RankBy
     start_date: datetime | None
     # The end of the rated-data window ([start_date, end_date] bounds what
     # matches count). The event's human schedule — playoffs, the actual
@@ -101,6 +107,8 @@ class TournamentCreate(BaseModel):
     )
     name: str = Field(min_length=1, max_length=200)
     leaderboard_id: int = Field(gt=0)
+    # Omitted → peak_rating, the launch behavior (#290).
+    rank_by: RankBy = RankBy.PEAK_RATING
     start_date: datetime | None = None
     end_date: datetime | None = None
     prize_pool_cents: int | None = Field(default=None, ge=0)
@@ -150,13 +158,17 @@ class TournamentUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     leaderboard_id: int | None = Field(default=None, gt=0)
+    # Changing the rank metric mid-event is the owner's call (it reorders
+    # the table immediately); backing a non-nullable column, explicit null
+    # is a 422 like `name`/`leaderboard_id`.
+    rank_by: RankBy | None = None
     start_date: datetime | None = None
     end_date: datetime | None = None
     prize_pool_cents: int | None = Field(default=None, ge=0)
     host_stream_urls: list[str] | None = Field(default=None, max_length=_MAX_HOST_STREAM_URLS)
     presentation: dict[str, Any] | None = None
 
-    @field_validator("name", "leaderboard_id", "host_stream_urls", "presentation")
+    @field_validator("name", "leaderboard_id", "rank_by", "host_stream_urls", "presentation")
     @classmethod
     def _reject_explicit_null(cls, value: object) -> object:
         # A field-validator runs only for fields actually present in the

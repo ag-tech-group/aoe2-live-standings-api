@@ -113,7 +113,36 @@ class TestUpsertPlayerRating:
 
 
 class TestInsertRatingSnapshots:
-    """Append-only metric history (#271): one row per max_rating change."""
+    """Append-only metric history (#271): one row per change of the
+    ``(max_rating, current_rating)`` pair (current joined the diff in #290)."""
+
+    async def test_current_only_change_appends_observation(self, session: AsyncSession):
+        # (#290) current_rating is a rankable metric now — a game that moves
+        # current but not peak must record, or the current-mode window freeze
+        # has no observation to fall back on.
+        session.add(Player(**_player_data(profile_id=1)))
+        await session.commit()
+
+        assert (
+            await insert_rating_snapshots(
+                session, [_rating_data(max_rating=1500, current_rating=1500)]
+            )
+            == 1
+        )
+        # Lost a game: current dips, peak holds — records.
+        assert (
+            await insert_rating_snapshots(
+                session, [_rating_data(max_rating=1500, current_rating=1480)]
+            )
+            == 1
+        )
+        # Steady poll: nothing.
+        assert (
+            await insert_rating_snapshots(
+                session, [_rating_data(max_rating=1500, current_rating=1480)]
+            )
+            == 0
+        )
 
     async def test_first_poll_and_changes_snapshot_unchanged_polls_dont(
         self, session: AsyncSession
