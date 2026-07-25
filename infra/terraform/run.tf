@@ -32,8 +32,8 @@ resource "google_cloud_run_v2_service" "api" {
   # starts. Combined with min=0 and no internal callers, the api holds at zero
   # instances — Cloud Run's equivalent of "off". This stops both the cold-start
   # churn and the Sentry error flood the idled-but-reachable api produced against
-  # the stopped DB. Restore "INGRESS_TRAFFIC_ALL" for the next event.
-  ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  # the stopped DB. Driven by var.event_mode.
+  ingress = var.event_mode == "active" ? "INGRESS_TRAFFIC_ALL" : "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   template {
     service_account = google_service_account.cloud_run.email
@@ -90,9 +90,10 @@ resource "google_cloud_run_v2_service" "api" {
       # ceiling is gone, and max_connections is now 400.) NOTE: the pooler's
       # max_pool_size=50 is the next axis to validate for 2x finals load — the
       # query-concurrency ceiling, distinct from this instance/connection one.
-      # Dormant (post-event): idled to 0 — the FE is fully static, so the api
-      # takes no live reads. Restore to 1 for the next event.
-      min_instance_count = 0
+      # min follows var.event_mode: active keeps one warm instance for the
+      # nudge poll loop; dormant idles to 0 (the FE serves the frozen event
+      # statically, so the api takes no live reads).
+      min_instance_count = var.event_mode == "active" ? 1 : 0
       max_instance_count = 100
     }
 
@@ -267,18 +268,17 @@ resource "google_cloud_run_v2_service" "worker" {
     service_account = google_service_account.cloud_run.email
 
     scaling {
-      # POLLER PAUSED (min=0) for the post-event dormant period. The only
-      # tournament (King's Gauntlet) closed its rated window 2026-06-16 and
-      # standings freeze at window-end, so there is nothing live to poll. The
-      # worker has no public invoker, so min=0 lets Cloud Run scale the
-      # singleton to zero and nothing wakes it — the always-on worker cost
-      # (1 vCPU, cpu_idle=false) drops to ~$0. Polled tables refill from
-      # upstream within one poll cycle on re-enable.
+      # min follows var.event_mode. Dormant pauses the poller: standings
+      # freeze at window-end, so between events there is nothing live to
+      # poll; the worker has no public invoker, so min=0 lets Cloud Run
+      # scale the singleton to zero and nothing wakes it — the always-on
+      # worker cost (1 vCPU, cpu_idle=false) drops to ~$0. Polled tables
+      # refill from upstream within one poll cycle on re-activation.
       #
-      # To resume for the next event: set min_instance_count = 1 (max stays 1 —
-      # the pollers must remain a strict singleton; a second instance would
-      # duplicate every upstream call and double-write the same DB rows).
-      min_instance_count = 0
+      # max stays 1 in every mode — the pollers must remain a strict
+      # singleton; a second instance would duplicate every upstream call
+      # and double-write the same DB rows.
+      min_instance_count = var.event_mode == "active" ? 1 : 0
       max_instance_count = 1
     }
 
