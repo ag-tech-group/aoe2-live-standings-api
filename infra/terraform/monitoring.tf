@@ -150,31 +150,28 @@ resource "google_logging_metric" "sse_subscriber_count" {
 # toward the maxScale × concurrency seat ceiling (~22,000). Either is worth
 # a look, routed to the same Sentry surface.
 #
-# THRESHOLD IS A PLACEHOLDER. We don't yet know real peak (peak = a Hera
-# live stream). Tune to ~1.5× the observed peak once #194 reveals the real
-# concurrent-seat number during a Hera broadcast. 10,000 is ~45% of the 22k
-# ceiling — above the streamer-grind baseline but below a genuine marquee
-# peak; revisit after the next match.
+# The threshold lives in var.sse_seats_alert_threshold (variables.tf) and its
+# default is a CALIBRATION PLACEHOLDER — tune to ~1.5× the observed host-live
+# peak once #194 reveals the real concurrent-seat number during a broadcast.
 resource "google_monitoring_alert_policy" "sse_seat_leak" {
   display_name = "SSE seats high — dead-tab leak or capacity pressure (#204)"
   combiner     = "OR"
   severity     = "WARNING"
 
-  # DISABLED for the post-event dormant period (2026-07-23): the api is pinned
-  # to zero instances so there are no SSE seats to leak, and enabled policies
-  # bill per metric reference. Re-enable for the next event (cf. poller_stalled
-  # below and capacity_alerts.tf).
-  enabled = false
+  # Gated on var.event_mode: while dormant the api is pinned to zero instances
+  # so there are no SSE seats to leak, and enabled policies bill per metric
+  # reference (cf. poller_stalled below and capacity_alerts.tf).
+  enabled = var.event_mode == "active"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
   conditions {
-    display_name = "total SSE subscribers > 10,000 sustained 5 minutes"
+    display_name = "total SSE subscribers > ${var.sse_seats_alert_threshold} sustained 5 minutes"
     condition_threshold {
       filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.sse_subscriber_count.name}\" AND resource.type=\"cloud_run_revision\""
       duration        = "300s"
       comparison      = "COMPARISON_GT"
-      threshold_value = 10000
+      threshold_value = var.sse_seats_alert_threshold
 
       # The metric is a DELTA distribution (a log value_extractor), so the
       # aligner must be a percentile — ALIGN_MEAN is rejected for
@@ -189,7 +186,7 @@ resource "google_monitoring_alert_policy" "sse_seat_leak" {
   }
 
   documentation {
-    content   = "Total concurrent SSE subscribers (summed across api instances) has been > 10,000 for 5 minutes. With the FE EventSource cleanup + the 600s SSE timeout (#204) this should track real viewers — cross-check PostHog active users. If it's far above real viewers → **dead-tab regression**: confirm the FE still closes EventSource on pagehide/visibilitychange and that the api `timeout` is still 600s (infra/terraform/run.tf). If real viewers really are this high → **genuine capacity pressure**: watch num_backends and consider the maxScale / Cloud SQL tier levers (#195). Threshold is a placeholder — tune to ~1.5× the observed Hera-stream peak."
+    content   = "Total concurrent SSE subscribers (summed across api instances) has been above the configured threshold (`sse_seats_alert_threshold`, currently ${var.sse_seats_alert_threshold}) for 5 minutes. With the FE EventSource cleanup + the 600s SSE timeout (#204) this should track real viewers — cross-check PostHog active users. If it's far above real viewers → **dead-tab regression**: confirm the FE still closes EventSource on pagehide/visibilitychange and that the api `timeout` is still 600s (infra/terraform/run.tf). If real viewers really are this high → **genuine capacity pressure**: watch num_backends and consider the maxScale / Cloud SQL tier levers (#195). The threshold default is a calibration placeholder — tune to ~1.5× the observed host-live peak."
     mime_type = "text/markdown"
   }
 }
@@ -247,13 +244,12 @@ resource "google_monitoring_alert_policy" "poller_stalled" {
   combiner     = "OR"
   severity     = "CRITICAL"
 
-  # DISABLED for the post-event dormant period (2026-06-26, #285). The worker
-  # is intentionally paused (run.tf worker min=0), so the pollers emit no
-  # `poll_<task>_ok` heartbeats and this `condition_absent` policy would fire
-  # continuously to Sentry — false alarms by construction, not a real stall.
-  # Re-enable (set true / delete this line) when the poller is restored for the
-  # next event, alongside run.tf min=1 and sql.tf REGIONAL.
-  enabled = false
+  # Gated on var.event_mode. While dormant the worker is intentionally paused
+  # (run.tf worker min=0), so the pollers emit no `poll_<task>_ok` heartbeats
+  # and this `condition_absent` policy would fire continuously to Sentry —
+  # false alarms by construction, not a real stall. Comes back on with the
+  # stack (the same flip restores worker min=1).
+  enabled = var.event_mode == "active"
 
   depends_on = [time_sleep.wait_for_metric_propagation]
 
@@ -311,10 +307,10 @@ resource "google_monitoring_alert_policy" "upstream_rate_limited" {
   combiner     = "OR"
   severity     = "WARNING"
 
-  # DISABLED for the post-event dormant period (2026-07-23): the worker is
-  # paused (min=0) so no upstream calls happen, and enabled policies bill per
-  # metric reference. Re-enable for the next event (cf. poller_stalled).
-  enabled = false
+  # Gated on var.event_mode: while dormant the worker is paused (min=0) so no
+  # upstream calls happen, and enabled policies bill per metric reference
+  # (cf. poller_stalled).
+  enabled = var.event_mode == "active"
 
   depends_on = [time_sleep.wait_for_metric_propagation]
 
@@ -366,10 +362,10 @@ resource "google_monitoring_alert_policy" "api_429_storm" {
   combiner     = "OR"
   severity     = "CRITICAL"
 
-  # DISABLED for the post-event dormant period (2026-07-23): the api is
-  # internal-only at zero instances — no viewers to reject — and enabled
-  # policies bill per metric reference. Re-enable for the next event.
-  enabled = false
+  # Gated on var.event_mode: while dormant the api is internal-only at zero
+  # instances — no viewers to reject — and enabled policies bill per metric
+  # reference.
+  enabled = var.event_mode == "active"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 

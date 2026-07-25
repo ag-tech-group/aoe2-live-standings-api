@@ -10,34 +10,34 @@
 # Alembic migrate job).
 
 locals {
-  # DELETED for the post-event dormant period (2026-07-23, follow-up to the
-  # PR #289 cost cleanup): a *stopped* instance of this shape still bills
-  # ~$70/mo — dominated by the EP data cache, whose tier-fixed 375 GiB of
-  # local SSD keeps billing while stopped ($0.000219178/GiB-h ≈ $60/mo),
-  # plus the idle public IP ($0.01/h ≈ $7/mo), disk, and retained backups.
-  # This WAS the July 2026 dormant bill: $50.77 for Jul 1-23,
-  # "predominantly Cloud SQL" per billing support. The final state was
-  # exported to
+  # DELETED while dormant (2026-07-23, follow-up to the PR #289 cost
+  # cleanup): a *stopped* instance of this shape still bills ~$70/mo —
+  # dominated by the EP data cache, whose tier-fixed 375 GiB of local SSD
+  # keeps billing while stopped ($0.000219178/GiB-h ≈ $60/mo), plus the
+  # idle public IP ($0.01/h ≈ $7/mo), disk, and retained backups. This WAS
+  # the July 2026 dormant bill: $50.77 for Jul 1-23, "predominantly Cloud
+  # SQL" per billing support. The final state was exported to
   # gs://aoe2-live-standings-api-db-archive/final/ (verified before deletion)
   # and the gcloud deletion retained a final backup as a second copy.
   #
-  # Resurrection for the next event:
-  #   1. Flip this to false and `tofu apply` — recreates instance + database +
-  #      user with the same names and the same password (random_password.db_user
-  #      persists in state, and the database-url / db-app-password secrets were
-  #      never touched). NOTE: Cloud SQL blocks reusing a deleted instance's
-  #      name for ~1 week after deletion; resurrect later than that (or bump
-  #      the -vN suffix and the locals below).
+  # Driven by var.event_mode since the deleted-when-dormant state is the
+  # settled posture. `event_mode = "active"` recreates the instance +
+  # database + user with the same names and password (random_password.db_user
+  # persists in state, and the database-url / db-app-password secrets were
+  # never touched) — but NOT the data. Resurrection for the next event:
+  #   1. Set event_mode = "active" and `tofu apply`. NOTE: Cloud SQL blocks
+  #      reusing a deleted instance's name for ~1 week after deletion;
+  #      resurrect later than that (or bump the -vN suffix and the locals
+  #      below).
   #   2. Import the archive dump (schema + data, incl. alembic_version, so
   #      deploys/migrations resume cleanly):
   #        gcloud sql import sql aoe2-standings-db-v2 \
   #          gs://aoe2-live-standings-api-db-archive/final/<dump>.sql.gz \
   #          --database=aoe2_live_standings
-  #   3. Restore the rest of the stack per #285-#288 in reverse (worker min=1,
-  #      ingress, REGIONAL if finals-grade) and re-enable the dormant-disabled
-  #      alert policies + uptime checks (capacity_alerts.tf, monitoring.tf,
-  #      uptime.tf).
-  sql_instance_deleted = true
+  #   3. The same apply restores the rest of the stack (worker min=1, api
+  #      ingress + min=1, alert policies, uptime checks). Still manual and
+  #      deliberate: ZONAL -> REGIONAL below, if the event is finals-grade.
+  sql_instance_deleted = var.event_mode != "active"
 
   # Literal identity of main_v2. Consumers (run.tf, jobs.tf, secrets.tf,
   # outputs.tf, dashboard.tf, capacity_alerts.tf) reference these locals
@@ -115,18 +115,14 @@ resource "google_sql_database_instance" "main_v2" {
     # blip. Restore "REGIONAL" before the next event's finals.
     availability_type = "ZONAL"
 
-    # STOPPED for the dormant period: the FE now serves the frozen event fully
-    # static (hera-streamer-invitational-2026-web#375), so nothing reads this
-    # DB. "NEVER" halts compute (vCPU/RAM) billing but NOT everything — and
-    # the remainder is dominated by the EP data cache below: its tier-fixed
-    # 375 GiB of local SSD keeps billing while stopped ($0.000219178/GiB-h
-    # ≈ $60/mo), plus the public IP at the idle rate ($0.01/h ≈ $7/mo),
-    # disk (~$2/mo) and retained backups. A stopped instance of this shape
-    # therefore floors at ~$70/mo (July 2026 actual: $50.77 for Jul 1-23,
-    # "predominantly Cloud SQL" per billing support) — deleting it is the
-    # only lower state. All data is preserved on disk while stopped.
-    # Restart for the next event: set "ALWAYS".
-    activation_policy = "NEVER"
+    # ALWAYS: this resource only exists in event_mode = "active" (see the
+    # sql_instance_deleted gate above), so there is no stopped state to
+    # express here. Deliberately no "stopped" middle posture: the July 2026
+    # dormant period proved a STOPPED instance of this shape still floors at
+    # ~$70/mo (the EP data cache's tier-fixed 375 GiB of local SSD bills
+    # while stopped, ≈ $60/mo, plus idle IP / disk / backups) — deletion is
+    # the only meaningfully cheaper state, which is what "dormant" does.
+    activation_policy = "ALWAYS"
 
     # Enterprise Plus data cache: extends the buffer pool onto local SSD
     # (tier-fixed 375 GiB on N-2). NOT "included with EP" as previously

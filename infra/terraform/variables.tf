@@ -1,3 +1,32 @@
+variable "event_mode" {
+  description = <<-EOT
+    Operating posture for the whole stack, so activating for the next event is one
+    variable flip instead of a hand-edit sweep. "active": SQL instance provisioned,
+    api public with a warm min instance, worker polling, every alert policy enabled,
+    uptime checks created. "dormant": SQL instance DELETED (a stopped instance of
+    this shape still floors at ~$70/mo — see sql.tf), api internal-only at zero
+    instances, worker paused, all alert policies disabled, uptime checks deleted.
+    Flipping dormant -> active recreates the SQL instance but NOT its data — follow
+    the resurrection runbook in sql.tf (instance-name reuse is blocked ~1 week after
+    deletion; import the archived dump) before relying on the stack. Deliberately
+    NOT covered by this switch: capacity sizing (maxScale, tiers, pool sizes) and
+    the ZONAL -> REGIONAL finals lever in sql.tf — those stay explicit edits.
+  EOT
+  type        = string
+  default     = "dormant"
+
+  validation {
+    condition     = contains(["active", "dormant"], var.event_mode)
+    error_message = "event_mode must be \"active\" or \"dormant\"."
+  }
+}
+
+variable "sse_seats_alert_threshold" {
+  description = "Total concurrent SSE subscribers (summed across api instances) above which the seat-leak / capacity-pressure alert (monitoring.tf) fires. CALIBRATION PLACEHOLDER: retune to ~1.5x the observed host-live peak once a real broadcast has been measured via the sse_subscriber_count metric (#194). The 10,000 default is ~45% of the maxScale x concurrency seat ceiling — above the streamer-grind baseline, below a genuine marquee peak."
+  type        = number
+  default     = 10000
+}
+
 variable "project_id" {
   description = "GCP project ID."
   type        = string

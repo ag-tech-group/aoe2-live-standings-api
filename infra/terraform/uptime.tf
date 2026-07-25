@@ -25,14 +25,13 @@
 # stopped Cloud SQL instance's data cache + idle IP (see sql.tf).
 
 locals {
-  # PAUSED for the post-event dormant period (2026-07-23): the api is
-  # internal-only at zero instances and the alert policy was already
-  # disabled (#287), so the probes exercised a deliberately-dead endpoint
-  # and fed nothing. At this shape they bill $0 (see cost model), so this
+  # Deleted while dormant (2026-07-23): the api is internal-only at zero
+  # instances, so the probes would exercise a deliberately-dead endpoint
+  # and feed nothing. At this shape they bill $0 (see cost model), so this
   # is hygiene rather than savings; uptime checks have no off switch,
-  # hence deletion. Set false to recreate the checks + alert policy for
-  # the next event.
-  uptime_checks_paused = true
+  # hence deletion. Driven by var.event_mode — "active" recreates the
+  # checks + alert policy with the stack.
+  uptime_checks_paused = var.event_mode != "active"
 }
 
 locals {

@@ -21,11 +21,11 @@
 #     (#195).
 # Thresholds are tuned for "warning, look at it," not "page someone."
 #
-# DORMANT (2026-07-23): all four policies below are `enabled = false` for the
-# post-event freeze — the DB is stopped and the api pinned to zero instances,
-# so there is no capacity to watch, and enabled policies bill $0.35/month per
-# metric reference. The definitions stay (they are the permanent set); flip
-# them back on with the stack for the next event.
+# All four policies are gated on `var.event_mode` — enabled only while an
+# event is active. While dormant the DB is deleted and the api pinned to zero
+# instances, so there is no capacity to watch, and enabled policies bill
+# $0.35/month per metric reference. The definitions stay (they are the
+# permanent set); they come back on with the stack.
 
 # --- Cloud SQL CPU pressure ----------------------------------------------
 #
@@ -41,8 +41,8 @@ resource "google_monitoring_alert_policy" "sql_cpu_high" {
   combiner     = "OR"
   severity     = "WARNING"
 
-  # DISABLED for the dormant period (2026-07-23) — see file header.
-  enabled = false
+  # Gated by the stack posture (see file header) — off while dormant.
+  enabled = var.event_mode == "active"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
@@ -101,8 +101,8 @@ resource "google_monitoring_alert_policy" "sql_connections_climbing" {
   combiner     = "OR"
   severity     = "WARNING"
 
-  # DISABLED for the dormant period (2026-07-23) — see file header.
-  enabled = false
+  # Gated by the stack posture (see file header) — off while dormant.
+  enabled = var.event_mode == "active"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
@@ -136,8 +136,8 @@ resource "google_monitoring_alert_policy" "sql_connections_high" {
   combiner     = "OR"
   severity     = "CRITICAL"
 
-  # DISABLED for the dormant period (2026-07-23) — see file header.
-  enabled = false
+  # Gated by the stack posture (see file header) — off while dormant.
+  enabled = var.event_mode == "active"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
@@ -181,8 +181,8 @@ resource "google_monitoring_alert_policy" "run_concurrency_high" {
   combiner     = "OR"
   severity     = "WARNING"
 
-  # DISABLED for the dormant period (2026-07-23) — see file header.
-  enabled = false
+  # Gated by the stack posture (see file header) — off while dormant.
+  enabled = var.event_mode == "active"
 
   notification_channels = [google_monitoring_notification_channel.sentry_pubsub.id]
 
