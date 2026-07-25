@@ -15,6 +15,7 @@ from app.models import (
     MatchOutcome,
     MatchState,
     ProfileAlias,
+    RankBy,
     Team,
     TeamMember,
     Tournament,
@@ -734,6 +735,163 @@ class TestStandingsFreezeAtWindowEnd:
         card = (await client.get("/v1/tournaments/cup/summary")).json()["highest_peak_rating"]
         assert card["profile_id"] == 2
         assert card["value"] == 1900
+
+
+class TestRankByCurrentRating:
+    """``rank_by = current_rating`` (#290): positions, team sums, the summary
+    rating card, and the window-end freeze all follow ``current_rating``;
+    peak stays surfaced on every row but never ranks."""
+
+    _BOUND = datetime(2026, 5, 20, 18, 0, 0, tzinfo=UTC)
+    _IN_WINDOW = datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC)
+
+    def _two_players(self, session: AsyncSession) -> None:
+        # A: lower current, higher lifetime peak. B: higher current, lower
+        # peak. Peak order says [A, B]; current order says [B, A] — the
+        # discriminator every test here leans on.
+        for profile_id, alias, current, peak in ((1, "A", 1500, 2200), (2, "B", 1900, 2000)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=current, max_rating=peak
+                )
+            )
+            session.add(player)
+
+    async def test_rank_by_round_trips_and_defaults_to_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        session.add(make_tournament("cup", rank_by=RankBy.CURRENT_RATING))
+        session.add(make_tournament("classic"))
+        await session.commit()
+        assert (await client.get("/v1/tournaments/cup")).json()["rank_by"] == "current_rating"
+        assert (await client.get("/v1/tournaments/classic")).json()["rank_by"] == "peak_rating"
+
+    async def test_standings_rank_on_current_not_peak(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        self._two_players(session)
+        session.add(make_tournament("cup", profile_ids=[1, 2], rank_by=RankBy.CURRENT_RATING))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["B", "A"]
+        assert [row["current_rating"] for row in items] == [1900, 1500]
+        # Peak is still surfaced untouched — it just doesn't rank.
+        assert [row["max_rating"] for row in items] == [2000, 2200]
+
+    async def test_frozen_current_uses_last_started_by_bound_game(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A's last started-by-bound game left them at 2100; their live
+        # current has since dropped to 1500 grinding post-window. A stale
+        # in-window snapshot (1700) predates the game — the log wins. B has
+        # no in-window data at all → live fallback (1900).
+        self._two_players(session)
+        session.add(
+            make_player_rating_snapshot(
+                1,
+                leaderboard_id=3,
+                max_rating=2200,
+                current_rating=1700,
+                observed_at=self._IN_WINDOW,
+            )
+        )
+        session.add(
+            make_match(
+                10,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, 19, 12, 0, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 5, 19, 13, 0, 0, tzinfo=UTC),
+            )
+        )
+        session.add(make_match_player(10, 1, outcome=MatchOutcome.WIN, new_rating=2100))
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                rank_by=RankBy.CURRENT_RATING,
+                end_date=self._BOUND,
+            )
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["A", "B"]
+        # The RANKED metric surfaces frozen; peak stays live.
+        assert [row["current_rating"] for row in items] == [2100, 1900]
+        assert [row["max_rating"] for row in items] == [2200, 2000]
+
+    async def test_frozen_current_snapshot_fallback_when_no_log(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # B played no started-by-bound game we hold, but the recorder
+        # observed 1850 before the bound — that beats live (1900). A has
+        # neither source → live fallback (1500).
+        self._two_players(session)
+        session.add(
+            make_player_rating_snapshot(
+                2,
+                leaderboard_id=3,
+                max_rating=2000,
+                current_rating=1850,
+                observed_at=self._IN_WINDOW,
+            )
+        )
+        session.add(
+            make_tournament(
+                "cup",
+                profile_ids=[1, 2],
+                rank_by=RankBy.CURRENT_RATING,
+                end_date=self._BOUND,
+            )
+        )
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["alias"] for row in items] == ["B", "A"]
+        assert [row["current_rating"] for row in items] == [1850, 1500]
+
+    async def test_team_sums_use_current(self, client: AsyncClient, session: AsyncSession):
+        self._two_players(session)
+        tournament = make_tournament("cup", profile_ids=[1, 2], rank_by=RankBy.CURRENT_RATING)
+        tournament.teams = [make_team(tournament, "Alpha", profile_ids=[1, 2])]
+        session.add(tournament)
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/teams/standings")).json()["items"]
+        assert items[0]["combined_rating_sum"] == 1500 + 1900
+        assert items[0]["combined_rating_average"] == (1500 + 1900) / 2
+        # Members order by the ranked metric — current — desc.
+        assert [m["current_rating"] for m in items[0]["members"]] == [1900, 1500]
+
+    async def test_summary_rating_card_is_current(self, client: AsyncClient, session: AsyncSession):
+        self._two_players(session)
+        session.add(make_tournament("cup", profile_ids=[1, 2], rank_by=RankBy.CURRENT_RATING))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["highest_peak_rating"] is None
+        assert body["highest_current_rating"]["value"] == 1900
+        assert body["highest_current_rating"]["profile_id"] == 2
+
+    async def test_summary_peak_mode_keeps_peak_card_null_current(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        self._two_players(session)
+        session.add(make_tournament("cup", profile_ids=[1, 2]))
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/summary")).json()
+        assert body["highest_current_rating"] is None
+        assert body["highest_peak_rating"]["value"] == 2200
+
+    async def test_standings_history_returns_501(self, client: AsyncClient, session: AsyncSession):
+        session.add(make_tournament("cup", profile_ids=[1], rank_by=RankBy.CURRENT_RATING))
+        await session.commit()
+        response = await client.get("/v1/tournaments/cup/standings/history")
+        assert response.status_code == 501
+        assert "peak_rating-ranked" in response.json()["detail"]
 
 
 class TestStandingsUnratedRoster:
@@ -1936,6 +2094,26 @@ class TestUpdateTournament:
         assert body["leaderboard_id"] == 13
         assert body["name"] == "Keep Me"
 
+    async def test_can_change_rank_by(self, client: AsyncClient, session: AsyncSession, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"rank_by": "current_rating"})
+        assert response.status_code == 200
+        assert response.json()["rank_by"] == "current_rating"
+        assert (await client.get("/v1/tournaments/cup")).json()["rank_by"] == "current_rating"
+
+    async def test_explicit_null_rank_by_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"rank_by": None})
+        assert response.status_code == 422
+
     async def test_patch_to_team_game_leaderboard_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
@@ -2346,6 +2524,28 @@ class TestCreateTournament:
         response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 999})
         assert response.status_code == 422
         assert "Unknown leaderboard 999" in response.json()["detail"]
+
+    async def test_create_with_rank_by_current_rating_persists(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post(
+            "/v1/tournaments", json={**self._BODY, "rank_by": "current_rating"}
+        )
+        assert response.status_code == 201
+        assert response.json()["rank_by"] == "current_rating"
+        assert (await client.get("/v1/tournaments/spring-cup")).json()[
+            "rank_by"
+        ] == "current_rating"
+
+    async def test_create_defaults_rank_by_to_peak_rating(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 201
+        assert response.json()["rank_by"] == "peak_rating"
+
+    async def test_create_with_unknown_rank_by_is_422(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json={**self._BODY, "rank_by": "wins"})
+        assert response.status_code == 422
 
     async def test_create_accepts_any_ranked_1v1_ladder(
         self, client: AsyncClient, session: AsyncSession, auth_as
@@ -2946,6 +3146,7 @@ class TestTournamentSummary:
     _ALL_NULL = {
         "last_polled_at": None,
         "highest_peak_rating": None,
+        "highest_current_rating": None,
         "best_win_rate": None,
         "longest_win_streak": None,
         "biggest_climber": None,

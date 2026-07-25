@@ -394,8 +394,17 @@ class TournamentSummary(BaseModel):
     # The one lifetime card: ``value`` is the entrant's all-time
     # ``PlayerRating.max_rating`` (the host's all-time-peak decision, same as
     # ``StandingRow.max_rating``), not the in-window peak. ``null`` when no
-    # entrant is rated on this leaderboard.
+    # entrant is rated on this leaderboard — and always ``null`` for a
+    # ``current_rating``-ranked tournament (#290), whose rating card is
+    # ``highest_current_rating`` instead. Exactly one of the two rating
+    # cards is ever populated; the consumer renders whichever is non-null.
     highest_peak_rating: SummaryCard | None
+    # The rating card for ``rank_by = current_rating`` tournaments (#290):
+    # ``value`` is the entrant's live ``current_rating`` (frozen at the
+    # as-of-window-end value once ``end_date`` passes). ``null`` for
+    # peak-ranked tournaments. Additive since #290 with a ``None`` default,
+    # so pre-#290 consumers are unaffected.
+    highest_current_rating: SummaryCard | None = None
     best_win_rate: SummaryCard | None
     longest_win_streak: StreakSummaryCard | None
     # The greatest signed net rating change within the tournament window —

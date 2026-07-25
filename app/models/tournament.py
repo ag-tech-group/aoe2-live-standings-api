@@ -1,8 +1,10 @@
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -15,6 +17,24 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+
+class RankBy(StrEnum):
+    """Per-tournament ranking metric for standings and team aggregates (#290).
+
+    ``PEAK_RATING`` (the default, and the launch event's format): positions
+    rank on lifetime ``max_rating`` — carried in, immutable bar a new
+    all-time high — and team ``combined_rating_*`` sums member peaks.
+    ``CURRENT_RATING``: positions rank on live ``current_rating`` and team
+    sums follow. Both ratings are always *returned* on every row; this
+    only selects which one is the rank key and which one freezes at
+    ``end_date``. The standings-history sweep supports ``PEAK_RATING``
+    only for now (it 501s otherwise — its ratchet/baseline machinery is
+    peak-specific).
+    """
+
+    PEAK_RATING = "peak_rating"
+    CURRENT_RATING = "current_rating"
 
 
 class Tournament(Base):
@@ -36,6 +56,20 @@ class Tournament(Base):
     # The leaderboard whose ratings this tournament's standings track
     # (e.g. 3 for 1v1 RM Ranked). One ladder per tournament.
     leaderboard_id: Mapped[int]
+    # Which rating metric positions rank on (#290) — see ``RankBy``.
+    # server_default keeps every pre-existing row on the launch behavior.
+    rank_by: Mapped[RankBy] = mapped_column(
+        Enum(
+            RankBy,
+            name="rank_by",
+            native_enum=False,
+            # Store the StrEnum value (lowercase, matches the JSON wire
+            # format), mirroring MatchState/MatchOutcome storage.
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        default=RankBy.PEAK_RATING,
+        server_default=RankBy.PEAK_RATING.value,
+    )
     # The competition window — the bounds for "what matches count for
     # this tournament" filters. Nullable so a tournament can be created
     # before its schedule is fixed; tournament-scoped queries treat a

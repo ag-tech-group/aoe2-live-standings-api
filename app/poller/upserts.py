@@ -132,7 +132,7 @@ async def upsert_player_rating(session: AsyncSession, data: dict[str, Any]) -> N
 
 
 async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str, Any]]) -> int:
-    """Append a ``PlayerRatingSnapshot`` for every changed ``max_rating``.
+    """Append a ``PlayerRatingSnapshot`` whenever either rating changed.
 
     The diff is against the **latest recorded snapshot** per
     (profile, leaderboard) — not the live ``PlayerRating`` row — so the log
@@ -145,7 +145,14 @@ async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str,
     from re-appending forever: the lower value records once, then the next
     poll's diff is clean.
 
-    This is the recorded history of the ranking metric: upstream's
+    Since #290 the diff covers the ``(max_rating, current_rating)`` pair,
+    not ``max_rating`` alone: ``current_rating`` is a rankable metric now
+    (``Tournament.rank_by``), and its as-of-window-end freeze needs
+    recorded observations the max-only diff would skip (a game that moves
+    current but not peak). Volume stays bounded by play: at most one row
+    per rated game per tracked pair, plus the rare pure-peak/rebase row.
+
+    This is the recorded history of the ranking metrics: upstream's
     ``highestrating`` is rebased/placement-filtered and cannot be
     reconstructed from the match log (#271), so ``/standings/history``
     prefers these observations. ``observed_at`` defaults to ``now()``
@@ -158,6 +165,7 @@ async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str,
             PlayerRatingSnapshot.profile_id,
             PlayerRatingSnapshot.leaderboard_id,
             PlayerRatingSnapshot.max_rating,
+            PlayerRatingSnapshot.current_rating,
             func.row_number()
             .over(
                 partition_by=(
@@ -175,12 +183,15 @@ async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str,
         .subquery()
     )
     stored = {
-        (profile_id, leaderboard_id): max_rating
-        for profile_id, leaderboard_id, max_rating in (
+        (profile_id, leaderboard_id): (max_rating, current_rating)
+        for profile_id, leaderboard_id, max_rating, current_rating in (
             await session.execute(
-                select(latest.c.profile_id, latest.c.leaderboard_id, latest.c.max_rating).where(
-                    latest.c.rn == 1
-                )
+                select(
+                    latest.c.profile_id,
+                    latest.c.leaderboard_id,
+                    latest.c.max_rating,
+                    latest.c.current_rating,
+                ).where(latest.c.rn == 1)
             )
         ).all()
     }
@@ -192,7 +203,8 @@ async def insert_rating_snapshots(session: AsyncSession, ratings: list[dict[str,
             "current_rating": r.get("current_rating"),
         }
         for r in ratings
-        if stored.get((r["profile_id"], r["leaderboard_id"])) != r["max_rating"]
+        if stored.get((r["profile_id"], r["leaderboard_id"]))
+        != (r["max_rating"], r.get("current_rating"))
     ]
     if rows:
         await session.execute(insert(PlayerRatingSnapshot), rows)
