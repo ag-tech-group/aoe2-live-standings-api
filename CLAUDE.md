@@ -39,7 +39,7 @@ The polling worker lives in `app/poller/`. It runs as the same Python process bu
 - Tournament-config reads (`GET /tournaments`, `GET /tournaments/{slug}`) use the **static** `_TOURNAMENT_CONFIG_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalidate"`.
 - Default middleware Cache-Control since #103 is `no-store`, so cacheable endpoints **must** opt in explicitly.
 
-**Standings sort order** (per-player `/standings`): rated rows by `current_rating` DESC (NULLS LAST), then every unrated row — linked or not — by display `name` ASC (#187 unified the old three-tier sort that special-cased an unlinked tail). Postgres's default NULLS-FIRST under DESC is the trap; always pair `.desc()` with `.nulls_last()`.
+**Standings sort order** (per-player `/standings`): rated rows by peak — `max_rating` DESC (NULLS LAST), with `current_rating` DESC (NULLS LAST) then `name` ASC as tie-breaks — then every unrated row — linked or not — by display `name` ASC (#187 unified the old three-tier sort that special-cased an unlinked tail; #226 switched the rank key from current to peak). Postgres's default NULLS-FIRST under DESC is the trap; always pair `.desc()` with `.nulls_last()`.
 
 **Team standings rank on peak** (`/teams/standings`, #158): `combined_rating_sum` / `combined_rating_average` aggregate each member's lifetime `max_rating`, not `current_rating`; teams sort by that peak-based sum desc. Members within a team are ordered by `max_rating` desc (NULLS LAST). The names of the aggregate fields stay `combined_rating_*` — their meaning changed in #158; only the docstrings called it out. Same field on each member: `current_rating` and `max_rating` are both surfaced so the FE can render a current-vs-peak overlay.
 
