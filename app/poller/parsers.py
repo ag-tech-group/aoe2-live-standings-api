@@ -63,9 +63,11 @@ def parse_player_stats(
 
     Batched calls (multiple ``profile_ids``) return multiple ``statGroups``
     and a flat ``leaderboardStats`` list — rows are linked back to their
-    owning profile via ``statgroup_id``. The 1v1 ladder uses solo
-    statgroups (one member per group), which is the only shape v1 needs;
-    team-statgroup behavior is a v1.x concern.
+    owning profile via ``statgroup_id``. Every current board — team ladders
+    included — uses solo statgroups (``statgroup_type: 1``, one member per
+    group; AoE2 team ladders rate players individually), verified against
+    the live payload 2026-07-25 (#292), so the single-member read below
+    covers the whole supported surface.
     """
     statgroup_to_profile: dict[int, int] = {}
     players: list[dict[str, Any]] = []
