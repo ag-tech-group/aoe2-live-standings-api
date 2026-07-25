@@ -17,3 +17,8 @@ class MeRead(BaseModel):
 
     user_id: str
     owned_tournaments: list[TournamentRead]
+    # Whether the caller is on the operator-managed creator allowlist
+    # (#296) — drives the management FE's create-form vs. request-access
+    # gate. Independent of ownership: an owner who was granted a
+    # tournament can manage it without being approved to create more.
+    can_create_tournaments: bool

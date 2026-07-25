@@ -25,6 +25,7 @@ from app.models import (
     Team,
     TeamMember,
     Tournament,
+    TournamentCreator,
     TournamentOwner,
     TournamentPlayer,
 )
@@ -255,6 +256,18 @@ def make_leaderboard(leaderboard_id: int, **overrides: Any) -> Leaderboard:
     }
     defaults.update(overrides)
     return Leaderboard(**defaults)
+
+
+@pytest.fixture
+async def seed_tournament_creator(session: AsyncSession) -> None:
+    """Allowlist ``DEFAULT_TEST_USER_ID`` for tournament creation (#296).
+
+    ``POST /v1/tournaments`` 403s callers without a ``tournament_creators``
+    row, so create-path tests seed the default test user; a test proving
+    the refusal authenticates as a different, unseeded user instead.
+    """
+    session.add(TournamentCreator(user_id=DEFAULT_TEST_USER_ID))
+    await session.commit()
 
 
 @pytest.fixture

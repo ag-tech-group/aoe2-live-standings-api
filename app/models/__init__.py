@@ -16,6 +16,7 @@ from app.models.tournament import (
     Team,
     TeamMember,
     Tournament,
+    TournamentCreator,
     TournamentOwner,
     TournamentPlayer,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "Team",
     "TeamMember",
     "Tournament",
+    "TournamentCreator",
     "TournamentOwner",
     "TournamentPlayer",
     "UNKNOWN_CIVILIZATION_ID",

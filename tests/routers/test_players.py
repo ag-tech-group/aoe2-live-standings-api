@@ -269,6 +269,33 @@ class TestGetPlayer:
 class TestAddRosterPlayer:
     """POST /v1/tournaments/{slug}/players — owner-gated roster add."""
 
+    async def test_roster_at_ceiling_returns_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as, monkeypatch
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        monkeypatch.setattr("app.routers.players._MAX_ROSTER_ROWS_PER_TOURNAMENT", 2)
+        session.add(make_tournament("cup", profile_ids=[1, 2], owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "one-too-many"},
+        )
+        assert response.status_code == 422
+        assert "ceiling" in response.json()["detail"]
+        # Removing a row frees a slot — the cap counts live rows, not history.
+        row_id = (
+            await session.execute(
+                select(TournamentPlayer.id).where(TournamentPlayer.profile_id == 1)
+            )
+        ).scalar_one()
+        assert (await client.delete(f"/v1/tournaments/cup/players/{row_id}")).status_code == 204
+        response = await client.post(
+            "/v1/tournaments/cup/players",
+            json={"name": "one-too-many"},
+        )
+        assert response.status_code == 204
+
     async def test_owner_adds_linked_player(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):

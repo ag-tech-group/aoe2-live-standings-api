@@ -161,6 +161,33 @@ class TournamentPlayer(Base):
     )
 
 
+class TournamentCreator(Base):
+    """A criticalbit user approved to *create* tournaments (#296).
+
+    The operator-managed allowlist gating ``POST /v1/tournaments``:
+    creation is invite-only (an organizer contacts the platform operator,
+    who approves), while everything else about the auth model is
+    unchanged — per-tournament management authorization stays
+    ``TournamentOwner``, and approved creators still become the first
+    owner of what they create.
+
+    Same shape rationale as ``TournamentOwner``: no FK to any user table
+    (identity lives in criticalbit-auth-api; ``user_id`` is the opaque
+    UUID from the access token's ``sub`` claim), and rows are inserted
+    out-of-band by the operator — a grant API would need a platform-admin
+    concept this service deliberately doesn't have.
+    """
+
+    __tablename__ = "tournament_creators"
+
+    # The criticalbit user UUID, exactly as it appears in the token `sub`.
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
 class TournamentOwner(Base):
     """A criticalbit user authorized to manage a tournament.
 
