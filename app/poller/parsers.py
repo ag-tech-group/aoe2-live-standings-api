@@ -299,27 +299,42 @@ def parse_live_advertisements(
     return matches, live_players
 
 
+def _leaderboard_matchtype_ids(lb: dict[str, Any]) -> list[int]:
+    """The matchtype ids one leaderboard entry covers, across payload eras.
+
+    Current upstream shape (verified live 2026-07-25, #292): each entry
+    carries ``leaderboardmap: [{matchtype_id, statgroup_type, ...}]`` and
+    NO ``matchtypes`` key at all. The legacy ``matchtypes: [int | {id}]``
+    shape is kept as a fallback for older captures/fixtures. This dual
+    read is the real fix for the 2026-06-01 "empty matchtypes" incident:
+    that day upstream (re)moved the key, the derived map came back empty,
+    and every match was written with ``leaderboard_id = NULL`` — the
+    ``DEFAULT_MATCHTYPE_TO_LEADERBOARD`` floor papered over it for the
+    1v1 RM ladder only, silently dropping every other board's matches.
+    """
+    if lb.get("leaderboardmap"):
+        return [int(entry["matchtype_id"]) for entry in lb["leaderboardmap"]]
+    return [mt["id"] if isinstance(mt, dict) else int(mt) for mt in lb.get("matchtypes", []) or []]
+
+
 def parse_available_leaderboards(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract leaderboard rows from ``getAvailableLeaderboards``.
 
     Returns ``{leaderboard_id, name, is_ranked, matchtypes}`` dicts suitable
     for ``upsert_leaderboard``. ``matchtypes`` carries the list of upstream
     matchtype IDs this leaderboard covers — the recent-matches poller reads
-    it to rebuild its ``matchtype_id -> leaderboard_id`` map.
+    it to rebuild its ``matchtype_id -> leaderboard_id`` map. Sourced from
+    ``leaderboardmap`` with a legacy ``matchtypes`` fallback
+    (``_leaderboard_matchtype_ids``).
     """
     rows: list[dict[str, Any]] = []
     for lb in payload.get("leaderboards", []):
-        # matchtypes[] entries are sometimes ints, sometimes dicts wrapping
-        # an id — be defensive (mirrors matchtype_to_leaderboard_map).
-        matchtypes = [
-            mt["id"] if isinstance(mt, dict) else int(mt) for mt in lb.get("matchtypes", []) or []
-        ]
         rows.append(
             {
                 "leaderboard_id": lb["id"],
                 "name": lb.get("name", ""),
                 "is_ranked": bool(lb.get("isranked", 0)),
-                "matchtypes": matchtypes,
+                "matchtypes": _leaderboard_matchtype_ids(lb),
             }
         )
     return rows
@@ -340,35 +355,54 @@ def parse_races(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # Defensive floor for the ``matchtype_id -> leaderboard_id`` map. Upstream
-# ``getAvailableLeaderboards`` is the source of truth, but on 2026-06-01 it
-# returned 17 leaderboards with *empty* ``matchtypes`` arrays — so the derived
-# map came back empty, every match was written with ``leaderboard_id = NULL``,
-# and the tournament-scoped queries (which filter on ``leaderboard_id``)
-# silently emptied the live standings. ``load_leaderboards`` merges the upstream
-# map over this floor: upstream still wins and extends it when healthy, but the
-# core ladder is always mapped even when upstream omits its matchtypes.
+# ``getAvailableLeaderboards`` is the source of truth, but on 2026-06-01 the
+# derived map came back empty — root cause understood in #292: upstream had
+# moved each entry's matchtype list from ``matchtypes`` to ``leaderboardmap``,
+# which the parser now reads (``_leaderboard_matchtype_ids``). Every match
+# that cycle was written with ``leaderboard_id = NULL`` and the tournament-
+# scoped queries (which filter on ``leaderboard_id``) silently emptied the
+# live standings. ``load_leaderboards`` merges the upstream map over this
+# floor: upstream still wins and extends it when healthy, but the ranked
+# ladders stay mapped even if upstream's shape drifts again.
 #
-# Only 1v1 RM Ranked (matchtype 6 -> leaderboard 3) is encoded — it's the
-# platform's primary ladder and the only one any tournament currently tracks.
-# Extend this as other ladders' matchtype IDs are confirmed from a healthy
-# payload; do not guess IDs (a wrong entry mis-tags matches).
-DEFAULT_MATCHTYPE_TO_LEADERBOARD: dict[int, int] = {6: 3}
+# Verified against the live payload on 2026-07-25 (#292) — every ranked
+# public ladder, transcribed not guessed (a wrong entry mis-tags matches):
+#   1  SOLO_DM_RANKED   [2, 60]      2  TEAM_DM_RANKED  [3, 4, 5, 61]
+#   3  SOLO_RM_RANKED   [6]          4  TEAM_RM_RANKED  [7, 8, 9]
+#   5  SOLO_BR_RANKED   [10]        13  SOLO_EW_RANKED  [26]
+#  14  TEAM_EW_RANKED   [27, 28, 29]
+# (CO_* / POM / RBW boards are deliberately left to the live map — niche,
+# occasionally re-numbered upstream, and no tournament tracks them.)
+DEFAULT_MATCHTYPE_TO_LEADERBOARD: dict[int, int] = {
+    2: 1,
+    60: 1,
+    3: 2,
+    4: 2,
+    5: 2,
+    61: 2,
+    6: 3,
+    7: 4,
+    8: 4,
+    9: 4,
+    10: 5,
+    26: 13,
+    27: 14,
+    28: 14,
+    29: 14,
+}
 
 
 def matchtype_to_leaderboard_map(payload: dict[str, Any]) -> dict[int, int]:
     """Build a ``matchtype_id -> leaderboard_id`` lookup from getAvailableLeaderboards.
 
-    Each leaderboard entry's ``matchtypes[]`` lists the matchtype IDs it
-    covers; flattening gives the inverse map used by the recent-matches
-    parser to derive ``Match.leaderboard_id``.
+    Each leaderboard entry's matchtype ids (``leaderboardmap``, legacy
+    ``matchtypes`` — see ``_leaderboard_matchtype_ids``) flatten into the
+    inverse map used by the recent-matches parser to derive
+    ``Match.leaderboard_id``.
     """
     mapping: dict[int, int] = {}
     for lb in payload.get("leaderboards", []):
         leaderboard_id = lb["id"]
-        for mt in lb.get("matchtypes", []) or []:
-            # Each entry may be an int or a dict — be defensive.
-            if isinstance(mt, dict):
-                mapping[mt["id"]] = leaderboard_id
-            else:
-                mapping[int(mt)] = leaderboard_id
+        for matchtype_id in _leaderboard_matchtype_ids(lb):
+            mapping[matchtype_id] = leaderboard_id
     return mapping

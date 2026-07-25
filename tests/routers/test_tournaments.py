@@ -1670,6 +1670,62 @@ class TestStandingsTournamentRecord:
 class TestStandingsRecentMatchups:
     """recent_matchups: tournament_record recent games enriched with the civ matchup (#218)."""
 
+    async def test_team_game_lists_every_opponent_and_nulls_the_scalars(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # A 2v2 on a team board (#292): entrant 1 + ally 2 (team 0) vs
+        # opponents 3 and 4 (team 1). `opponents` carries exactly the two
+        # enemies (profile-id order, ally excluded); the legacy single-
+        # opponent scalar fields stay null — their contract is "exactly one
+        # opponent", which a team game never satisfies.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=4, current_rating=1800))
+        session.add(player)
+        match = make_match(1, leaderboard_id=4, started_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC))
+        match.players.append(make_match_player(1, profile_id=1, team_id=0, civilization_id=27))
+        match.players.append(make_match_player(1, profile_id=2, team_id=0, civilization_id=13))
+        match.players.append(
+            make_match_player(1, profile_id=4, team_id=1, civilization_id=7, outcome=None)
+        )
+        match.players.append(
+            make_match_player(1, profile_id=3, team_id=1, civilization_id=99, outcome=None)
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=4))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        matchup = items[0]["tournament_record"]["recent_matchups"][0]
+        assert [o["profile_id"] for o in matchup["opponents"]] == [3, 4]
+        assert [o["civilization_id"] for o in matchup["opponents"]] == [99, 7]
+        assert matchup["opponent_profile_id"] is None
+        assert matchup["opponent_civilization_id"] is None
+
+    async def test_one_v_one_keeps_scalars_and_single_element_opponents(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # On a 1v1 board the legacy scalar fields stay byte-identical to
+        # pre-#292 behavior, and `opponents` is the same opponent as a
+        # 1-element list.
+        player = make_player(1)
+        player.ratings.append(make_player_rating(1, leaderboard_id=3, current_rating=2000))
+        session.add(player)
+        match = make_match(1, leaderboard_id=3, started_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC))
+        match.players.append(make_match_player(1, profile_id=1, team_id=0, civilization_id=27))
+        match.players.append(
+            make_match_player(1, profile_id=999, team_id=1, civilization_id=7, outcome=None)
+        )
+        session.add(match)
+        session.add(make_tournament("cup", profile_ids=[1], leaderboard_id=3))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        matchup = items[0]["tournament_record"]["recent_matchups"][0]
+        assert matchup["opponent_profile_id"] == 999
+        assert matchup["opponent_civilization_id"] == 7
+        assert [o["profile_id"] for o in matchup["opponents"]] == [999]
+        assert matchup["opponents"][0]["civilization_id"] == 7
+
     async def test_carries_civ_matchup_newest_first(
         self, client: AsyncClient, session: AsyncSession
     ):
@@ -1856,6 +1912,52 @@ class TestHeadToHead:
 
     async def test_unknown_tournament_returns_404(self, client: AsyncClient):
         assert (await client.get("/v1/tournaments/nope/head-to-head")).status_code == 404
+
+    async def test_team_game_allies_are_not_a_head_to_head(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        # Two rostered entrants queued together on a team board (#292):
+        # same team, no opposition — the game must NOT appear, while the
+        # same pair on opposing sides must, with team_id surfaced.
+        for pid in (1, 2):
+            session.add(make_player(pid))
+        allies = make_match(201, leaderboard_id=4)
+        allies.players.append(
+            make_match_player(201, profile_id=1, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        allies.players.append(
+            make_match_player(201, profile_id=2, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        allies.players.append(
+            make_match_player(201, profile_id=998, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        allies.players.append(
+            make_match_player(201, profile_id=999, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        opposed = make_match(202, leaderboard_id=4)
+        opposed.players.append(
+            make_match_player(202, profile_id=1, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        opposed.players.append(
+            make_match_player(202, profile_id=997, team_id=0, outcome=MatchOutcome.WIN)
+        )
+        opposed.players.append(
+            make_match_player(202, profile_id=2, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        opposed.players.append(
+            make_match_player(202, profile_id=996, team_id=1, outcome=MatchOutcome.LOSS)
+        )
+        session.add_all([allies, opposed])
+        session.add(make_tournament("cup", profile_ids=[1, 2], leaderboard_id=4))
+        await session.commit()
+
+        items = (await client.get("/v1/tournaments/cup/head-to-head")).json()["items"]
+        assert [m["match_id"] for m in items] == [202]
+        # Only rostered entrants are listed, each with their side.
+        by_profile = {e["profile_id"]: e for e in items[0]["entrants"]}
+        assert set(by_profile) == {1, 2}
+        assert by_profile[1]["team_id"] == 0
+        assert by_profile[2]["team_id"] == 1
 
     async def test_empty_when_fewer_than_two_entrants(
         self, client: AsyncClient, session: AsyncSession
@@ -2080,7 +2182,7 @@ class TestUpdateTournament:
         auth_as(DEFAULT_TEST_USER_ID)
         # The target must itself be a known ranked 1v1 ladder (#291) —
         # 13 is seeded as the EW 1v1 board.
-        session.add(make_leaderboard(13, name="1v1 EW Ranked", matchtypes=[26]))
+        session.add(make_leaderboard(13, name="SOLO_EW_RANKED", matchtypes=[26]))
         session.add(
             make_tournament(
                 "cup", name="Keep Me", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]
@@ -2114,17 +2216,30 @@ class TestUpdateTournament:
         response = await client.patch("/v1/tournaments/cup", json={"rank_by": None})
         assert response.status_code == 422
 
-    async def test_patch_to_team_game_leaderboard_is_422(
+    async def test_patch_to_team_ladder_succeeds(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
+        # Team boards are supported since #292.
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_leaderboard(4, name="Team RM Ranked", matchtypes=[7, 8, 9]))
+        session.add(make_leaderboard(4, name="TEAM_RM_RANKED", matchtypes=[7, 8, 9]))
         session.add(make_tournament("cup", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]))
         await session.commit()
 
         response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 4})
+        assert response.status_code == 200
+        assert response.json()["leaderboard_id"] == 4
+
+    async def test_patch_to_battle_royale_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_leaderboard(5, name="SOLO_BR_RANKED", matchtypes=[10]))
+        session.add(make_tournament("cup", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 5})
         assert response.status_code == 422
-        assert "not a ranked 1v1 ladder" in response.json()["detail"]
+        assert "not a supported tournament ladder" in response.json()["detail"]
         # The tournament keeps its original ladder.
         assert (await client.get("/v1/tournaments/cup")).json()["leaderboard_id"] == 3
 
@@ -2361,7 +2476,7 @@ class TestUpdateTournament:
         assert response.status_code == 422
 
 
-@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard", "seed_tournament_creator")
+@pytest.mark.usefixtures("seed_supported_leaderboard", "seed_tournament_creator")
 class TestTournamentPresentationBag:
     """The tournament-level opaque display bag: stored verbatim, replaced
     whole on PATCH, surfaced on the list/detail reads. The FE defines the
@@ -2458,7 +2573,7 @@ class TestTournamentPresentationBag:
         assert response.json()["presentation"] == {"phase": "announced"}
 
 
-@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard", "seed_tournament_creator")
+@pytest.mark.usefixtures("seed_supported_leaderboard", "seed_tournament_creator")
 class TestCreateTournament:
     """POST /v1/tournaments — approved creators only; caller becomes owner."""
 
@@ -2495,29 +2610,44 @@ class TestCreateTournament:
         assert response.status_code == 422
         assert "per-creator ceiling" in response.json()["detail"]
 
-    async def test_create_on_team_game_leaderboard_is_422(
+    async def test_create_on_team_ladder_succeeds(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
+        # Team boards are first-class since #292 — per-player ratings,
+        # opponents-as-lists, opposing-team head-to-head.
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_leaderboard(4, name="Team RM Ranked", matchtypes=[7, 8, 9]))
+        session.add(make_leaderboard(4, name="TEAM_RM_RANKED", matchtypes=[7, 8, 9]))
         await session.commit()
 
         response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 4})
-        assert response.status_code == 422
-        assert "not a ranked 1v1 ladder" in response.json()["detail"]
+        assert response.status_code == 201
+        assert response.json()["leaderboard_id"] == 4
 
-    async def test_create_on_unranked_1v1_variant_is_422(
+    async def test_create_on_battle_royale_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # Ranked but FFA (#292): every read assumes two opposing sides, so
+        # BR stays off the allowlist until its semantics are actually built.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_leaderboard(5, name="SOLO_BR_RANKED", matchtypes=[10]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 5})
+        assert response.status_code == 422
+        assert "not a supported tournament ladder" in response.json()["detail"]
+
+    async def test_create_on_unranked_board_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
-        # Name-token alone isn't enough — the ladder must also be ranked,
-        # or there are no ratings for standings to read.
-        session.add(make_leaderboard(50, name="1v1 Quick Play", is_ranked=False))
+        # Allowlisted id but unranked metadata: no ratings for standings to
+        # read, so still refused.
+        session.add(make_leaderboard(14, name="TEAM_EW_UNRANKED", is_ranked=False))
         await session.commit()
 
-        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 50})
+        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 14})
         assert response.status_code == 422
-        assert "not a ranked 1v1 ladder" in response.json()["detail"]
+        assert "not a supported tournament ladder" in response.json()["detail"]
 
     async def test_create_on_unknown_leaderboard_is_422(self, client: AsyncClient, auth_as):
         auth_as(DEFAULT_TEST_USER_ID)
@@ -2547,13 +2677,12 @@ class TestCreateTournament:
         response = await client.post("/v1/tournaments", json={**self._BODY, "rank_by": "wins"})
         assert response.status_code == 422
 
-    async def test_create_accepts_any_ranked_1v1_ladder(
+    async def test_create_accepts_ew_solo_ladder(
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
-        # The guard keys on the polled metadata's name token, not a
-        # hardcoded id list — any ranked 1v1 board passes.
+        # The allowlist covers all six classic ranked boards, not just RM.
         auth_as(DEFAULT_TEST_USER_ID)
-        session.add(make_leaderboard(13, name="1v1 EW Ranked", matchtypes=[26]))
+        session.add(make_leaderboard(13, name="SOLO_EW_RANKED", matchtypes=[26]))
         await session.commit()
 
         response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 13})
