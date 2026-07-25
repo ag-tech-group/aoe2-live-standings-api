@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +12,7 @@ from app.models import IdempotencyKey
 from tests.conftest import DEFAULT_TEST_USER_ID
 
 
+@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard")
 class TestIdempotencyKey:
     """End-to-end behavior of the middleware against POST /v1/tournaments."""
 

@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ from app.routers.tournaments import (
 )
 from tests.conftest import (
     DEFAULT_TEST_USER_ID,
+    make_leaderboard,
     make_match,
     make_match_player,
     make_player,
@@ -1918,6 +1920,9 @@ class TestUpdateTournament:
         self, client: AsyncClient, session: AsyncSession, auth_as
     ):
         auth_as(DEFAULT_TEST_USER_ID)
+        # The target must itself be a known ranked 1v1 ladder (#291) —
+        # 13 is seeded as the EW 1v1 board.
+        session.add(make_leaderboard(13, name="1v1 EW Ranked", matchtypes=[26]))
         session.add(
             make_tournament(
                 "cup", name="Keep Me", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]
@@ -1925,11 +1930,36 @@ class TestUpdateTournament:
         )
         await session.commit()
 
-        response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 4})
+        response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 13})
         assert response.status_code == 200
         body = response.json()
-        assert body["leaderboard_id"] == 4
+        assert body["leaderboard_id"] == 13
         assert body["name"] == "Keep Me"
+
+    async def test_patch_to_team_game_leaderboard_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_leaderboard(4, name="Team RM Ranked", matchtypes=[7, 8, 9]))
+        session.add(make_tournament("cup", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 4})
+        assert response.status_code == 422
+        assert "not a ranked 1v1 ladder" in response.json()["detail"]
+        # The tournament keeps its original ladder.
+        assert (await client.get("/v1/tournaments/cup")).json()["leaderboard_id"] == 3
+
+    async def test_patch_to_unknown_leaderboard_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_tournament("cup", leaderboard_id=3, owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.patch("/v1/tournaments/cup", json={"leaderboard_id": 999})
+        assert response.status_code == 422
+        assert "Unknown leaderboard 999" in response.json()["detail"]
 
     async def test_can_clear_a_date_with_null(
         self, client: AsyncClient, session: AsyncSession, auth_as
@@ -2153,6 +2183,7 @@ class TestUpdateTournament:
         assert response.status_code == 422
 
 
+@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard")
 class TestTournamentPresentationBag:
     """The tournament-level opaque display bag: stored verbatim, replaced
     whole on PATCH, surfaced on the list/detail reads. The FE defines the
@@ -2249,6 +2280,7 @@ class TestTournamentPresentationBag:
         assert response.json()["presentation"] == {"phase": "announced"}
 
 
+@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard")
 class TestCreateTournament:
     """POST /v1/tournaments — self-serve create, caller becomes owner."""
 
@@ -2261,6 +2293,49 @@ class TestCreateTournament:
     async def test_unauthenticated_returns_401(self, client: AsyncClient):
         response = await client.post("/v1/tournaments", json=self._BODY)
         assert response.status_code == 401
+
+    async def test_create_on_team_game_leaderboard_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_leaderboard(4, name="Team RM Ranked", matchtypes=[7, 8, 9]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 4})
+        assert response.status_code == 422
+        assert "not a ranked 1v1 ladder" in response.json()["detail"]
+
+    async def test_create_on_unranked_1v1_variant_is_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        # Name-token alone isn't enough — the ladder must also be ranked,
+        # or there are no ratings for standings to read.
+        session.add(make_leaderboard(50, name="1v1 Quick Play", is_ranked=False))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 50})
+        assert response.status_code == 422
+        assert "not a ranked 1v1 ladder" in response.json()["detail"]
+
+    async def test_create_on_unknown_leaderboard_is_422(self, client: AsyncClient, auth_as):
+        auth_as(DEFAULT_TEST_USER_ID)
+        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 999})
+        assert response.status_code == 422
+        assert "Unknown leaderboard 999" in response.json()["detail"]
+
+    async def test_create_accepts_any_ranked_1v1_ladder(
+        self, client: AsyncClient, session: AsyncSession, auth_as
+    ):
+        # The guard keys on the polled metadata's name token, not a
+        # hardcoded id list — any ranked 1v1 board passes.
+        auth_as(DEFAULT_TEST_USER_ID)
+        session.add(make_leaderboard(13, name="1v1 EW Ranked", matchtypes=[26]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments", json={**self._BODY, "leaderboard_id": 13})
+        assert response.status_code == 201
+        assert response.json()["leaderboard_id"] == 13
 
     async def test_creates_tournament_and_returns_201(
         self, client: AsyncClient, session: AsyncSession, auth_as

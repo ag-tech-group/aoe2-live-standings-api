@@ -14,6 +14,7 @@ from app.events import hub
 from app.limiting import limiter
 from app.main import app
 from app.models import (
+    Leaderboard,
     Match,
     MatchOutcome,
     MatchPlayer,
@@ -242,6 +243,30 @@ def make_player_rating_snapshot(
     }
     defaults.update(overrides)
     return PlayerRatingSnapshot(**defaults)
+
+
+def make_leaderboard(leaderboard_id: int, **overrides: Any) -> Leaderboard:
+    """Build a Leaderboard metadata row with ranked-1v1-RM-shaped defaults."""
+    defaults: dict[str, Any] = {
+        "leaderboard_id": leaderboard_id,
+        "name": "1v1 RM Ranked",
+        "is_ranked": True,
+        "matchtypes": [6],
+    }
+    defaults.update(overrides)
+    return Leaderboard(**defaults)
+
+
+@pytest.fixture
+async def seed_ranked_1v1_leaderboard(session: AsyncSession) -> None:
+    """Insert the ranked-1v1 leaderboard row (id 3) the write-path guard checks.
+
+    ``POST /v1/tournaments`` and leaderboard-changing ``PATCH``es refuse
+    ids that aren't known ranked 1v1 ladders (#291), so write-path tests
+    seed this row; read-path tests never need it.
+    """
+    session.add(make_leaderboard(3))
+    await session.commit()
 
 
 def make_match(match_id: int, **overrides: Any) -> Match:

@@ -29,6 +29,7 @@ from app.models import (
     UNKNOWN_CIVILIZATION_ID,
     Civilization,
     HostLiveStream,
+    Leaderboard,
     LiveMatchPlayer,
     LiveStream,
     Match,
@@ -177,6 +178,49 @@ async def list_tournaments(
     return [_serialize_tournament(t, live_hosts) for t in tournaments]
 
 
+async def _require_ranked_1v1_leaderboard(session: AsyncSession, leaderboard_id: int) -> None:
+    """422 unless ``leaderboard_id`` is a known ranked 1v1 ladder.
+
+    Only 1v1 ladders produce correct read data end-to-end today: recent-
+    matchup opponent resolution assumes one opponent per match, statgroup
+    parsing reads solo groups only, and the matchtype floor covers 1v1 RM
+    only. A tournament on a team-game ladder wouldn't fail — it would
+    serve subtly wrong matchup data and risk silently empty standings —
+    so the write path refuses honestly instead (#291). Lift this guard
+    when team-game ladder support lands (#292).
+
+    The check derives from the polled ``leaderboards`` metadata rather
+    than a hardcoded id list: upstream names self-describe ("1v1 RM
+    Ranked" vs "Team RM Ranked"), so requiring the "1v1" token plus
+    ``is_ranked`` self-updates with ladder changes and fails closed for
+    exotic ladders (tournament-specific upstream boards, Battle Royale).
+    An unknown id is refused too — on a brand-new deployment that can
+    simply mean the worker hasn't loaded leaderboard metadata yet.
+    """
+    row = (
+        await session.execute(
+            select(Leaderboard).where(Leaderboard.leaderboard_id == leaderboard_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown leaderboard {leaderboard_id} — not present in this deployment's "
+                "leaderboard metadata (on a fresh deployment the worker may not have "
+                "loaded leaderboards yet; retry shortly)"
+            ),
+        )
+    if not row.is_ranked or "1v1" not in row.name:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Leaderboard {leaderboard_id} ({row.name}) is not a ranked 1v1 ladder; "
+                "only ranked 1v1 leaderboards are supported"
+            ),
+        )
+
+
 @router.post("", status_code=201)
 @limiter.limit("5/minute")
 async def create_tournament(
@@ -191,7 +235,9 @@ async def create_tournament(
     metadata, manage the roster + teams, and ``DELETE`` the tournament.
     409 if the slug is taken (it is unique across the deployment and how
     consumer URLs route to the right tournament). A competition window
-    whose start falls after its end is rejected with 422.
+    whose start falls after its end is rejected with 422, as is a
+    ``leaderboard_id`` that isn't a known ranked 1v1 ladder
+    (``_require_ranked_1v1_leaderboard``).
     """
     if (
         payload.start_date is not None
@@ -202,6 +248,7 @@ async def create_tournament(
             status_code=422,
             detail="start_date must not be after end_date",
         )
+    await _require_ranked_1v1_leaderboard(session, payload.leaderboard_id)
 
     existing = (
         await session.execute(select(Tournament.id).where(Tournament.slug == payload.slug))
@@ -259,11 +306,16 @@ async def update_tournament(
     PATCH semantics: only the fields present in the request body change.
     ``start_date`` / ``end_date`` accept ``null`` to clear a bound; a
     competition window whose start falls after its end is rejected with
-    422. ``presentation`` replaces the whole bag (read-modify-write,
-    mirroring the roster rows' bag). ``slug`` is immutable — it is the
-    key consumer URLs are built on.
+    422, as is changing ``leaderboard_id`` to anything that isn't a known
+    ranked 1v1 ladder (``_require_ranked_1v1_leaderboard`` — untouched
+    fields are never re-validated, so existing tournaments are unaffected).
+    ``presentation`` replaces the whole bag (read-modify-write, mirroring
+    the roster rows' bag). ``slug`` is immutable — it is the key consumer
+    URLs are built on.
     """
     changes = payload.model_dump(exclude_unset=True)
+    if "leaderboard_id" in changes:
+        await _require_ranked_1v1_leaderboard(session, changes["leaderboard_id"])
     for field, value in changes.items():
         setattr(tournament, field, value)
 

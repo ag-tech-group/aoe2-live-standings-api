@@ -24,7 +24,12 @@ OTHER_USER_ID = "00000000-0000-0000-0000-0000000000bb"
 
 class TestTournamentAudits:
     async def test_create_emits_tournament_create(
-        self, client: AsyncClient, session: AsyncSession, auth_as, audit_events
+        self,
+        client: AsyncClient,
+        session: AsyncSession,
+        auth_as,
+        audit_events,
+        seed_ranked_1v1_leaderboard,
     ):
         auth_as(DEFAULT_TEST_USER_ID)
         response = await client.post(
