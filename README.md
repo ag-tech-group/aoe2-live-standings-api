@@ -20,6 +20,7 @@ The upstream data layer is documented in [`docs/data-sources.md`](docs/data-sour
 - [API Documentation](#api-documentation)
 - [API Endpoints](#api-endpoints)
 - [Authentication](#authentication)
+- [Consuming the API from Your Own Frontend](#consuming-the-api-from-your-own-frontend)
 - [Logging, Telemetry & Feature Flags](#logging-telemetry--feature-flags)
 - [Database Migrations](#database-migrations)
 - [Testing](#testing)
@@ -175,6 +176,17 @@ Reads are public. The write/management API is authenticated against [criticalbit
 - **Authorization** — a verified token identifies a criticalbit user. To edit a tournament, that user must have a row in this service's `tournament_owners` table for it, or the request is a `403`. Ownership is per-tournament and modelled here — not in the auth service, which deliberately stays free of app-specific roles.
 
 Owner rows are inserted directly (SQL) for now; an API to grant and revoke ownership is planned. A roster edited through this API is picked up by the polling worker on its next cycle, with no redeploy.
+
+## Consuming the API from Your Own Frontend
+
+The read surface is public, and third-party frontends are welcome to build on it:
+
+- **Server-side callers** (SSR, bots, overlays rendered through a proxy) need no configuration — every `GET /v1/*` read is unauthenticated.
+- **Browser-based apps** need their origin allowed for CORS: the deployment's operator adds it to the `CORS_ORIGINS` env var (comma-separated). Contact the operator of the deployment you're targeting to have an origin added.
+- The SSE stream (`GET /v1/stream`) works cross-origin under the same rule — `EventSource` sends no custom headers, so no preflight is involved.
+- Reads are CDN-cached (`s-maxage=15`): prefer reacting to SSE nudges over aggressive polling timers.
+
+The **write/management API is first-party only**. It authenticates with the operator's SSO cookie, and credentialed cross-origin access is deliberately restricted to the operator's own origins — tournament organizers manage tournaments through the platform's management UI, not through third-party apps.
 
 ## Logging, Telemetry & Feature Flags
 
