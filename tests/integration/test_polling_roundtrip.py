@@ -433,11 +433,22 @@ async def test_emit_nudge_drives_local_hub_via_poller(
         await asyncio.sleep(0.2)
 
         async with patched_session_maker() as session:
-            await emit_nudge(session, EventType.STANDINGS)
+            # Scoped emit (#293): unsorted, duplicated input — the stored and
+            # republished scope must come back deduped + sorted.
+            await emit_nudge(session, EventType.STANDINGS, tournament_ids=[7, 3, 3])
             await session.commit()
 
         nudge = await asyncio.wait_for(nudges.get(), timeout=2.0)
         assert nudge.event == EventType.STANDINGS
+        assert nudge.tournament_ids == (3, 7)
+
+        # An unscoped emit round-trips as None — the "everyone refetch"
+        # pre-#293 contract.
+        async with patched_session_maker() as session:
+            await emit_nudge(session, EventType.STANDINGS)
+            await session.commit()
+        nudge = await asyncio.wait_for(nudges.get(), timeout=2.0)
+        assert nudge.tournament_ids is None
     finally:
         poller_task.cancel()
         try:

@@ -43,8 +43,22 @@ _MAX_STREAM_LIFETIME_SECONDS = 600
 
 
 def _format_nudge(nudge: Nudge) -> str:
-    """Render a Nudge as an SSE event frame."""
-    payload = json.dumps({"polled_at": nudge.polled_at.isoformat()})
+    """Render a Nudge as an SSE event frame.
+
+    The payload's ``tournament_ids`` (#293) scopes the refetch: ``null``
+    means every subscriber should refetch (pre-#293 behavior, and the safe
+    fallback); a list means only clients watching one of those tournaments
+    need to. Additive — clients that ignore the key behave exactly as
+    before, just with some wasted refetches.
+    """
+    payload = json.dumps(
+        {
+            "polled_at": nudge.polled_at.isoformat(),
+            "tournament_ids": (
+                list(nudge.tournament_ids) if nudge.tournament_ids is not None else None
+            ),
+        }
+    )
     return f"event: {nudge.event.value}\ndata: {payload}\n\n"
 
 

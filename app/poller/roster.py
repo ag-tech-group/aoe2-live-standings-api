@@ -32,6 +32,27 @@ async def get_tracked_profile_ids(session: AsyncSession) -> list[int]:
     return list(rows.scalars().all())
 
 
+async def get_tournament_ids_for_profiles(
+    session: AsyncSession, profile_ids: set[int]
+) -> list[int]:
+    """The tournaments whose rosters contain any of ``profile_ids``.
+
+    Backs SSE nudge scoping (#293): a polling tick resolves which
+    tournaments its write could affect and stamps them on the nudge, so a
+    client watching one tournament skips refetches caused by another's
+    roster. Sorted for a deterministic stored/serialized value; empty when
+    no roster links any of the profiles.
+    """
+    if not profile_ids:
+        return []
+    rows = await session.execute(
+        select(TournamentPlayer.tournament_id)
+        .where(TournamentPlayer.profile_id.in_(profile_ids))
+        .distinct()
+    )
+    return sorted(rows.scalars().all())
+
+
 async def get_host_stream_urls_by_tournament(session: AsyncSession) -> dict[int, list[str]]:
     """Map each tournament's ``id`` to its host channel URLs.
 

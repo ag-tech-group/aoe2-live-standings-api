@@ -17,11 +17,13 @@ import asyncio
 
 import httpx
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, emit_nudge
+from app.models import LiveMatchPlayer
 from app.poller.parsers import parse_live_advertisements
-from app.poller.roster import get_tracked_profile_ids
+from app.poller.roster import get_tournament_ids_for_profiles, get_tracked_profile_ids
 from app.poller.upserts import replace_live_match_players, upsert_match_from_live
 
 logger = structlog.get_logger(__name__)
@@ -44,12 +46,20 @@ async def tick_live_matches(
     matches, live_players = parse_live_advertisements(response.json(), set(profile_ids))
 
     async with session_maker() as session:
+        # The previous live set, read before the wholesale rewrite: a
+        # tournament whose entrant just LEFT a game needs the nudge too
+        # (its `in_match` flips false), so the scope is old ∪ new (#293).
+        previous_live = set(
+            (await session.execute(select(LiveMatchPlayer.profile_id))).scalars().all()
+        )
         for match in matches:
             await upsert_match_from_live(session, match)
         await replace_live_match_players(session, live_players)
         # The live snapshot drives `in_match` on the standings row — emit
         # a NOTIFY so SSE subscribers on every read-tier instance refetch.
-        await emit_nudge(session, EventType.LIVE)
+        live_profiles = {row["profile_id"] for row in live_players}
+        scope = await get_tournament_ids_for_profiles(session, previous_live | live_profiles)
+        await emit_nudge(session, EventType.LIVE, tournament_ids=scope)
         await session.commit()
     logger.info(
         "poll_live_matches_ok",

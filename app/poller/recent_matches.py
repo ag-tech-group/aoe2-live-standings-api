@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, emit_nudge
 from app.poller.parsers import parse_recent_matches
-from app.poller.roster import get_tracked_profile_ids
+from app.poller.roster import get_tournament_ids_for_profiles, get_tracked_profile_ids
 from app.poller.upserts import (
     upsert_match_from_recent,
     upsert_match_player,
@@ -128,7 +128,16 @@ async def tick_recent_matches(
             total_players += len(players)
         # Match writes drive the recent-results display — emit a NOTIFY so
         # SSE subscribers on every read-tier instance get a refetch nudge.
-        await emit_nudge(session, EventType.MATCHES)
+        # Scoped (#293) to the tournaments of the profiles whose fetch
+        # SUCCEEDED this cycle — a failed profile contributed no write, so
+        # its tournaments don't need a refetch it can't see.
+        fetched_ok = {
+            profile_id
+            for profile_id, result in zip(profile_ids, results, strict=True)
+            if not isinstance(result, Exception)
+        }
+        scope = await get_tournament_ids_for_profiles(session, fetched_ok)
+        await emit_nudge(session, EventType.MATCHES, tournament_ids=scope)
         await session.commit()
     if failures:
         _log_fetch_failures(failures, total=len(profile_ids))
