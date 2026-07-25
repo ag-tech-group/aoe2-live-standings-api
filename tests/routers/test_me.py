@@ -25,6 +25,24 @@ class TestGetMe:
         body = r.json()
         assert body["user_id"] == DEFAULT_TEST_USER_ID
         assert body["owned_tournaments"] == []
+        # Not on the creator allowlist (#296) — the common case.
+        assert body["can_create_tournaments"] is False
+
+    async def test_can_create_tournaments_reflects_allowlist(
+        self, client: AsyncClient, auth_as, seed_tournament_creator
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        body = (await client.get("/v1/me")).json()
+        assert body["can_create_tournaments"] is True
+
+    async def test_can_create_is_per_user(
+        self, client: AsyncClient, auth_as, seed_tournament_creator
+    ):
+        # The allowlist row belongs to DEFAULT_TEST_USER_ID; another
+        # authenticated user still reads False.
+        auth_as(OTHER_USER_ID)
+        body = (await client.get("/v1/me")).json()
+        assert body["can_create_tournaments"] is False
 
     async def test_lists_owned_tournaments_newest_first(
         self, client: AsyncClient, session: AsyncSession, auth_as

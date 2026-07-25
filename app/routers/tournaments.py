@@ -43,6 +43,7 @@ from app.models import (
     Team,
     TeamMember,
     Tournament,
+    TournamentCreator,
     TournamentOwner,
     TournamentPlayer,
 )
@@ -100,6 +101,15 @@ _TOURNAMENT_CONFIG_CACHE_CONTROL = "public, s-maxage=15, max-age=0, must-revalid
 # recent-first; the consumer renders a compact form strip and can show
 # fewer client-side.
 _RECENT_RESULTS_LIMIT = 10
+
+# Ceiling on tournaments a single approved creator may hold owner rows for
+# when creating another (#296). A guardrail, not a product limit: even a
+# vetted account shouldn't be able to mint unbounded tournaments (each
+# roster feeds the poller's upstream fan-out). Counted against ownership
+# because creation records no separate authorship — an owner row is the
+# closest durable proxy. Generous by design; raise deliberately if a real
+# organizer ever hits it.
+_MAX_OWNED_TOURNAMENTS_PER_CREATOR = 10
 
 # Default minimum in-window games an entrant must have played to be eligible
 # for the summary "best win rate" card (#238) — so a lone 1–0 player's 100%
@@ -229,7 +239,12 @@ async def create_tournament(
     user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ) -> TournamentRead:
-    """Create a tournament — any authenticated criticalbit user may.
+    """Create a tournament — approved creators only (#296).
+
+    Creation is invite-gated: the caller must hold a ``tournament_creators``
+    row (403 otherwise — the management FE renders its request-access CTA
+    off ``GET /v1/me``'s ``can_create_tournaments``, so a probe POST is
+    never needed). Rows are granted out-of-band by the platform operator.
 
     The caller is recorded as the first owner, immediately able to ``PATCH``
     metadata, manage the roster + teams, and ``DELETE`` the tournament.
@@ -237,8 +252,40 @@ async def create_tournament(
     consumer URLs route to the right tournament). A competition window
     whose start falls after its end is rejected with 422, as is a
     ``leaderboard_id`` that isn't a known ranked 1v1 ladder
-    (``_require_ranked_1v1_leaderboard``).
+    (``_require_ranked_1v1_leaderboard``) or creating past the
+    per-creator ownership ceiling (``_MAX_OWNED_TOURNAMENTS_PER_CREATOR``).
     """
+    approved = (
+        await session.execute(
+            select(TournamentCreator.user_id).where(TournamentCreator.user_id == user_id)
+        )
+    ).first()
+    if approved is None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Tournament creation requires operator approval — this account "
+                "is not on the creator allowlist"
+            ),
+        )
+
+    owned_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(TournamentOwner)
+            .where(TournamentOwner.user_id == user_id)
+        )
+    ).scalar_one()
+    if owned_count >= _MAX_OWNED_TOURNAMENTS_PER_CREATOR:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This account already holds owner rows for {owned_count} tournaments — "
+                f"the per-creator ceiling is {_MAX_OWNED_TOURNAMENTS_PER_CREATOR}. "
+                "Contact the platform operator if you genuinely need more."
+            ),
+        )
+
     if (
         payload.start_date is not None
         and payload.end_date is not None

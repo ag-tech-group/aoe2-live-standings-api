@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,6 +46,14 @@ router = APIRouter(prefix="/tournaments/{tournament_slug}/players", tags=["playe
 # for the full two-audience contract and #105 for the symptom that
 # motivated the auth-aware split.
 _PLAYERS_CDN_SECONDS = 15
+
+# Ceiling on roster rows per tournament (#296). A guardrail, not a product
+# limit: every linked roster row joins the poller's tracked-profile union,
+# and recent-matches fans out one upstream request per tracked profile per
+# cycle — so roster size is directly upstream quota and poll-cycle latency
+# for every tournament on the platform. Generous by design (the launch
+# event rostered ~20); raise deliberately if a real event needs more.
+_MAX_ROSTER_ROWS_PER_TOURNAMENT = 100
 
 
 def _unlinked_player_read(entry: TournamentPlayer) -> PlayerRead:
@@ -233,8 +241,25 @@ async def add_roster_player(
     Body carries a required ``name`` (display label) and an optional
     ``profile_id`` linking it to a polled identity the poller will pick up
     next cycle. 409 if the ``name`` is already on the roster, or if the
-    ``profile_id`` (when given) is.
+    ``profile_id`` (when given) is. 422 once the roster is at
+    ``_MAX_ROSTER_ROWS_PER_TOURNAMENT``.
     """
+    roster_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(TournamentPlayer)
+            .where(TournamentPlayer.tournament_id == tournament.id)
+        )
+    ).scalar_one()
+    if roster_count >= _MAX_ROSTER_ROWS_PER_TOURNAMENT:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Roster is at the {_MAX_ROSTER_ROWS_PER_TOURNAMENT}-row ceiling — "
+                "contact the platform operator if this tournament genuinely needs more"
+            ),
+        )
+
     if payload.profile_id is not None:
         profile_clash = (
             await session.execute(

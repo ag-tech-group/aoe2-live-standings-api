@@ -2183,7 +2183,7 @@ class TestUpdateTournament:
         assert response.status_code == 422
 
 
-@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard")
+@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard", "seed_tournament_creator")
 class TestTournamentPresentationBag:
     """The tournament-level opaque display bag: stored verbatim, replaced
     whole on PATCH, surfaced on the list/detail reads. The FE defines the
@@ -2280,9 +2280,9 @@ class TestTournamentPresentationBag:
         assert response.json()["presentation"] == {"phase": "announced"}
 
 
-@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard")
+@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard", "seed_tournament_creator")
 class TestCreateTournament:
-    """POST /v1/tournaments — self-serve create, caller becomes owner."""
+    """POST /v1/tournaments — approved creators only; caller becomes owner."""
 
     _BODY = {
         "slug": "spring-cup",
@@ -2293,6 +2293,29 @@ class TestCreateTournament:
     async def test_unauthenticated_returns_401(self, client: AsyncClient):
         response = await client.post("/v1/tournaments", json=self._BODY)
         assert response.status_code == 401
+
+    async def test_non_allowlisted_user_returns_403(self, client: AsyncClient, auth_as):
+        # Authenticated but not on the creator allowlist (#296) — the class
+        # fixture seeds only DEFAULT_TEST_USER_ID.
+        auth_as("00000000-0000-0000-0000-0000000000cc")
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 403
+        assert "creator allowlist" in response.json()["detail"]
+
+    async def test_owned_tournament_ceiling_returns_422(
+        self, client: AsyncClient, session: AsyncSession, auth_as, monkeypatch
+    ):
+        auth_as(DEFAULT_TEST_USER_ID)
+        monkeypatch.setattr(
+            "app.routers.tournaments._MAX_OWNED_TOURNAMENTS_PER_CREATOR",
+            1,
+        )
+        session.add(make_tournament("existing", owner_ids=[DEFAULT_TEST_USER_ID]))
+        await session.commit()
+
+        response = await client.post("/v1/tournaments", json=self._BODY)
+        assert response.status_code == 422
+        assert "per-creator ceiling" in response.json()["detail"]
 
     async def test_create_on_team_game_leaderboard_is_422(
         self, client: AsyncClient, session: AsyncSession, auth_as

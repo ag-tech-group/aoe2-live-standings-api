@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user_id
 from app.database import get_async_session
-from app.models import Tournament, TournamentOwner
+from app.models import Tournament, TournamentCreator, TournamentOwner
 from app.routers.tournaments import _host_stream_live_tournaments, _serialize_tournament
 from app.schemas.me import MeRead
 
@@ -50,9 +50,11 @@ async def get_me(
     dependency raises). On 200, ``owned_tournaments`` is the list of
     tournaments — full ``TournamentRead`` objects — where the caller
     has an owner row, newest first. Empty list is the common case
-    for a non-admin user.
+    for a non-admin user. ``can_create_tournaments`` reflects the
+    operator-managed creator allowlist (#296) so the management FE can
+    render its create form vs. request-access CTA without a probe POST.
 
-    Cheap on prod scale (one indexed join), so the frontend can call
+    Cheap on prod scale (two indexed lookups), so the frontend can call
     on every page load. See ``_ME_CACHE_CONTROL`` above for why we
     can't fall through to the middleware default here.
     """
@@ -65,7 +67,13 @@ async def get_me(
     )
     tournaments = (await session.execute(stmt)).scalars().all()
     live_hosts = await _host_stream_live_tournaments(session, [t.id for t in tournaments])
+    approved_creator = (
+        await session.execute(
+            select(TournamentCreator.user_id).where(TournamentCreator.user_id == user_id)
+        )
+    ).first()
     return MeRead(
         user_id=user_id,
         owned_tournaments=[_serialize_tournament(t, live_hosts) for t in tournaments],
+        can_create_tournaments=approved_creator is not None,
     )

@@ -12,7 +12,7 @@ from app.models import IdempotencyKey
 from tests.conftest import DEFAULT_TEST_USER_ID
 
 
-@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard")
+@pytest.mark.usefixtures("seed_ranked_1v1_leaderboard", "seed_tournament_creator")
 class TestIdempotencyKey:
     """End-to-end behavior of the middleware against POST /v1/tournaments."""
 
