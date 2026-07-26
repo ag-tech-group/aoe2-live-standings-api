@@ -444,18 +444,28 @@ class TournamentSummary(BaseModel):
 
 
 class StandingHistoryPoint(BaseModel):
-    """An entity's standings position + peak rating at one time bucket."""
+    """An entity's standings position + rank-metric value at one time bucket.
 
-    # 1-based position by peak (comparePeakRank: peak desc, then current
+    Exactly one of the two rating fields is populated, matching the
+    tournament's ``rank_by`` (#305) — ``peak_rating`` for peak-ranked
+    tournaments (the launch format), ``current_rating`` for current-ranked
+    ones. Both are null for an unrated entity, which still holds a
+    position at the name-sorted tail.
+    """
+
+    # 1-based position by the tournament's rank metric (desc, then the other
     # rating desc, then display name), over the whole roster — everyone has a
     # position at every bucket (#226).
     position: int
-    # The entity's all-time peak (``max_rating``) as of this bucket —
-    # max(pre-event baseline, in-window peak-so-far). Equals the live
-    # ``max_rating`` at the latest bucket; stable for past buckets. Null for an
-    # unrated entity (no rating on this leaderboard) — it still holds a
-    # position, at the name-sorted tail.
+    # Peak mode: the entity's all-time peak (``max_rating``) as of this
+    # bucket — max(pre-event baseline, in-window peak-so-far), clamped to
+    # live. Equals the live ``max_rating`` at the latest bucket; stable for
+    # past buckets. Null in current mode.
     peak_rating: int | None
+    # Current mode (#305): the entity's ``current_rating`` as of this bucket
+    # — the last recorded value at-or-before it (match log merged with the
+    # snapshot observations; non-monotone by nature). Null in peak mode.
+    current_rating: int | None = None
 
 
 class PlayerStandingHistory(BaseModel):
@@ -483,13 +493,22 @@ class PlayerStandingHistory(BaseModel):
 
 
 class TeamStandingHistoryPoint(BaseModel):
-    """A team's position + combined peak elo at one time bucket."""
+    """A team's position + combined rank-metric value at one time bucket.
 
-    # 1-based position by combined peak elo (desc), over all teams.
+    Exactly one of the two combined fields is populated, matching the
+    tournament's ``rank_by`` (#305) — same split as
+    ``StandingHistoryPoint``.
+    """
+
+    # 1-based position by the combined rank metric (desc), over all teams.
     position: int
-    # Sum of the members' all-time peak (``max_rating``) as of this bucket
-    # (#226), matching the Teams page; an unrated member contributes 0.
-    combined_peak_elo: int
+    # Peak mode: sum of the members' all-time peak (``max_rating``) as of
+    # this bucket (#226), matching the Teams page; an unrated member
+    # contributes 0. Null in current mode.
+    combined_peak_elo: int | None = None
+    # Current mode (#305): sum of the members' as-of-bucket
+    # ``current_rating``; an unrated member contributes 0. Null in peak mode.
+    combined_current_elo: int | None = None
 
 
 class TeamStandingHistory(BaseModel):

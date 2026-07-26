@@ -886,12 +886,120 @@ class TestRankByCurrentRating:
         assert body["highest_current_rating"] is None
         assert body["highest_peak_rating"]["value"] == 2200
 
-    async def test_standings_history_returns_501(self, client: AsyncClient, session: AsyncSession):
-        session.add(make_tournament("cup", profile_ids=[1], rank_by=RankBy.CURRENT_RATING))
+    def _history_scenario(self, session: AsyncSession, **tournament_overrides):
+        """Two entrants whose current and peak orders disagree, with a decline.
+
+        A: enters at 1500, climbs to 2000 (day 2), then LOSES down to 1900
+        (day 4) — the non-monotone case peak mode can't express. Lifetime
+        peak 2050 (higher than B's — proves peak never ranks here).
+        B: no in-window games; a day-3 recorder observation of 1950 is the
+        whole series (flat carried-back baseline before it).
+        Live ratings match the tails (A 1900, B 1950), so the final bucket
+        must agree with the live ``/standings`` order: B above A.
+        """
+        for profile_id, alias, current, peak in ((1, "A", 1900, 2050), (2, "B", 1950, 2000)):
+            player = make_player(profile_id, alias=alias)
+            player.ratings.append(
+                make_player_rating(
+                    profile_id, leaderboard_id=3, current_rating=current, max_rating=peak
+                )
+            )
+            session.add(player)
+        for match_id, day, new_rating, outcome in (
+            (11, 2, 2000, MatchOutcome.WIN),
+            (12, 4, 1900, MatchOutcome.LOSS),
+        ):
+            match = make_match(
+                match_id,
+                leaderboard_id=3,
+                started_at=datetime(2026, 5, day, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 5, day, 12, 30, tzinfo=UTC),
+            )
+            match.players.append(
+                make_match_player(
+                    match_id, profile_id=1, team_id=0, outcome=outcome, new_rating=new_rating
+                )
+            )
+            match.players.append(
+                make_match_player(match_id, profile_id=999, team_id=1, outcome=None)
+            )
+            session.add(match)
+        session.add(
+            make_player_rating_snapshot(
+                2,
+                leaderboard_id=3,
+                max_rating=2000,
+                current_rating=1950,
+                observed_at=datetime(2026, 5, 3, 9, 0, tzinfo=UTC),
+            )
+        )
+        tournament = make_tournament(
+            "cup",
+            profile_ids=[1, 2],
+            rank_by=RankBy.CURRENT_RATING,
+            start_date=datetime(2026, 5, 1, tzinfo=UTC),
+            **tournament_overrides,
+        )
+        session.add(tournament)
+        return tournament
+
+    async def test_history_tracks_current_including_declines(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        self._history_scenario(session)
         await session.commit()
-        response = await client.get("/v1/tournaments/cup/standings/history")
-        assert response.status_code == 501
-        assert "peak_rating-ranked" in response.json()["detail"]
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        by_profile = {p["profile_id"]: p for p in body["players"]}
+        a_points, b_points = by_profile[1]["points"], by_profile[2]["points"]
+        buckets = [datetime.fromisoformat(b) for b in body["buckets"]]
+
+        # Every point carries the current metric; peak fields stay null.
+        assert all(p["peak_rating"] is None for p in a_points + b_points)
+
+        # At the May 3 midnight anchor: A holds the day-2 win (2000) and
+        # leads B's carried-back 1950.
+        may3 = buckets.index(datetime(2026, 5, 3, tzinfo=UTC))
+        assert a_points[may3]["current_rating"] == 2000
+        assert b_points[may3]["current_rating"] == 1950
+        assert (a_points[may3]["position"], b_points[may3]["position"]) == (1, 2)
+
+        # Final bucket: A's decline landed (1900) — B leads, matching the
+        # live table's current-mode order.
+        assert a_points[-1]["current_rating"] == 1900
+        assert b_points[-1]["current_rating"] == 1950
+        assert (b_points[-1]["position"], a_points[-1]["position"]) == (1, 2)
+
+        live = (await client.get("/v1/tournaments/cup/standings")).json()["items"]
+        assert [row["profile_id"] for row in live] == [2, 1]
+
+    async def test_history_baseline_holds_before_first_data_point(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        self._history_scenario(session)
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        by_profile = {p["profile_id"]: p for p in body["players"]}
+        buckets = [datetime.fromisoformat(b) for b in body["buckets"]]
+        first = buckets.index(datetime(2026, 5, 1, tzinfo=UTC))
+        # A's baseline is the rating held entering the window (the first
+        # in-window game's old_rating — the factory default 1500); B's is
+        # the earliest observation carried back.
+        assert by_profile[1]["points"][first]["current_rating"] == 1500
+        assert by_profile[2]["points"][first]["current_rating"] == 1950
+
+    async def test_history_team_series_sums_current(
+        self, client: AsyncClient, session: AsyncSession
+    ):
+        tournament = self._history_scenario(session)
+        tournament.teams = [make_team(tournament, "Alpha", profile_ids=[1, 2])]
+        await session.commit()
+
+        body = (await client.get("/v1/tournaments/cup/standings/history")).json()
+        team_points = body["teams"][0]["points"]
+        assert team_points[-1]["combined_current_elo"] == 1900 + 1950
+        assert all(p["combined_peak_elo"] is None for p in team_points)
 
 
 class TestStandingsUnratedRoster:
@@ -3923,8 +4031,8 @@ class TestStandingsHistory:
         # P1 leads the opening bucket (P2 hasn't played); by the end P2's peak
         # (1540) overtakes P1's (1520) — a real shift captured in between.
         assert by_profile[1]["points"][0]["position"] == 1
-        assert by_profile[1]["points"][-1] == {"position": 2, "peak_rating": 1520}
-        assert by_profile[2]["points"][-1] == {"position": 1, "peak_rating": 1540}
+        assert by_profile[1]["points"][-1] == {"position": 2, "peak_rating": 1520, "current_rating": None}
+        assert by_profile[2]["points"][-1] == {"position": 1, "peak_rating": 1540, "current_rating": None}
         assert body["last_polled_at"] is not None
         assert body["teams"] == []
         # Each series is self-describing — it carries its display name, so the
@@ -4006,8 +4114,8 @@ class TestStandingsHistory:
         by_profile = {p["profile_id"]: p for p in body["players"]}
         # P1 stays ahead on peak (1600) despite dropping to a lower current
         # rating than P2 — position is by peak, not current.
-        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1600}
-        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1500}
+        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1600, "current_rating": None}
+        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1500, "current_rating": None}
 
     async def test_past_bucket_unchanged_by_later_peak(
         self, client: AsyncClient, session: AsyncSession
@@ -4113,8 +4221,8 @@ class TestStandingsHistory:
         alpha_id = tournament.teams[0].id
         bravo_id = tournament.teams[1].id
         # Final bucket: Alpha 1500+1600=3100 (pos1); Bravo 2000 (pos2).
-        assert teams[alpha_id]["points"][-1] == {"position": 1, "combined_peak_elo": 3100}
-        assert teams[bravo_id]["points"][-1] == {"position": 2, "combined_peak_elo": 2000}
+        assert teams[alpha_id]["points"][-1] == {"position": 1, "combined_peak_elo": 3100, "combined_current_elo": None}
+        assert teams[bravo_id]["points"][-1] == {"position": 2, "combined_peak_elo": 2000, "combined_current_elo": None}
         # Each team series carries its display strings (same shape as
         # StandingTeam), so the FE legend needs no /teams/standings join.
         assert (teams[alpha_id]["name"], teams[alpha_id]["initials"]) == ("Alpha", "ALPHA")
@@ -4195,8 +4303,8 @@ class TestStandingsHistory:
         }
         # By peak P1 (1268) > P2 (1208); by in-event rating P2 (1190) would have
         # outranked P1 (1186) — the disagreement this fixes.
-        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1268}
-        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1208}
+        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1268, "current_rating": None}
+        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1208, "current_rating": None}
 
     async def test_in_event_peak_climbs_from_pre_event_baseline_not_current_max(
         self, client: AsyncClient, session: AsyncSession
@@ -4636,8 +4744,8 @@ class TestStandingsHistory:
             p["profile_id"]: p
             for p in (await client.get("/v1/tournaments/cup/standings/history")).json()["players"]
         }
-        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 2000}
-        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": None}
+        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 2000, "current_rating": None}
+        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": None, "current_rating": None}
 
     async def test_entity_set_matches_standings_excludes_linked_unpolled(
         self, client: AsyncClient, session: AsyncSession
