@@ -182,12 +182,12 @@ Owner rows are inserted directly (SQL) for now; an API to grant and revoke owner
 The read surface is public, and third-party frontends are welcome to build on it:
 
 - **Server-side callers** (SSR, bots, overlays rendered through a proxy) need no configuration — every `GET /v1/*` read is unauthenticated.
-- **Browser-based apps** need their origin allowed for CORS: the deployment's operator adds it to the `CORS_ORIGINS` env var (comma-separated). Contact the operator of the deployment you're targeting to have an origin added.
-- The SSE stream (`GET /v1/stream`) works cross-origin under the same rule — `EventSource` sends no custom headers, so no preflight is involved.
+- **Browser-based apps** work from any origin, no onboarding: public `/v1` GETs answer cross-origin requests with `Access-Control-Allow-Origin: *` (no credentials). The one exception is `GET /v1/me` — per-user and cookie-authenticated, it stays first-party-only.
+- Keep read requests **simple** (plain `GET`s, no custom headers) — the open posture answers simple requests only, and the read surface needs nothing else. The SSE stream (`GET /v1/stream`) qualifies: `EventSource` sends no custom headers.
 - Each nudge's payload carries `tournament_ids`: `null` means every subscriber should refetch; a list means only clients watching one of those tournaments need to. Filtering on it is optional — ignoring the field just costs wasted refetches.
 - Reads are CDN-cached (`s-maxage=15`): prefer reacting to SSE nudges over aggressive polling timers.
 
-The **write/management API is first-party only**. It authenticates with the operator's SSO cookie, and credentialed cross-origin access is deliberately restricted to the operator's own origins — tournament organizers manage tournaments through the platform's management UI, not through third-party apps.
+The **write/management API is first-party only**. It authenticates with the operator's SSO cookie, and credentialed cross-origin access is deliberately restricted to the operator's own origins (the `CORS_ORIGINS` env var + first-party regex) — tournament organizers manage tournaments through the platform's management UI, not through third-party apps.
 
 ## Logging, Telemetry & Feature Flags
 
