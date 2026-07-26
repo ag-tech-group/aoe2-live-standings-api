@@ -34,8 +34,8 @@ The upstream data layer is documented in [`docs/data-sources.md`](docs/data-sour
 
 Two Cloud Run services share one Postgres database and one container image, differentiated only by env vars (`POLLING_ENABLED` / `LISTENER_ENABLED`):
 
-- **worker** — a pinned singleton (`min=max=1`, private — no public traffic). Polls the upstream Relic backend (`aoe-api.worldsedgelink.com/community/*`, see [`docs/data-sources.md`](docs/data-sources.md)) on three cadences (30 s / 60 s / 15 s), writes to Postgres, and emits a `pg_notify` inside the same transaction whenever data changes.
-- **api** — autoscaling read tier (`min=1 max=10`, public). Serves the `/v1/*` REST endpoints and the SSE `/v1/stream`. Runs a dedicated `LISTEN` connection that picks up the worker's NOTIFYs and fans nudges to its SSE subscribers.
+- **worker** — a pinned singleton (`max=1`, private — no public traffic; `min` follows the infra `event_mode`). Polls the upstream Relic backend (`aoe-api.worldsedgelink.com/community/*`, see [`docs/data-sources.md`](docs/data-sources.md)) on three cadences (30 s / 60 s / 15 s), writes to Postgres, and bumps a per-event row in the tiny `nudge_versions` table inside the same transaction whenever data changes (tagged with the tournaments the cycle touched).
+- **api** — autoscaling read tier (public; scaling driven by the infra `event_mode`). Serves the `/v1/*` REST endpoints and the SSE `/v1/stream`. Each instance polls `nudge_versions` through its pooled engine every couple of seconds and fans nudges out to its local SSE subscribers — no session-pinned `LISTEN` connection anywhere, so DB backends stay decoupled from instance count.
 
 ```
    Relic backend (upstream)
@@ -43,22 +43,22 @@ Two Cloud Run services share one Postgres database and one container image, diff
              │ poll
              │
    ┌─────────┴────────┐
-   │ worker service   │   singleton; writes + pg_notify
+   │ worker service   │   singleton; writes + nudge bump
    │ (private,        │
    │  min=max=1)      │
    └─────────┬────────┘
-             │ write + pg_notify (in transaction)
+             │ write + nudge bump (in transaction)
              ▼
    ┌──────────────────┐
    │     Postgres     │
    │   (snapshot)     │
    └─────────┬────────┘
-             │ read + LISTEN
+             │ read + poll nudge_versions
              ▼
    ┌──────────────────┐
    │   api service    │   autoscaled; serves /v1/* + SSE
    │ (public,         │
-   │  min=1 max=10)   │
+   │  autoscaled)     │
    └─────────┬────────┘
              │ /v1/* + SSE nudges
              ▼
@@ -159,8 +159,8 @@ The reserved slug `current` resolves to the most recently started tournament (la
 
 The management API lets a tournament host edit configuration without a redeploy. Every write route is gated — see [Authentication](#authentication). Writes accept an optional `Idempotency-Key: <uuid>` header to dedupe retries (same key + same body → cached response).
 
-- `POST /v1/tournaments` — create a tournament. Any authenticated user may; the caller becomes the first owner. `DELETE /v1/tournaments/{slug}` — delete the tournament and everything tournament-scoped (cascades to roster, teams, owners).
-- `PATCH /v1/tournaments/{slug}` — edit a tournament's name, dates, or leaderboard
+- `POST /v1/tournaments` — create a tournament. Creation is invite-gated: the caller must be on the operator-approved creator allowlist (`tournament_creators`; `GET /v1/me` exposes `can_create_tournaments`), and becomes the first owner. `DELETE /v1/tournaments/{slug}` — delete the tournament and everything tournament-scoped (cascades to roster, teams, owners).
+- `PATCH /v1/tournaments/{slug}` — edit a tournament's name, dates, leaderboard, rank metric (`rank_by`), prize pool, host stream URLs, or presentation bag
 - `GET /v1/tournaments/{slug}/owners` — list owners; `POST` to grant ownership to another criticalbit user; `DELETE .../owners/{user_id}` to revoke. Revoking the last owner is rejected (the tournament would become uneditable).
 - `POST /v1/tournaments/{slug}/players` — add a profile to the roster; `DELETE .../players/{profile_id}` — remove one
 - `POST /v1/tournaments/{slug}/teams` — create a team; `PATCH` / `DELETE .../teams/{team_id}` — edit or delete one
@@ -175,7 +175,7 @@ Reads are public. The write/management API is authenticated against [criticalbit
 - **Authentication** — a write request must carry a valid `criticalbit_access` cookie (an RS256 JWT issued by criticalbit-auth-api). The API verifies it against that service's public JWKS endpoint (`AUTH_JWKS_URL`); a missing or invalid token is a `401`.
 - **Authorization** — a verified token identifies a criticalbit user. To edit a tournament, that user must have a row in this service's `tournament_owners` table for it, or the request is a `403`. Ownership is per-tournament and modelled here — not in the auth service, which deliberately stays free of app-specific roles.
 
-Owner rows are inserted directly (SQL) for now; an API to grant and revoke ownership is planned. A roster edited through this API is picked up by the polling worker on its next cycle, with no redeploy.
+Ownership is granted and revoked through the owners API above. Tournament *creation* has one extra gate: an operator-managed `tournament_creators` allowlist (rows inserted out-of-band — approval is a human decision, and the platform deliberately has no admin role to automate it). A roster edited through this API is picked up by the polling worker on its next cycle, with no redeploy.
 
 ## Consuming the API from Your Own Frontend
 
@@ -348,7 +348,7 @@ aoe2-live-standings-api/
 | `SENTRY_DSN`             | Optional | Sentry project DSN. Empty disables Sentry init entirely | (empty)                                                              |
 | `FEATURE_*`              | Optional | Feature flags (e.g. `FEATURE_ERROR_ENVELOPE_V2=true`) | (none)                                                                  |
 | `POLLING_ENABLED`        | Optional | Start the three upstream pollers in this process (worker service) | `true`                                                  |
-| `LISTENER_ENABLED`       | Optional | Start the LISTEN/NOTIFY consumer in this process (api service)    | `true`                                                  |
+| `LISTENER_ENABLED`       | Optional | Start the nudge poll loop + SSE fan-out in this process (api service) | `true`                                                  |
 | `UPSTREAM_BASE_URL`      | Optional | Relic upstream base URL                           | `https://aoe-api.worldsedgelink.com`                                        |
 | `AUTH_JWKS_URL`          | Optional | JWKS endpoint used to verify the write API's access tokens | `https://auth-api.criticalbit.gg/auth/jwks` |
 | `AUTH_TOKEN_ISSUER`      | Optional | Expected JWT `iss` claim; when set, tokens with a different issuer are rejected | (empty — issuer not checked) |
