@@ -4031,8 +4031,16 @@ class TestStandingsHistory:
         # P1 leads the opening bucket (P2 hasn't played); by the end P2's peak
         # (1540) overtakes P1's (1520) — a real shift captured in between.
         assert by_profile[1]["points"][0]["position"] == 1
-        assert by_profile[1]["points"][-1] == {"position": 2, "peak_rating": 1520, "current_rating": None}
-        assert by_profile[2]["points"][-1] == {"position": 1, "peak_rating": 1540, "current_rating": None}
+        assert by_profile[1]["points"][-1] == {
+            "position": 2,
+            "peak_rating": 1520,
+            "current_rating": None,
+        }
+        assert by_profile[2]["points"][-1] == {
+            "position": 1,
+            "peak_rating": 1540,
+            "current_rating": None,
+        }
         assert body["last_polled_at"] is not None
         assert body["teams"] == []
         # Each series is self-describing — it carries its display name, so the
@@ -4114,8 +4122,16 @@ class TestStandingsHistory:
         by_profile = {p["profile_id"]: p for p in body["players"]}
         # P1 stays ahead on peak (1600) despite dropping to a lower current
         # rating than P2 — position is by peak, not current.
-        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1600, "current_rating": None}
-        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1500, "current_rating": None}
+        assert by_profile[1]["points"][-1] == {
+            "position": 1,
+            "peak_rating": 1600,
+            "current_rating": None,
+        }
+        assert by_profile[2]["points"][-1] == {
+            "position": 2,
+            "peak_rating": 1500,
+            "current_rating": None,
+        }
 
     async def test_past_bucket_unchanged_by_later_peak(
         self, client: AsyncClient, session: AsyncSession
@@ -4221,8 +4237,16 @@ class TestStandingsHistory:
         alpha_id = tournament.teams[0].id
         bravo_id = tournament.teams[1].id
         # Final bucket: Alpha 1500+1600=3100 (pos1); Bravo 2000 (pos2).
-        assert teams[alpha_id]["points"][-1] == {"position": 1, "combined_peak_elo": 3100, "combined_current_elo": None}
-        assert teams[bravo_id]["points"][-1] == {"position": 2, "combined_peak_elo": 2000, "combined_current_elo": None}
+        assert teams[alpha_id]["points"][-1] == {
+            "position": 1,
+            "combined_peak_elo": 3100,
+            "combined_current_elo": None,
+        }
+        assert teams[bravo_id]["points"][-1] == {
+            "position": 2,
+            "combined_peak_elo": 2000,
+            "combined_current_elo": None,
+        }
         # Each team series carries its display strings (same shape as
         # StandingTeam), so the FE legend needs no /teams/standings join.
         assert (teams[alpha_id]["name"], teams[alpha_id]["initials"]) == ("Alpha", "ALPHA")
@@ -4303,8 +4327,16 @@ class TestStandingsHistory:
         }
         # By peak P1 (1268) > P2 (1208); by in-event rating P2 (1190) would have
         # outranked P1 (1186) — the disagreement this fixes.
-        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 1268, "current_rating": None}
-        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": 1208, "current_rating": None}
+        assert by_profile[1]["points"][-1] == {
+            "position": 1,
+            "peak_rating": 1268,
+            "current_rating": None,
+        }
+        assert by_profile[2]["points"][-1] == {
+            "position": 2,
+            "peak_rating": 1208,
+            "current_rating": None,
+        }
 
     async def test_in_event_peak_climbs_from_pre_event_baseline_not_current_max(
         self, client: AsyncClient, session: AsyncSession
@@ -4744,8 +4776,16 @@ class TestStandingsHistory:
             p["profile_id"]: p
             for p in (await client.get("/v1/tournaments/cup/standings/history")).json()["players"]
         }
-        assert by_profile[1]["points"][-1] == {"position": 1, "peak_rating": 2000, "current_rating": None}
-        assert by_profile[2]["points"][-1] == {"position": 2, "peak_rating": None, "current_rating": None}
+        assert by_profile[1]["points"][-1] == {
+            "position": 1,
+            "peak_rating": 2000,
+            "current_rating": None,
+        }
+        assert by_profile[2]["points"][-1] == {
+            "position": 2,
+            "peak_rating": None,
+            "current_rating": None,
+        }
 
     async def test_entity_set_matches_standings_excludes_linked_unpolled(
         self, client: AsyncClient, session: AsyncSession
