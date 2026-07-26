@@ -16,6 +16,7 @@ from app.features import router as features_router
 from app.limiting import limiter
 from app.logging import setup_logging
 from app.middleware.idempotency import IdempotencyMiddleware
+from app.middleware.open_cors import PublicReadCORSMiddleware
 from app.poller.lifespan import lifespan
 from app.routers import (
     civilizations_router,
@@ -73,6 +74,14 @@ app.add_middleware(
     # write from a browser fails at preflight.
     allow_headers=["Content-Type", "Idempotency-Key"],
 )
+
+# The second CORS posture (#297): third-party frontends get open,
+# credential-less read access (`Access-Control-Allow-Origin: *`) on the
+# public /v1 GETs, while the credentialed first-party posture above keeps
+# the write/management surface (and /v1/me) criticalbit-only. Added AFTER
+# CORSMiddleware so it wraps it and defers to any allow-origin the
+# first-party posture already set. See app/middleware/open_cors.py.
+app.add_middleware(PublicReadCORSMiddleware)
 
 # `default_limits` on the limiter applies to every route that isn't
 # decorated with its own `@limiter.limit(...)` or marked `@limiter.exempt`.
