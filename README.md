@@ -184,6 +184,7 @@ The read surface is public, and third-party frontends are welcome to build on it
 - **Server-side callers** (SSR, bots, overlays rendered through a proxy) need no configuration — every `GET /v1/*` read is unauthenticated.
 - **Browser-based apps** need their origin allowed for CORS: the deployment's operator adds it to the `CORS_ORIGINS` env var (comma-separated). Contact the operator of the deployment you're targeting to have an origin added.
 - The SSE stream (`GET /v1/stream`) works cross-origin under the same rule — `EventSource` sends no custom headers, so no preflight is involved.
+- Each nudge's payload carries `tournament_ids`: `null` means every subscriber should refetch; a list means only clients watching one of those tournaments need to. Filtering on it is optional — ignoring the field just costs wasted refetches.
 - Reads are CDN-cached (`s-maxage=15`): prefer reacting to SSE nudges over aggressive polling timers.
 
 The **write/management API is first-party only**. It authenticates with the operator's SSO cookie, and credentialed cross-origin access is deliberately restricted to the operator's own origins — tournament organizers manage tournaments through the platform's management UI, not through third-party apps.

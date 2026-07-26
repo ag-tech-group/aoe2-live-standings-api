@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import JSON, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -35,3 +35,10 @@ class NudgeVersion(Base):
 
     # Bumped to now() on each emit; the api compares against its last-seen value.
     polled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # Which tournaments this nudge concerns (#293) — the emitting tick's
+    # scope, carried into the SSE payload so a client watching one
+    # tournament can skip refetches another tournament's poll caused.
+    # NULL = unscoped ("all tournaments"): pre-#293 rows, old revisions
+    # mid-rollover, and any emit that can't cheaply resolve a scope.
+    tournament_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)

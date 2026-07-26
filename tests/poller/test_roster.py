@@ -6,6 +6,7 @@ from app.models import Tournament, TournamentPlayer
 from app.poller.roster import (
     get_host_stream_urls_by_tournament,
     get_stream_urls_by_roster_row,
+    get_tournament_ids_for_profiles,
     get_tracked_profile_ids,
 )
 
@@ -30,6 +31,31 @@ class TestGetTrackedProfileIds:
 
     async def test_empty_when_no_tournaments(self, session: AsyncSession):
         assert await get_tracked_profile_ids(session) == []
+
+
+class TestGetTournamentIdsForProfiles:
+    async def test_maps_profiles_to_their_tournaments(self, session: AsyncSession):
+        # Profile 2 sits on both rosters; profile 9 only on the second.
+        first = Tournament(slug="a", name="A", leaderboard_id=3)
+        first.tracked_players = [
+            TournamentPlayer(profile_id=1, name="p1"),
+            TournamentPlayer(profile_id=2, name="p2"),
+        ]
+        second = Tournament(slug="b", name="B", leaderboard_id=4)
+        second.tracked_players = [
+            TournamentPlayer(profile_id=2, name="p2"),
+            TournamentPlayer(profile_id=9, name="p9"),
+        ]
+        session.add_all([first, second])
+        await session.commit()
+
+        assert await get_tournament_ids_for_profiles(session, {1}) == [first.id]
+        assert await get_tournament_ids_for_profiles(session, {2}) == sorted([first.id, second.id])
+        assert await get_tournament_ids_for_profiles(session, {9, 999}) == [second.id]
+
+    async def test_empty_input_and_unknown_profiles_yield_empty(self, session: AsyncSession):
+        assert await get_tournament_ids_for_profiles(session, set()) == []
+        assert await get_tournament_ids_for_profiles(session, {42}) == []
 
 
 class TestGetStreamUrlsByRosterRow:

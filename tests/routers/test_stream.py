@@ -40,6 +40,17 @@ class TestFormatNudge:
         assert "data: " in frame
         assert frame.endswith("\n\n")
         assert "2026-05-20T12:00:00+00:00" in frame
+        # Unscoped nudge: tournament_ids is null (pre-#293 compatible).
+        assert '"tournament_ids": null' in frame
+
+    def test_scoped_nudge_carries_tournament_ids(self):
+        nudge = Nudge(
+            event=EventType.LIVE,
+            polled_at=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            tournament_ids=(3, 7),
+        )
+        frame = _format_nudge(nudge)
+        assert '"tournament_ids": [3, 7]' in frame
 
 
 class TestStreamRouteRegistered:

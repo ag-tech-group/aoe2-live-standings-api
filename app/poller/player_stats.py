@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.events import EventType, emit_nudge
 from app.poller.parsers import parse_player_stats
-from app.poller.roster import get_tracked_profile_ids
+from app.poller.roster import get_tournament_ids_for_profiles, get_tracked_profile_ids
 from app.poller.upserts import insert_rating_snapshots, upsert_player, upsert_player_rating
 
 logger = structlog.get_logger(__name__)
@@ -63,8 +63,13 @@ async def tick_player_stats(
         # Player ratings drive the standings — emit a NOTIFY so SSE
         # subscribers on every read-tier instance get a refetch nudge.
         # Queued inside the transaction so a rolled-back write doesn't
-        # fire a phantom nudge.
-        await emit_nudge(session, EventType.STANDINGS)
+        # fire a phantom nudge. Scoped (#293) to the tournaments whose
+        # rosters contain the polled batch — with the batch being the
+        # cross-tournament union, that is every tournament with a linked
+        # tracked entrant; tournaments with empty/unlinked rosters stop
+        # waking clients.
+        scope = await get_tournament_ids_for_profiles(session, set(profile_ids))
+        await emit_nudge(session, EventType.STANDINGS, tournament_ids=scope)
         await session.commit()
     logger.info(
         "poll_player_stats_ok",

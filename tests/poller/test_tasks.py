@@ -22,6 +22,7 @@ from app.models import (
     Match,
     MatchPlayer,
     MatchState,
+    NudgeVersion,
     Player,
     PlayerRating,
 )
@@ -31,7 +32,7 @@ from app.poller.parsers import DEFAULT_MATCHTYPE_TO_LEADERBOARD
 from app.poller.player_stats import tick_player_stats
 from app.poller.recent_matches import tick_recent_matches
 from tests.conftest import async_session_maker as session_maker_for_tasks
-from tests.conftest import make_match
+from tests.conftest import make_match, make_tournament
 
 _TEST_BASE_URL = "https://upstream.test"
 
@@ -95,6 +96,29 @@ class TestTickPlayerStats:
         rating = (await session.execute(select(PlayerRating))).scalar_one()
         assert rating.current_rating == 2788
         assert rating.rank == 1
+
+    async def test_nudge_is_scoped_to_the_profiles_tournaments(
+        self, upstream_client: httpx.AsyncClient, session: AsyncSession
+    ):
+        # (#293) Two tournaments; only the first rosters the polled profile —
+        # the standings nudge must carry exactly that tournament's id, so a
+        # client watching the second doesn't refetch for this cycle.
+        rostered = make_tournament("cup", profile_ids=[199325], leaderboard_id=3)
+        bystander = make_tournament("other", profile_ids=[999], leaderboard_id=3)
+        session.add_all([rostered, bystander])
+        await session.commit()
+
+        payload = {
+            "statGroups": [{"id": 1, "members": [{"profile_id": 199325, "alias": "Hera"}]}],
+            "leaderboardStats": [{"statgroup_id": 1, "leaderboard_id": 3, "rating": 2788}],
+        }
+        with respx.mock(base_url=_TEST_BASE_URL) as mock:
+            mock.get("/community/leaderboard/GetPersonalStat").respond(json=payload)
+            await tick_player_stats(upstream_client, [199325], session_maker_for_tasks)
+
+        row = (await session.execute(select(NudgeVersion))).scalar_one()
+        assert row.event == "standings"
+        assert row.tournament_ids == [rostered.id]
 
     async def test_skips_upstream_when_no_tracked_profiles(
         self, upstream_client: httpx.AsyncClient

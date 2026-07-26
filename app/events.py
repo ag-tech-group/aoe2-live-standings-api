@@ -61,10 +61,17 @@ class EventType(StrEnum):
 
 @dataclass(frozen=True)
 class Nudge:
-    """A single SSE nudge: which slice changed, and when it was polled."""
+    """A single SSE nudge: which slice changed, when, and for which tournaments.
+
+    ``tournament_ids`` (#293) scopes the nudge: ``None`` means unscoped —
+    every subscriber should refetch (the pre-#293 behavior and the safe
+    fallback); a tuple means only clients watching one of those tournaments
+    need to. Carried as a tuple so the dataclass stays hashable/frozen.
+    """
 
     event: EventType
     polled_at: datetime
+    tournament_ids: tuple[int, ...] | None = None
 
 
 class EventHub:
@@ -83,15 +90,25 @@ class EventHub:
         """Drop a subscriber (called when its SSE connection closes)."""
         self._subscribers.discard(queue)
 
-    def publish(self, event: EventType, polled_at: datetime | None = None) -> None:
+    def publish(
+        self,
+        event: EventType,
+        polled_at: datetime | None = None,
+        tournament_ids: tuple[int, ...] | None = None,
+    ) -> None:
         """Fan a nudge out to every current subscriber.
 
         Called by the poll loop for each event whose ``polled_at`` advanced.
         ``polled_at`` is the timestamp the worker stamped; if omitted (e.g. in
         tests that call ``publish`` directly to exercise the hub in isolation),
-        falls back to ``now()``.
+        falls back to ``now()``. ``tournament_ids`` is the worker-recorded
+        scope (#293), passed through to the SSE payload verbatim.
         """
-        nudge = Nudge(event=event, polled_at=polled_at or datetime.now(tz=UTC))
+        nudge = Nudge(
+            event=event,
+            polled_at=polled_at or datetime.now(tz=UTC),
+            tournament_ids=tournament_ids,
+        )
         for queue in self._subscribers:
             try:
                 queue.put_nowait(nudge)
@@ -129,7 +146,11 @@ async def sample_subscriber_count(event_hub: EventHub) -> None:
         logger.info("sse_subscriber_count", count=event_hub.subscriber_count)
 
 
-async def emit_nudge(session: AsyncSession, event: EventType) -> None:
+async def emit_nudge(
+    session: AsyncSession,
+    event: EventType,
+    tournament_ids: list[int] | None = None,
+) -> None:
     """Advance this event's nudge version inside the session's transaction.
 
     Bumps ``nudge_versions.polled_at`` to ``now()`` for ``event``; the write is
@@ -139,13 +160,20 @@ async def emit_nudge(session: AsyncSession, event: EventType) -> None:
     Read-modify-write works on every dialect (the unit tests' SQLite included);
     the worker is a singleton emitting one row per event type, so there's no
     same-row contention to need a dialect-specific UPSERT.
+
+    ``tournament_ids`` (#293) records which tournaments the emitting tick's
+    write concerns — stored on the row and carried into the SSE payload.
+    ``None`` (or empty) stores NULL = unscoped, the safe "everyone refetch"
+    default. Deduped + sorted so the stored value is deterministic.
     """
     now = datetime.now(tz=UTC)
+    scope = sorted(set(tournament_ids)) if tournament_ids else None
     row = await session.get(NudgeVersion, event.value)
     if row is None:
-        session.add(NudgeVersion(event=event.value, polled_at=now))
+        session.add(NudgeVersion(event=event.value, polled_at=now, tournament_ids=scope))
     else:
         row.polled_at = now
+        row.tournament_ids = scope
 
 
 async def poll_for_nudges(session_maker: async_sessionmaker[AsyncSession]) -> None:
@@ -171,7 +199,15 @@ async def poll_for_nudges(session_maker: async_sessionmaker[AsyncSession]) -> No
                     continue
                 if previous is None or row.polled_at > previous:
                     try:
-                        hub.publish(EventType(row.event), polled_at=row.polled_at)
+                        hub.publish(
+                            EventType(row.event),
+                            polled_at=row.polled_at,
+                            tournament_ids=(
+                                tuple(row.tournament_ids)
+                                if row.tournament_ids is not None
+                                else None
+                            ),
+                        )
                     except ValueError:
                         logger.warning("nudge_unknown_event", event=row.event)
             initialized = True
