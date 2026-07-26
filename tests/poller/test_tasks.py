@@ -309,10 +309,25 @@ class TestLoadLeaderboards:
     async def test_populates_db_and_returns_matchtype_map(
         self, upstream_client: httpx.AsyncClient, session: AsyncSession
     ):
+        # Live payload shape (2026-07-25, #292): matchtype ids live in
+        # `leaderboardmap`, names use the SOLO_/TEAM_ taxonomy.
         payload = {
             "leaderboards": [
-                {"id": 3, "name": "1v1 RM Ranked", "isranked": 1, "matchtypes": [6]},
-                {"id": 4, "name": "Team RM Ranked", "isranked": 1, "matchtypes": [7, 8]},
+                {
+                    "id": 3,
+                    "name": "SOLO_RM_RANKED",
+                    "isranked": 1,
+                    "leaderboardmap": [{"matchtype_id": 6, "statgroup_type": 1}],
+                },
+                {
+                    "id": 4,
+                    "name": "TEAM_RM_RANKED",
+                    "isranked": 1,
+                    "leaderboardmap": [
+                        {"matchtype_id": 7, "statgroup_type": 1},
+                        {"matchtype_id": 8, "statgroup_type": 1},
+                    ],
+                },
             ],
             "races": [
                 {"id": 7, "name": "Burgundians"},
@@ -325,7 +340,9 @@ class TestLoadLeaderboards:
 
         rows = (await session.execute(select(Leaderboard))).scalars().all()
         assert {lb.leaderboard_id for lb in rows} == {3, 4}
-        assert mapping == {6: 3, 7: 4, 8: 4}
+        # Upstream merges over the floor: payload entries win, the rest of
+        # the verified ranked-ladder floor stays mapped.
+        assert mapping == {**DEFAULT_MATCHTYPE_TO_LEADERBOARD, 6: 3, 7: 4, 8: 4}
         # Civilizations from the same payload's `races` are upserted too (#227).
         civs = (await session.execute(select(Civilization))).scalars().all()
         assert {(c.civilization_id, c.name) for c in civs} == {(7, "Burgundians"), (0, "Armenians")}
@@ -391,7 +408,7 @@ class TestRunLeaderboardsLoader:
         with pytest.raises(asyncio.CancelledError):
             await run_leaderboards_loader(upstream_client, session_maker_for_tasks, matchtype_map)
 
-        assert matchtype_map == {6: 3, 7: 3, 8: 4}
+        assert matchtype_map == {**DEFAULT_MATCHTYPE_TO_LEADERBOARD, 6: 3, 7: 3, 8: 4}
 
     async def test_load_failure_keeps_floor_and_survives(
         self, upstream_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch

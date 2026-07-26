@@ -484,20 +484,50 @@ class TestParseLiveAdvertisements:
 
 
 class TestParseAvailableLeaderboards:
-    def test_basic_extraction(self):
+    def test_extracts_from_leaderboardmap(self):
+        # The live payload shape (verified 2026-07-25, #292): matchtype ids
+        # live in `leaderboardmap` and there is no `matchtypes` key at all.
         payload = {
             "leaderboards": [
-                {"id": 3, "name": "1v1 RM Ranked", "isranked": 1, "matchtypes": [6]},
+                {
+                    "id": 3,
+                    "name": "SOLO_RM_RANKED",
+                    "isranked": 1,
+                    "leaderboardmap": [
+                        {"matchtype_id": 6, "statgroup_type": 1, "civilization_id": -1}
+                    ],
+                },
+                {
+                    "id": 4,
+                    "name": "TEAM_RM_RANKED",
+                    "isranked": 1,
+                    "leaderboardmap": [
+                        {"matchtype_id": 7, "statgroup_type": 1},
+                        {"matchtype_id": 8, "statgroup_type": 1},
+                        {"matchtype_id": 9, "statgroup_type": 1},
+                    ],
+                },
                 {"id": 99, "name": "Custom POM", "isranked": 0},
             ]
         }
         items = parse_available_leaderboards(payload)
-        assert [i["leaderboard_id"] for i in items] == [3, 99]
+        assert [i["leaderboard_id"] for i in items] == [3, 4, 99]
         assert items[0]["is_ranked"] is True
-        assert items[1]["is_ranked"] is False
         assert items[0]["matchtypes"] == [6]
-        # Missing matchtypes in the upstream payload defaults to [].
-        assert items[1]["matchtypes"] == []
+        assert items[1]["matchtypes"] == [7, 8, 9]
+        # Neither key present defaults to [].
+        assert items[2]["matchtypes"] == []
+
+    def test_legacy_matchtypes_key_still_parses(self):
+        # Pre-2026-06 captures/fixtures carried a flat `matchtypes` list —
+        # kept as the fallback read (#292).
+        payload = {
+            "leaderboards": [
+                {"id": 3, "name": "1v1 RM Ranked", "isranked": 1, "matchtypes": [6]},
+            ]
+        }
+        items = parse_available_leaderboards(payload)
+        assert items[0]["matchtypes"] == [6]
 
 
 class TestParseRaces:
@@ -626,6 +656,22 @@ class TestParseMatchPlayerCiv:
 
 
 class TestMatchtypeToLeaderboardMap:
+    def test_flattens_leaderboardmap_entries(self):
+        # Live payload shape (#292).
+        payload = {
+            "leaderboards": [
+                {"id": 3, "leaderboardmap": [{"matchtype_id": 6, "statgroup_type": 1}]},
+                {
+                    "id": 4,
+                    "leaderboardmap": [
+                        {"matchtype_id": 7, "statgroup_type": 1},
+                        {"matchtype_id": 8, "statgroup_type": 1},
+                    ],
+                },
+            ]
+        }
+        assert matchtype_to_leaderboard_map(payload) == {6: 3, 7: 4, 8: 4}
+
     def test_flattens_int_matchtype_lists(self):
         payload = {
             "leaderboards": [

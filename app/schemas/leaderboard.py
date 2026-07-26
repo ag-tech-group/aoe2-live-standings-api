@@ -41,14 +41,37 @@ class CivilizationRead(BaseModel):
     name: str
 
 
+class MatchupOpponent(BaseModel):
+    """One opposing player in a recent matchup (#292).
+
+    The per-opponent shape backing ``RecentMatchup.opponents`` — a 1-element
+    list on a 1v1 board, one entry per opposing player on a team board.
+    Identity resolution mirrors the legacy scalar opponent fields: a fellow
+    entrant carries their roster ``tournament_player_id`` + tournament
+    display label (the consumer's highlight/link cue), any other ladder
+    player their polled alias (null until it's been observed).
+    """
+
+    profile_id: int
+    # Set ONLY when this opponent is on the same tournament's roster.
+    tournament_player_id: int | None
+    name: str | None
+    civilization_id: int | None
+    civilization_name: str | None
+
+
 class RecentMatchup(BaseModel):
     """One recent in-window game with its civ matchup, for a standings tooltip.
 
     Carried newest-first in ``TournamentRecord.recent_matchups`` (#218): the
-    game's ``outcome`` plus the entrant's civ and — on a 1v1 leaderboard —
-    the opposing player's civ, so the consumer can render a "<your civ> vs
-    <their civ>" tooltip on each recent-result icon. The consumer maps civ
-    ids to names/emblems.
+    game's ``outcome`` plus the entrant's civ and the opposing players, so
+    the consumer can render a "<your civ> vs <their civ(s)>" tooltip on each
+    recent-result icon. ``opponents`` (#292) carries every opposing player —
+    one entry on a 1v1 board, N on a team board; the legacy scalar
+    ``opponent_*`` fields remain and describe the single opponent when there
+    is exactly one (their pre-#292 1v1 behavior, null otherwise), so
+    existing consumers keep working unchanged. The consumer maps civ ids to
+    names/emblems.
     """
 
     outcome: MatchOutcome
@@ -58,9 +81,13 @@ class RecentMatchup(BaseModel):
     # reference; null when the id isn't in the reference yet (a brand-new civ
     # before the next refresh, or the missing-civ sentinel).
     civilization_name: str | None
-    # The opposing player's civilization on a 1v1 leaderboard. Null when no
-    # single opponent resolves — the leaderboard isn't 1v1, or the match
-    # record carries no opposing-team row.
+    # Every opposing player in this game (#292): one entry on a 1v1 board,
+    # one per opposing player on a team board; empty when the match record
+    # carries no opposing-team rows. Ordered by profile_id for determinism.
+    opponents: list[MatchupOpponent] = []
+    # The opposing player's civilization when exactly ONE opponent resolves
+    # (a 1v1 game). Null otherwise — a team game (read ``opponents``), or a
+    # match record with no opposing-team row.
     opponent_civilization_id: int | None
     # The opponent's civ display name; null when ``opponent_civilization_id``
     # is null or its id isn't in the reference yet.
@@ -515,6 +542,10 @@ class HeadToHeadPlayer(BaseModel):
     tournament_player_id: int
     profile_id: int
     name: str
+    # Which side of the match this entrant was on (#292) — lets the consumer
+    # group rostered allies vs. opponents on a team-board game. On a 1v1
+    # board the two entrants simply carry different ids.
+    team_id: int | None = None
     civilization_id: int
     civilization_name: str | None
     old_rating: int | None

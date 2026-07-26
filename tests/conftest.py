@@ -247,10 +247,10 @@ def make_player_rating_snapshot(
 
 
 def make_leaderboard(leaderboard_id: int, **overrides: Any) -> Leaderboard:
-    """Build a Leaderboard metadata row with ranked-1v1-RM-shaped defaults."""
+    """Build a Leaderboard metadata row with live-payload SOLO-RM-shaped defaults."""
     defaults: dict[str, Any] = {
         "leaderboard_id": leaderboard_id,
-        "name": "1v1 RM Ranked",
+        "name": "SOLO_RM_RANKED",
         "is_ranked": True,
         "matchtypes": [6],
     }
@@ -271,12 +271,12 @@ async def seed_tournament_creator(session: AsyncSession) -> None:
 
 
 @pytest.fixture
-async def seed_ranked_1v1_leaderboard(session: AsyncSession) -> None:
-    """Insert the ranked-1v1 leaderboard row (id 3) the write-path guard checks.
+async def seed_supported_leaderboard(session: AsyncSession) -> None:
+    """Insert the ranked SOLO_RM row (id 3) the write-path guard checks.
 
     ``POST /v1/tournaments`` and leaderboard-changing ``PATCH``es refuse
-    ids that aren't known ranked 1v1 ladders (#291), so write-path tests
-    seed this row; read-path tests never need it.
+    ids outside the supported ranked-ladder allowlist (#291/#292), so
+    write-path tests seed this row; read-path tests never need it.
     """
     session.add(make_leaderboard(3))
     await session.commit()

@@ -18,7 +18,7 @@ from typing import NamedTuple
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import Row, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased, selectinload
+from sqlalchemy.orm import selectinload
 
 from app.audit import AuditAction, audit
 from app.auth import get_current_user_id, require_tournament_owner
@@ -55,6 +55,7 @@ from app.schemas import (
     HeadToHeadMatch,
     HeadToHeadPlayer,
     ListEnvelope,
+    MatchupOpponent,
     PlayerCivStats,
     PlayerProgression,
     PlayerStandingHistory,
@@ -189,24 +190,33 @@ async def list_tournaments(
     return [_serialize_tournament(t, live_hosts) for t in tournaments]
 
 
-async def _require_ranked_1v1_leaderboard(session: AsyncSession, leaderboard_id: int) -> None:
-    """422 unless ``leaderboard_id`` is a known ranked 1v1 ladder.
+# Ladders a tournament may track (#291/#292) — the six classic ranked solo
+# and team boards, transcribed from the live ``getAvailableLeaderboards``
+# payload on 2026-07-25:
+#   1 SOLO_DM_RANKED   2 TEAM_DM_RANKED   3 SOLO_RM_RANKED
+#   4 TEAM_RM_RANKED  13 SOLO_EW_RANKED  14 TEAM_EW_RANKED
+# Deliberately an id allowlist, not a name check: the #302 name-token guard
+# ("1v1" in name) was verified WRONG against live upstream the same week it
+# shipped — real names use the SOLO_/TEAM_ taxonomy, and fixtures had drifted
+# from the payload. Ids have been stable for years and are the join key
+# everything else uses. Excluded until their semantics are verified:
+# SOLO_BR (FFA — breaks every two-team read), CO_* (co-op), POM/RBW customs.
+SUPPORTED_TOURNAMENT_LEADERBOARD_IDS = frozenset({1, 2, 3, 4, 13, 14})
 
-    Only 1v1 ladders produce correct read data end-to-end today: recent-
-    matchup opponent resolution assumes one opponent per match, statgroup
-    parsing reads solo groups only, and the matchtype floor covers 1v1 RM
-    only. A tournament on a team-game ladder wouldn't fail — it would
-    serve subtly wrong matchup data and risk silently empty standings —
-    so the write path refuses honestly instead (#291). Lift this guard
-    when team-game ladder support lands (#292).
 
-    The check derives from the polled ``leaderboards`` metadata rather
-    than a hardcoded id list: upstream names self-describe ("1v1 RM
-    Ranked" vs "Team RM Ranked"), so requiring the "1v1" token plus
-    ``is_ranked`` self-updates with ladder changes and fails closed for
-    exotic ladders (tournament-specific upstream boards, Battle Royale).
-    An unknown id is refused too — on a brand-new deployment that can
-    simply mean the worker hasn't loaded leaderboard metadata yet.
+async def _require_supported_leaderboard(session: AsyncSession, leaderboard_id: int) -> None:
+    """422 unless ``leaderboard_id`` is a known, ranked, supported ladder.
+
+    Supported = the classic ranked solo + team boards
+    (``SUPPORTED_TOURNAMENT_LEADERBOARD_IDS``); solo boards since #291,
+    team boards since #292 (opponents-as-lists, opposing-team head-to-head,
+    per-player TG ratings all verified against live payloads). Exotic
+    boards (Battle Royale's FFA shape, co-op, tournament customs) would
+    serve subtly wrong reads rather than fail, so the write path refuses
+    honestly until each is verified. The row must also exist in the polled
+    ``leaderboards`` metadata — on a brand-new deployment an unknown id
+    can simply mean the worker hasn't loaded leaderboards yet — and be
+    ranked (an unranked board has no ratings for standings to read).
     """
     row = (
         await session.execute(
@@ -222,12 +232,12 @@ async def _require_ranked_1v1_leaderboard(session: AsyncSession, leaderboard_id:
                 "loaded leaderboards yet; retry shortly)"
             ),
         )
-    if not row.is_ranked or "1v1" not in row.name:
+    if not row.is_ranked or leaderboard_id not in SUPPORTED_TOURNAMENT_LEADERBOARD_IDS:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Leaderboard {leaderboard_id} ({row.name}) is not a ranked 1v1 ladder; "
-                "only ranked 1v1 leaderboards are supported"
+                f"Leaderboard {leaderboard_id} ({row.name}) is not a supported tournament "
+                "ladder; supported: the ranked solo and team RM/EW/DM boards"
             ),
         )
 
@@ -252,8 +262,8 @@ async def create_tournament(
     409 if the slug is taken (it is unique across the deployment and how
     consumer URLs route to the right tournament). A competition window
     whose start falls after its end is rejected with 422, as is a
-    ``leaderboard_id`` that isn't a known ranked 1v1 ladder
-    (``_require_ranked_1v1_leaderboard``) or creating past the
+    ``leaderboard_id`` that isn't a supported ranked ladder
+    (``_require_supported_leaderboard``) or creating past the
     per-creator ownership ceiling (``_MAX_OWNED_TOURNAMENTS_PER_CREATOR``).
     """
     approved = (
@@ -296,7 +306,7 @@ async def create_tournament(
             status_code=422,
             detail="start_date must not be after end_date",
         )
-    await _require_ranked_1v1_leaderboard(session, payload.leaderboard_id)
+    await _require_supported_leaderboard(session, payload.leaderboard_id)
 
     existing = (
         await session.execute(select(Tournament.id).where(Tournament.slug == payload.slug))
@@ -355,8 +365,8 @@ async def update_tournament(
     PATCH semantics: only the fields present in the request body change.
     ``start_date`` / ``end_date`` accept ``null`` to clear a bound; a
     competition window whose start falls after its end is rejected with
-    422, as is changing ``leaderboard_id`` to anything that isn't a known
-    ranked 1v1 ladder (``_require_ranked_1v1_leaderboard`` — untouched
+    422, as is changing ``leaderboard_id`` to anything that isn't a supported
+    ranked ladder (``_require_supported_leaderboard`` — untouched
     fields are never re-validated, so existing tournaments are unaffected).
     ``presentation`` replaces the whole bag (read-modify-write, mirroring
     the roster rows' bag). ``slug`` is immutable — it is the key consumer
@@ -364,7 +374,7 @@ async def update_tournament(
     """
     changes = payload.model_dump(exclude_unset=True)
     if "leaderboard_id" in changes:
-        await _require_ranked_1v1_leaderboard(session, changes["leaderboard_id"])
+        await _require_supported_leaderboard(session, changes["leaderboard_id"])
     for field, value in changes.items():
         setattr(tournament, field, value)
 
@@ -680,46 +690,23 @@ async def _tournament_record_by_profile(
     if not profile_ids:
         return records
 
-    # Opponent civ + identity for the recent-matchup tooltip (#218, #349):
-    # correlated scalar subqueries, NOT a join — a join would fan the entrant's
-    # match rows out one-per-opponent and corrupt the counts/streak folded from
-    # the same rows. One opponent per match on a 1v1 leaderboard (this event);
-    # the shared `order_by(opponent.profile_id).limit(1)` makes both subqueries
-    # resolve the *same* opposing row deterministically, so the civ and the
-    # profile_id below always describe one consistent opponent.
-    opponent = aliased(MatchPlayer)
-    opponent_civilization_id = (
-        select(opponent.civilization_id)
-        .where(
-            opponent.match_id == MatchPlayer.match_id,
-            opponent.team_id != MatchPlayer.team_id,
-        )
-        .order_by(opponent.profile_id)
-        .limit(1)
-        .scalar_subquery()
-    )
-    opponent_profile_id = (
-        select(opponent.profile_id)
-        .where(
-            opponent.match_id == MatchPlayer.match_id,
-            opponent.team_id != MatchPlayer.team_id,
-        )
-        .order_by(opponent.profile_id)
-        .limit(1)
-        .scalar_subquery()
-    )
-
+    # One row per (entrant, match) — no opponent join here: a join would fan
+    # the entrant's match rows out one-per-opponent and corrupt the
+    # counts/streak folded from the same rows. Opposing players are fetched
+    # in a second query over just the CAPPED matchups (#292) — replacing the
+    # old `limit(1)` correlated subqueries that silently reported one
+    # arbitrary opponent on team boards.
     stmt = (
         select(
+            MatchPlayer.match_id,
             MatchPlayer.profile_id,
+            MatchPlayer.team_id,
             MatchPlayer.outcome,
             MatchPlayer.new_rating,
             MatchPlayer.civilization_id,
             Match.started_at,
             Match.completed_at,
             Match.map_name,
-            opponent_civilization_id.label("opponent_civilization_id"),
-            opponent_profile_id.label("opponent_profile_id"),
         )
         .join(Match, Match.match_id == MatchPlayer.match_id)
         .where(
@@ -738,19 +725,84 @@ async def _tournament_record_by_profile(
     for row in (await session.execute(stmt)).all():
         rows_by_profile.setdefault(row.profile_id, []).append(row)
 
-    # Resolve the opponent name shown on each capped recent-matchup row (#349).
-    # A fellow entrant resolves to their tournament display label + roster id
-    # (the consumer's highlight/link cue for a streamer-vs-streamer game); any
-    # other ladder opponent resolves to their polled alias. Two small lookups,
-    # keyed only on the opponents that actually surface in the capped window.
+    # Every participant of every capped matchup, one query — the opponents
+    # source (#292). Keyed by match, split by team below; ally rows cost
+    # nothing extra and never surface.
+    capped_match_ids = {
+        row.match_id for rows in rows_by_profile.values() for row in rows[:_RECENT_RESULTS_LIMIT]
+    }
+    participants_by_match: dict[int, list[Row]] = {}
+    if capped_match_ids:
+        participant_rows = (
+            await session.execute(
+                select(
+                    MatchPlayer.match_id,
+                    MatchPlayer.profile_id,
+                    MatchPlayer.team_id,
+                    MatchPlayer.civilization_id,
+                ).where(MatchPlayer.match_id.in_(capped_match_ids))
+            )
+        ).all()
+        for participant in participant_rows:
+            participants_by_match.setdefault(participant.match_id, []).append(participant)
+
+    def _opponents_of(row: Row) -> list[Row]:
+        """The opposing players of one entrant-row's match, profile-id order.
+
+        Opposition = a different ``team_id``. A null ``team_id`` on either
+        side (not seen on ranked boards, defensively handled) counts as
+        opposing — better to over-list than to silently hide a real
+        opponent behind a data gap.
+        """
+        return sorted(
+            (
+                p
+                for p in participants_by_match.get(row.match_id, [])
+                if p.profile_id != row.profile_id
+                and (p.team_id is None or row.team_id is None or p.team_id != row.team_id)
+            ),
+            key=lambda p: p.profile_id,
+        )
+
+    # Resolve the opponent names shown on each capped recent-matchup row
+    # (#349). A fellow entrant resolves to their tournament display label +
+    # roster id (the consumer's highlight/link cue for a streamer-vs-streamer
+    # game); any other ladder opponent resolves to their polled alias. Two
+    # small lookups, keyed only on the opponents that actually surface in the
+    # capped window.
     roster_label = await _roster_label_by_profile(session, tournament.id)
     capped_opponent_ids = {
-        row.opponent_profile_id
+        opponent.profile_id
         for rows in rows_by_profile.values()
         for row in rows[:_RECENT_RESULTS_LIMIT]
-        if row.opponent_profile_id is not None and row.opponent_profile_id not in roster_label
+        for opponent in _opponents_of(row)
+        if opponent.profile_id not in roster_label
     }
     alias_opponents = await _aliases_by_profile(session, capped_opponent_ids)
+
+    def _matchup_opponents(row: Row) -> list[MatchupOpponent]:
+        return [
+            MatchupOpponent(
+                profile_id=opponent.profile_id,
+                tournament_player_id=(
+                    roster_label[opponent.profile_id][0]
+                    if opponent.profile_id in roster_label
+                    else None
+                ),
+                name=(
+                    roster_label[opponent.profile_id][1]
+                    if opponent.profile_id in roster_label
+                    else alias_opponents.get(opponent.profile_id)
+                ),
+                civilization_id=opponent.civilization_id,
+                civilization_name=(
+                    names.get(opponent.civilization_id)
+                    if opponent.civilization_id is not None
+                    else None
+                ),
+            )
+            for opponent in _opponents_of(row)
+        ]
 
     for profile_id, rows in rows_by_profile.items():
         outs = [r.outcome for r in rows]
@@ -777,34 +829,37 @@ async def _tournament_record_by_profile(
             # `rows` is newest-first; row 0's started_at is the latest.
             last_match_at=rows[0].started_at,
             recent_matchups=[
-                RecentMatchup(
-                    outcome=r.outcome,
-                    civilization_id=r.civilization_id,
-                    civilization_name=names.get(r.civilization_id),
-                    opponent_civilization_id=r.opponent_civilization_id,
-                    opponent_civilization_name=(
-                        names.get(r.opponent_civilization_id)
-                        if r.opponent_civilization_id is not None
-                        else None
-                    ),
-                    opponent_profile_id=r.opponent_profile_id,
-                    opponent_tournament_player_id=(
-                        roster_label[r.opponent_profile_id][0]
-                        if r.opponent_profile_id in roster_label
-                        else None
-                    ),
-                    opponent_name=(
-                        roster_label[r.opponent_profile_id][1]
-                        if r.opponent_profile_id in roster_label
-                        else alias_opponents.get(r.opponent_profile_id)
-                    ),
-                    map_name=r.map_name,
-                    completed_at=r.completed_at,
-                )
+                _build_recent_matchup(r, _matchup_opponents(r), names)
                 for r in rows[:_RECENT_RESULTS_LIMIT]
             ],
         )
     return records
+
+
+def _build_recent_matchup(
+    row: Row, opponents: list[MatchupOpponent], names: dict[int, str]
+) -> RecentMatchup:
+    """Assemble one capped matchup row from an entrant row + its opponents.
+
+    ``opponents`` carries every opposing player (#292). The legacy scalar
+    ``opponent_*`` fields keep their pre-#292 1v1 contract: populated iff
+    exactly one opponent resolved, null otherwise (a team game, or a match
+    record with no opposing rows) — so 1v1 consumers are byte-identical.
+    """
+    single = opponents[0] if len(opponents) == 1 else None
+    return RecentMatchup(
+        outcome=row.outcome,
+        civilization_id=row.civilization_id,
+        civilization_name=names.get(row.civilization_id),
+        opponents=opponents,
+        opponent_civilization_id=single.civilization_id if single else None,
+        opponent_civilization_name=single.civilization_name if single else None,
+        opponent_profile_id=single.profile_id if single else None,
+        opponent_tournament_player_id=single.tournament_player_id if single else None,
+        opponent_name=single.name if single else None,
+        map_name=row.map_name,
+        completed_at=row.completed_at,
+    )
 
 
 async def _longest_win_streak_run(
@@ -1854,18 +1909,24 @@ async def get_head_to_head(
         description="Max head-to-head games to return, newest first (1-200, default 50).",
     ),
 ) -> ListEnvelope[HeadToHeadMatch]:
-    """Completed games where two of the tournament's entrants faced each other (#349).
+    """Completed games where the tournament's entrants faced each other (#349).
 
     The streamer-vs-streamer feed: every in-window completed match on the
-    tournament's leaderboard that has two or more linked entrants in it. The
-    "two or more entrants" test is one query's ``HAVING COUNT(DISTINCT …) >= 2``,
-    so — unlike filtering the most-recent-N ``/matches`` list client-side — it
-    can't miss an old head-to-head game buried behind a wall of ladder games.
+    tournament's leaderboard with two or more linked entrants **on opposing
+    sides** — on a team board (#292), rostered entrants who queued as
+    allies don't make a head-to-head, so the test is ``HAVING`` both ≥2
+    distinct rostered entrants *and* ≥2 distinct teams among them (on a 1v1
+    board the two are equivalent). Being one query, it can't miss an old
+    head-to-head game buried behind a wall of ladder games the way
+    filtering the most-recent-N ``/matches`` list client-side would.
 
     Each entry carries the matchup, map, each entrant's civ + elo-going-in +
-    result, and the game's duration; the consumer builds the external match
-    link from ``match_id``. Window is the same ``[start_date, end_date]``
-    bounds as ``tournament_record`` (a null bound is open). Newest game first.
+    result + ``team_id`` (the consumer's ally/opponent grouping cue on team
+    boards), and the game's duration; the consumer builds the external match
+    link from ``match_id``. Only rostered entrants are listed — unrostered
+    allies/opponents stay out of the feed by design. Window is the same
+    ``[start_date, end_date]`` bounds as ``tournament_record`` (a null bound
+    is open). Newest game first.
     """
     apply_live_cache_control(request, response, cdn_seconds=_STANDINGS_CDN_SECONDS)
 
@@ -1890,7 +1951,11 @@ async def get_head_to_head(
     if tournament.end_date is not None:
         candidate_match_ids = candidate_match_ids.where(Match.started_at <= tournament.end_date)
     candidate_match_ids = candidate_match_ids.group_by(MatchPlayer.match_id).having(
-        func.count(func.distinct(MatchPlayer.profile_id)) >= 2
+        func.count(func.distinct(MatchPlayer.profile_id)) >= 2,
+        # Opposing sides required (#292): both aggregates range over the
+        # rostered entrants' rows only (the WHERE above), so this excludes
+        # the team-board game where entrants queued together as allies.
+        func.count(func.distinct(MatchPlayer.team_id)) >= 2,
     )
 
     stmt = (
@@ -1910,6 +1975,7 @@ async def get_head_to_head(
                 tournament_player_id=roster_label[mp.profile_id][0],
                 profile_id=mp.profile_id,
                 name=roster_label[mp.profile_id][1],
+                team_id=mp.team_id,
                 civilization_id=mp.civilization_id,
                 civilization_name=civ_names.get(mp.civilization_id),
                 old_rating=mp.old_rating,

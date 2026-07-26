@@ -47,6 +47,7 @@ The Relic / World's Edge community backend returns rich JSON on simple GET reque
 
 - `GET /community/leaderboard/getAvailableLeaderboards?title=age2`
   Full metadata: leaderboard IDs, match-type IDs (1v1/2v2/3v3/4v4 per game mode), 60+ civilization IDs, regions. Includes 18 ranked-ladder leaderboards (1v1 RM/EW/DM, Team RM/EW/DM, BR, Custom POM) plus four already wired for the Red Bull Wololo tournament — tournament-specific leaderboards are first-class objects in this API.
+  - **Schema drift (verified live 2026-07-25, #292):** each leaderboard entry's matchtype ids now live in `leaderboardmap: [{matchtype_id, statgroup_type, civilization_id}]`; there is **no** `matchtypes` key anymore (its silent disappearance was the real cause of the 2026-06-01 empty-map incident — the parser now reads both shapes). Leaderboard `name` values use the internal `SOLO_*`/`TEAM_*` taxonomy (e.g. `SOLO_RM_RANKED`), *not* display names like "1v1 RM Ranked" — don't key logic on display-name assumptions. Every current ranked board carries `statgroup_type: 1` (solo statgroups — team ladders rate players individually). Top-level `matchTypes[]` names each matchtype (`1V1`/`2V2`/`3V3`/`4V4`/`FFA`).
 
 - `GET /community/leaderboard/GetPersonalStat?title=age2&profile_ids=[199325]`
   Returns:

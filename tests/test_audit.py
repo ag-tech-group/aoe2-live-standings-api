@@ -29,7 +29,7 @@ class TestTournamentAudits:
         session: AsyncSession,
         auth_as,
         audit_events,
-        seed_ranked_1v1_leaderboard,
+        seed_supported_leaderboard,
         seed_tournament_creator,
     ):
         auth_as(DEFAULT_TEST_USER_ID)
