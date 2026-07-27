@@ -78,10 +78,12 @@ class Settings(BaseSettings):
     upstream_base_url: str = "https://aoe-api.worldsedgelink.com"
     polling_enabled: bool = True
 
-    # Whether the LISTEN/NOTIFY listener runs in this process. In prod
-    # the API service has this true and the worker has it false — the
-    # worker writes nudges but has no SSE clients to fan out to. Local
-    # dev defaults both true so a single mono process does everything.
+    # Whether the nudge poll loop (poll_for_nudges) + SSE fan-out run in
+    # this process. In prod the API service has this true and the worker
+    # has it false — the worker bumps nudge_versions but has no SSE
+    # clients to fan out to. Local dev defaults both true so a single
+    # mono process does everything. (The name predates #196's move off
+    # LISTEN/NOTIFY; the env var is deployment contract, so it stays.)
     listener_enabled: bool = True
 
     # Authentication for the write/management API. The read surface stays
