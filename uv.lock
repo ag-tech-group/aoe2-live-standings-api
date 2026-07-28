@@ -187,7 +187,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.18.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },
-    { name = "cloud-sql-python-connector", extras = ["asyncpg"], specifier = ">=1.20.3" },
+    { name = "cloud-sql-python-connector", extras = ["asyncpg"], specifier = ">=1.21.0" },
     { name = "cryptography", specifier = ">=46.0.5" },
     { name = "fastapi", specifier = ">=0.135.0" },
     { name = "httpx", specifier = ">=0.28.1" },
