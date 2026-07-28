@@ -54,7 +54,7 @@ class Match(Base):
         onupdate=func.now(),
     )
 
-    players: Mapped[list["MatchPlayer"]] = relationship(
+    players: Mapped[list[MatchPlayer]] = relationship(
         back_populates="match",
         cascade="all, delete-orphan",
     )

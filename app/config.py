@@ -137,7 +137,7 @@ class Settings(BaseSettings):
         return r"https://([a-z0-9-]+\.)?criticalbit\.gg"
 
     @model_validator(mode="after")
-    def validate_production_settings(self) -> "Settings":
+    def validate_production_settings(self) -> Settings:
         """Fail-loud guard against shipping common misconfig to prod.
 
         Catches the cases where a default placeholder value or a known
