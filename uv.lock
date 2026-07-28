@@ -7,6 +7,12 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+constraints = [
+    { name = "fastapi", specifier = "<0.136" },
+    { name = "starlette", specifier = "<1.0" },
+]
+
 [[package]]
 name = "aiofiles"
 version = "25.1.0"

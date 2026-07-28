@@ -93,6 +93,22 @@ class TestSecurityTxt:
         assert "example.com" not in body
 
 
+class TestGlobalRateLimit:
+    """The Limiter's ``default_limits`` (300/min, enforced by
+    SlowAPIMiddleware) applies to every route without its own
+    ``@limiter.limit`` — the canary for the class of regression where a
+    framework upgrade silently disables middleware enforcement (slowapi
+    issue #281 for fastapi>=0.137)."""
+
+    async def test_default_limit_enforced_on_undecorated_route(self, client: AsyncClient):
+        # GET /v1/tournaments has no explicit @limiter.limit, so it gets the
+        # 300/min default. (Matches `default_limits` in app/limiting.py —
+        # bump both together if that changes.)
+        for _ in range(300):
+            assert (await client.get("/v1/tournaments")).status_code == 200
+        assert (await client.get("/v1/tournaments")).status_code == 429
+
+
 class TestRateLimitExemptions:
     """/health, /, /docs, /.well-known/security.txt are @limiter.exempt — many
     rapid hits (well past the 300/min default) never 429."""
