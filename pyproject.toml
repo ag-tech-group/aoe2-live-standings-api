@@ -69,3 +69,13 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+[tool.uv]
+# FastAPI >=0.137 changed how included routers' routes are resolved, which
+# breaks slowapi's SlowAPIMiddleware enforcement of `default_limits` on
+# undecorated routes mounted via include_router (verified here: the global
+# rate-limit canary fails on 0.140.x and passes on 0.135.x). Known upstream
+# as slowapi issue #281 with fix PR #282; drop this hold once a slowapi
+# release containing that fix ships. Starlette is capped alongside it since
+# slowapi has never been validated against Starlette 1.x.
+constraint-dependencies = ["fastapi<0.136", "starlette<1.0"]
