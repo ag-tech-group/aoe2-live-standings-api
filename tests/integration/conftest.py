@@ -109,7 +109,7 @@ async def setup_database():
 
 
 @pytest.fixture(autouse=True)
-async def clean_postgres_tables(patched_engine) -> AsyncGenerator[None, None]:
+async def clean_postgres_tables(patched_engine) -> AsyncGenerator[None]:
     """TRUNCATE every table before each test so cases start with empty rows.
 
     ``RESTART IDENTITY CASCADE`` keeps the cross-table FKs (matches →
@@ -123,7 +123,7 @@ async def clean_postgres_tables(patched_engine) -> AsyncGenerator[None, None]:
 
 
 @pytest.fixture
-async def pg_session(patched_engine) -> AsyncGenerator[AsyncSession, None]:
+async def pg_session(patched_engine) -> AsyncGenerator[AsyncSession]:
     """An ``AsyncSession`` bound to the testcontainer Postgres."""
     _, session_maker = patched_engine
     async with session_maker() as session:
@@ -131,7 +131,7 @@ async def pg_session(patched_engine) -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest.fixture
-async def pg_client(patched_engine, monkeypatch) -> AsyncGenerator[AsyncClient, None]:
+async def pg_client(patched_engine, monkeypatch) -> AsyncGenerator[AsyncClient]:
     """An httpx ASGI client whose ``get_async_session`` DI hits the container.
 
     ``monkeypatch.setitem`` keeps the override scoped to this test — the

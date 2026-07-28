@@ -23,7 +23,7 @@ class Player(Base):
         onupdate=func.now(),
     )
 
-    ratings: Mapped[list["PlayerRating"]] = relationship(
+    ratings: Mapped[list[PlayerRating]] = relationship(
         back_populates="player",
         cascade="all, delete-orphan",
     )

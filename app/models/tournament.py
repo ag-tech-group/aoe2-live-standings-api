@@ -114,15 +114,15 @@ class Tournament(Base):
         server_default=func.now(),
     )
 
-    tracked_players: Mapped[list["TournamentPlayer"]] = relationship(
+    tracked_players: Mapped[list[TournamentPlayer]] = relationship(
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
-    teams: Mapped[list["Team"]] = relationship(
+    teams: Mapped[list[Team]] = relationship(
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
-    owners: Mapped[list["TournamentOwner"]] = relationship(
+    owners: Mapped[list[TournamentOwner]] = relationship(
         back_populates="tournament",
         cascade="all, delete-orphan",
     )
@@ -169,7 +169,7 @@ class TournamentPlayer(Base):
     tournament: Mapped[Tournament] = relationship(back_populates="tracked_players")
     # Cascade so deleting a roster row clears its team memberships;
     # mirrors the DB-side ON DELETE CASCADE on team_members.
-    team_memberships: Mapped[list["TeamMember"]] = relationship(
+    team_memberships: Mapped[list[TeamMember]] = relationship(
         back_populates="tournament_player",
         cascade="all, delete-orphan",
     )
@@ -276,7 +276,7 @@ class Team(Base):
     initials: Mapped[str] = mapped_column(String(8))
 
     tournament: Mapped[Tournament] = relationship(back_populates="teams")
-    members: Mapped[list["TeamMember"]] = relationship(
+    members: Mapped[list[TeamMember]] = relationship(
         back_populates="team",
         cascade="all, delete-orphan",
     )
